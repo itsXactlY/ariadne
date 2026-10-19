@@ -182,7 +182,8 @@ static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     // Built-in read-only defaults, always allowed; config command_allowlist adds to them.
     static const char* const kDefaultAllow[] = {
         "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "diff", "sort", "uniq",
-        "pwd", "echo", "stat", "file", "du", "df", "ps", "nvidia-smi", "jq", "which"};
+        "pwd", "echo", "stat", "file", "du", "df", "ps", "nvidia-smi", "jq", "which",
+        "free", "uname", "uptime", "date", "whoami", "hostname", "lscpu"};
     std::string tok;
     for (char ch : cmd) { if (ch == ' ' || ch == '\t') break; tok += ch; }
     bool ok = false;
