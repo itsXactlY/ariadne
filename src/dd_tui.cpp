@@ -343,7 +343,13 @@ int main(int argc, char** argv) {
     }
 
     // ---- discover + register the live MCP servers from config ----
-    std::string system_prompt = cfg.get_string("agent.system_prompt");
+    // Takes precedence over the MCP protocol below: live machine state is measured, not recalled.
+    std::string system_prompt =
+        "Tool use: for LIVE state (VRAM/GPU, RAM, disk, processes, files, the running model and its context "
+        "size) call run_terminal or read_file FIRST, e.g. `nvidia-smi --query-gpu=memory.used,memory.total "
+        "--format=csv`, `free -h`, `curl -s http://127.0.0.1:8080/props`. Memory recall is only for past "
+        "decisions and history, never for current measurements.";
+    if (std::string cp = cfg.get_string("agent.system_prompt"); !cp.empty()) system_prompt += "\n\n" + cp;
     std::vector<std::unique_ptr<MCPClient>> mcps;  // stable addresses
     if (const Json* srvs = cfg.get_map("mcp_servers"); srvs && srvs->type == Json::Obj) {
         for (const auto& [srvname, sroot] : srvs->obj) {
