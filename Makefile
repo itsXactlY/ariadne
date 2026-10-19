@@ -37,6 +37,7 @@ URLSAFE := src/tools/url_safety.cpp
 OSVPARSE := src/tools/osv_package_parse.cpp
 ANSI := src/tools/ansi_strip.cpp
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp
+MCP := src/tools/mcp_client.cpp
 DELEG := src/tools/delegation_output_schema.cpp
 PATCH := src/tools/patch_parser.cpp
 FUZZY := src/tools/fuzzy_match.cpp
@@ -58,6 +59,10 @@ build/dd: $(CORE) $(SKILLS) $(TOOLS) src/cli_main.cpp
 
 build/dd_agent: $(CORE) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o build/dd_agent
+
+
+build/dd_tui: $(CORE) $(TOOLS) $(AGENT) $(CONFIG) $(MCP) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(TOOLS) $(AGENT) $(CONFIG) $(MCP) src/dd_tui.cpp -lcurl -o build/dd_tui
 
 build/dd_tests: $(CORE) $(SKILLS) tests/skills_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(SKILLS) tests/skills_test.cpp -o build/dd_tests

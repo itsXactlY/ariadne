@@ -19,6 +19,7 @@
 #include <memory>
 #include <dd/core/message.hpp>
 #include <dd/core/json.hpp>
+#include <functional>
 #include <dd/tools/registry.hpp>
 #include <dd/agent/iteration_budget.hpp>
 
@@ -47,6 +48,11 @@ public:
     bool budget_pressure_enabled = true;
     double budget_warning_threshold = 0.9;
     double budget_caution_threshold = 0.75;
+
+    // Streaming hook: called for every assistant + tool-result message the
+    // loop appends. A TUI sets it to a colored per-step printer; the loop
+    // logic is otherwise untouched.
+    std::function<void(const core::Message&)> step_hook;
 
     // ---- collaborators (not owned) ----
     tools::ToolRegistry* registry = nullptr;

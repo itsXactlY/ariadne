@@ -36,6 +36,26 @@ Config path resolves from `HOME` (→ `~/.daedalus/config.yaml`) unless given as
 
 Output: `[base=... model=... turns=...]` header, then `=== final (N LLM calls) ===` + the assistant's final answer. `read_file`/`write_file`/`list_dir` run real filesystem I/O.
 
+## Full harness kit (`build/dd_tui`)
+
+`build/dd_tui` is the real agentic harness: an ANSI terminal REPL that drives the **same** run loop (`Agent::run`) — no fork of the loop, one `step_hook` added to `agent.hpp`/`agent.cpp` for per-step streaming.
+
+```
+make build/dd_tui
+build/dd_tui                                   # interactive REPL (you> ), config from ~/.daedalus
+build/dd_tui path/to/config.yaml -- "msg"      # single-shot
+```
+
+What it wires in, all **real**:
+- `read_file` / `write_file` / `list_dir` — real filesystem I/O.
+- `run_terminal` — guarded by the config `command_allowlist` (first token must be listed) plus a small deny set (`sudo`, `rm -rf /`, …). It is a guard, **not** a jail — do not treat it as sandboxing.
+- **Every enabled MCP tool, discovered live**: `dd_tui` reads `mcp_servers.*` from config, speaks Streamable-HTTP MCP (JSON-RPC 2.0 over one POST, SSE `data:` responses, session-less), calls `tools/list`, and registers each enabled tool with its real `inputSchema`. The running mazemaker pod yields 34 tools.
+- The MCP server's `initialize` **`instructions`** (the MAZEMAKER MEMORY PROTOCOL — recall-first, persist-after-turn) are appended to `agent.system_prompt`. That is what makes recall-first behavior real, not simulated.
+
+Continuity across REPL turns rides on the external memory graph (the agent re-recalls each turn), which is the protocol's own design — not a persistent in-process transcript.
+
+Verified smoke (`DD_MAX_TURNS=4`, local IQ1 model ~17s/turn + ~22s/recall → wall ≥300s): registers 34 mazemaker tools, the model answers "as required by the memory protocol", issues `mazemaker_recall`, and the round-trip returns live memory (top hit sim 0.54). See `src/tools/mcp.hpp` / `src/tools/mcp_client.cpp` for the transport.
+
 ## libcurl gotcha (bit me once)
 
 libcurl **8.16+** calls the write callback with **four** args — `size_t fn(char* buffer, size_t size, size_t nitems, void* outstream)` (`curl.h:285`) — not the classic three. A 3-param sink reads `nitems` (a byte count) as the userptr → **SIGSEGV**. Correct form appends `nitems` and returns `nitems`:

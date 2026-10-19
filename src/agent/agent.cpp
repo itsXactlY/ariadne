@@ -170,6 +170,7 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
         tm.content = results[i];
         tm.tool_call_id = calls[i].id;
         messages.push_back(tm);
+        if (step_hook) step_hook(tm);
     }
     (void)api_call_count;
 }
@@ -256,6 +257,7 @@ std::string Agent::run(const std::string& user_message) {
             assistant.finish_reason = assistant.has_tool_calls() ? "tool_calls" : "stop";
 
         messages.push_back(assistant);
+        if (step_hook) step_hook(assistant);
 
         if (!assistant.has_tool_calls()) {
             final_response = assistant.content;
