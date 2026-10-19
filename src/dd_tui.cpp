@@ -179,17 +179,20 @@ static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     for (const char* bad : {"sudo ", "rm -rf /", "mkfs", "dd if=", ":(){", "> /dev"}) {
         if (cmd.find(bad) != std::string::npos) return jerr("refused: forbidden token");
     }
-    // Coarse allowlist: first whitespace token must appear in command_allowlist
-    // when that list is configured non-empty.
-    if (const Json* allow = cfg.get_list("command_allowlist");
-        allow && allow->type == Json::Arr && !allow->arr.empty()) {
-        std::string tok;
-        for (char ch : cmd) { if (ch == ' ' || ch == '\t') break; tok += ch; }
-        bool ok = false;
-        for (const auto& sp : allow->arr)
-            if (sp && sp->type == Json::Str && sp->str == tok) { ok = true; break; }
-        if (!ok) return jerr("command '" + tok + "' not in command_allowlist");
+    // Built-in read-only defaults, always allowed; config command_allowlist adds to them.
+    static const char* const kDefaultAllow[] = {
+        "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "diff", "sort", "uniq",
+        "pwd", "echo", "stat", "file", "du", "df", "ps", "nvidia-smi", "jq", "which"};
+    std::string tok;
+    for (char ch : cmd) { if (ch == ' ' || ch == '\t') break; tok += ch; }
+    bool ok = false;
+    for (const char* d : kDefaultAllow) if (tok == d) { ok = true; break; }
+    if (!ok) {
+        if (const Json* allow = cfg.get_list("command_allowlist"); allow && allow->type == Json::Arr)
+            for (const auto& sp : allow->arr)
+                if (sp && sp->type == Json::Str && sp->str == tok) { ok = true; break; }
     }
+    if (!ok) return jerr("command '" + tok + "' not in command_allowlist");
 
     std::string full = cmd + " 2>&1";
     FILE* fp = popen(full.c_str(), "r");
