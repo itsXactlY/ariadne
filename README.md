@@ -48,7 +48,7 @@ build/dd_tui path/to/config.yaml -- "msg"      # single-shot
 
 What it wires in, all **real**:
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
-- `run_terminal` — guarded by the config `command_allowlist` (first token must be listed) plus a small deny set (`sudo`, `rm -rf /`, …). It is a guard, **not** a jail — do not treat it as sandboxing.
+- `run_terminal` — everything is allowed except a denylist (`sudo`, `su`, recursive `rm` on `/`·`~`·`*`, `mkfs`, `dd`, shutdown/reboot, curl-pipe-shell, force-push, …); extra words via config `command_denylist`. It is a guard, **not** a jail — do not treat it as sandboxing.
 - **Every enabled MCP tool, discovered live**: `dd_tui` reads `mcp_servers.*` from config, speaks Streamable-HTTP MCP (JSON-RPC 2.0 over one POST, SSE `data:` responses, session-less), calls `tools/list`, and registers each enabled tool with its real `inputSchema`. The running mazemaker pod yields 34 tools.
 - The MCP server's `initialize` **`instructions`** (the MAZEMAKER MEMORY PROTOCOL — recall-first, persist-after-turn) are appended to `agent.system_prompt`. That is what makes recall-first behavior real, not simulated.
 

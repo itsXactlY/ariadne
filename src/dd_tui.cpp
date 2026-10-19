@@ -3,7 +3,7 @@
 // real OpenAI-compatible endpoint, with REAL tools wired in:
 //
 //   * filesystem tools (read_file / write_file / list_dir) — real I/O
-//   * run_terminal      — guarded by config command_allowlist
+//   * run_terminal      — allowed except a denylist (danger_reason)
 //   * every enabled mazemaker MCP tool — discovered live from the MCP server's
 //     tools/list and dispatched through the Streamable-HTTP MCP client
 //
@@ -27,6 +27,7 @@
 #include "dd/tools/tool.hpp"
 
 #include <curl/curl.h>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -34,6 +35,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -169,31 +171,99 @@ static Json fs_schema(const std::vector<std::string>& props, const std::string& 
                      {"parameters", jsp(std::move(parameters))}});
 }
 
-// ---- guarded shell tool: first-token must be in config command_allowlist ----
+// ---- guarded shell tool: everything allowed except a denylist of dangerous commands ----
+static bool has_recursive_flag(const std::vector<std::string>& t) {
+    for (const auto& a : t) {
+        if (a == "--recursive") return true;
+        if (a.size() > 1 && a[0] == '-' && a[1] != '-' && a.find_first_of("rR") != std::string::npos) return true;
+    }
+    return false;
+}
+
+static bool is_broad_target(const std::string& a) {
+    static const char* const kBroad[] = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "*", ".", "..", "./*",
+        "/home", "/etc", "/usr", "/var", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/root", "/dev", "/sys", "/proc"};
+    for (const char* b : kBroad) if (a == b) return true;
+    return false;
+}
+
+// Returns the reason a command is refused, or "" when it may run.
+static std::string danger_reason(const std::string& cmd, const ddcore::Config& cfg) {
+    for (const char* bad : {":(){", "> /dev/sd", ">/dev/sd", "> /dev/nvme", ">/dev/nvme", "of=/dev/", "--no-preserve-root"})
+        if (cmd.find(bad) != std::string::npos) return std::string("forbidden pattern '") + bad + "'";
+    if ((cmd.find("curl") != std::string::npos || cmd.find("wget") != std::string::npos) &&
+        (cmd.find("| sh") != std::string::npos || cmd.find("|sh") != std::string::npos ||
+         cmd.find("| bash") != std::string::npos || cmd.find("|bash") != std::string::npos))
+        return "piping a download into a shell";
+
+    static const std::set<std::string> kDeny = {
+        "sudo", "su", "doas", "pkexec", "mkswap", "fdisk", "sfdisk", "parted", "wipefs", "shred", "dd",
+        "shutdown", "reboot", "poweroff", "halt", "init", "telinit", "killall5", "passwd", "chpasswd",
+        "visudo", "useradd", "userdel", "usermod", "docker"};
+    static const std::set<std::string> kWrap = {"env", "command", "nohup", "exec", "time", "nice", "xargs",
+        "timeout", "setsid", "stdbuf", "builtin"};
+    std::set<std::string> extra;
+    if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
+        for (const auto& sp : d->arr) if (sp && sp->type == Json::Str) extra.insert(sp->str);
+
+    // Split into simple-command segments on shell separators, then inspect each.
+    std::string flat = cmd;
+    for (char& ch : flat)
+        if (ch == ';' || ch == '&' || ch == '|' || ch == '(' || ch == ')' || ch == '`' || ch == '\n') ch = '\n';
+    std::istringstream segs(flat);
+    std::string seg;
+    while (std::getline(segs, seg)) {
+        std::vector<std::string> t;
+        std::istringstream ts(seg);
+        for (std::string w; ts >> w;) t.push_back(w);
+        std::size_t i = 0;
+        while (i < t.size()) {  // skip VAR=val and wrappers (plus their flags/numbers)
+            const std::string& w = t[i];
+            auto eq = w.find('=');
+            if (eq != std::string::npos && eq > 0 && w.find('/') > eq) { ++i; continue; }
+            if (kWrap.count(w)) {
+                ++i;
+                while (i < t.size() && (t[i][0] == '-' || std::isdigit((unsigned char)t[i][0]))) ++i;
+                continue;
+            }
+            break;
+        }
+        if (i >= t.size()) continue;
+        std::string word = t[i];
+        if (auto s = word.rfind('/'); s != std::string::npos) word = word.substr(s + 1);
+        std::vector<std::string> args(t.begin() + i + 1, t.end());
+
+        if (kDeny.count(word) || extra.count(word) || word.rfind("mkfs", 0) == 0)
+            return "command '" + word + "' is blocked";
+        auto any_broad = [&] { for (const auto& a : args) if (is_broad_target(a)) return true; return false; };
+        if (word == "rm" && has_recursive_flag(args) && any_broad()) return "recursive rm on a broad path";
+        if ((word == "chmod" || word == "chown" || word == "chgrp") && has_recursive_flag(args) && any_broad())
+            return "recursive " + word + " on a broad path";
+        if (word == "kill" || word == "pkill")
+            for (const auto& a : args) if (a == "-1" || a == "1") return "signalling pid 1 / all processes";
+        if (word == "systemctl")
+            for (const auto& a : args)
+                if (a == "poweroff" || a == "reboot" || a == "halt" || a == "suspend" || a == "hibernate" || a == "kexec")
+                    return "systemctl " + a;
+        if (word == "podman" && args.size() >= 2 && args[0] == "system" && args[1] == "reset") return "podman system reset";
+        if (word == "git") {
+            bool push = false;
+            for (const auto& a : args) {
+                if (a == "push") push = true;
+                if (a == "--no-verify") return "git --no-verify";
+                if (push && (a == "--force" || a == "-f" || a == "--force-with-lease")) return "git force-push";
+            }
+        }
+    }
+    return "";
+}
+
 static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     const Json* c = json_get(args, "cmd");
     if (!c || c->type != Json::Str || c->str.empty()) return jerr("cmd required");
     std::string cmd = c->str;
 
-    // Reject obviously destructive/irreversible tokens outright.
-    for (const char* bad : {"sudo ", "rm -rf /", "mkfs", "dd if=", ":(){", "> /dev"}) {
-        if (cmd.find(bad) != std::string::npos) return jerr("refused: forbidden token");
-    }
-    // Built-in read-only defaults, always allowed; config command_allowlist adds to them.
-    static const char* const kDefaultAllow[] = {
-        "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "diff", "sort", "uniq",
-        "pwd", "echo", "stat", "file", "du", "df", "ps", "nvidia-smi", "jq", "which",
-        "free", "uname", "uptime", "date", "whoami", "hostname", "lscpu"};
-    std::string tok;
-    for (char ch : cmd) { if (ch == ' ' || ch == '\t') break; tok += ch; }
-    bool ok = false;
-    for (const char* d : kDefaultAllow) if (tok == d) { ok = true; break; }
-    if (!ok) {
-        if (const Json* allow = cfg.get_list("command_allowlist"); allow && allow->type == Json::Arr)
-            for (const auto& sp : allow->arr)
-                if (sp && sp->type == Json::Str && sp->str == tok) { ok = true; break; }
-    }
-    if (!ok) return jerr("command '" + tok + "' not in command_allowlist");
+    if (std::string why = danger_reason(cmd, cfg); !why.empty()) return jerr("refused: " + why);
 
     std::string full = cmd + " 2>&1";
     FILE* fp = popen(full.c_str(), "r");
@@ -265,7 +335,7 @@ int main(int argc, char** argv) {
             Json params = json_obj({{"type", jsp(json_str("object"))},
                                     {"properties", jsp(std::move(props))},
                                     {"required", jsp(std::move(rt))}});
-            e.schema = json_obj({{"description", jsp(json_str("Run a shell command (first token must be in config command_allowlist). Returns exit code + stdout."))},
+            e.schema = json_obj({{"description", jsp(json_str("Run a shell command. Dangerous commands (sudo, su, rm -rf /, mkfs, dd, shutdown, force-push, ...) are refused. Returns exit code + stdout."))},
                                  {"parameters", jsp(std::move(params))}});
         }
         e.handler = [&cfg](const Json& a) { return run_terminal(a, cfg); };
