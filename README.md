@@ -25,7 +25,7 @@ build/dd_agent path/to/config.yaml -- hello     # config arg, then -- , then mes
 echo "list files in /tmp/ using list_dir" | build/dd_agent
 ```
 
-Config path resolves from `HOME` (→ `~/.daedalus/config.yaml`) unless given as the first argv. The message is stdin, or the words after `--`.
+Config path resolves from `HOME` (→ `~/.daedalus/config.yaml`) unless given as the first argv. No Python Daedalus on the box? `mkdir -p ~/.daedalus/logs && cp examples/daedalus/config.yaml ~/.daedalus/` — that file is the whole config (model, turns, skin, MCP, denylist). The message is stdin, or the words after `--`.
 
 | Env | Overrides |
 |---|---|

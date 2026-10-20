@@ -36,13 +36,24 @@ int leading_indent(const std::string& s) {
     return n;
 }
 
+// A quote opens a scalar only where a value starts (line start, after ": ",
+// "- ", "[", "{", ","), so the ' in "it's" is text.
+bool opens_quote(const std::string& s, size_t k) {
+    size_t p = k;
+    while (p > 0 && (s[p - 1] == ' ' || s[p - 1] == '\t')) --p;
+    if (p == 0) return true;
+    const char c = s[p - 1];
+    if (c == '[' || c == '{' || c == ',') return true;
+    return (c == ':' || c == '-') && p < k;
+}
+
 // Quote state at end of text: 0 = balanced, else the open quote char.
 int quote_state(const std::string& s) {
     int q = 0;
     for (size_t k = 0; k < s.size(); ++k) {
         char c = s[k];
         if (q == 0) {
-            if (c == '"' || c == '\'') q = c;
+            if ((c == '"' || c == '\'') && opens_quote(s, k)) q = c;
         } else if (q == '"') {
             if (c == '\\') { ++k; }  // skip escaped char
             else if (c == '"') q = 0;
@@ -54,6 +65,38 @@ int quote_state(const std::string& s) {
         }
     }
     return q;
+}
+
+// Drop a trailing comment: '#' outside quotes, at line start or after a blank.
+std::string strip_comment(const std::string& s) {
+    char q = 0;
+    for (size_t k = 0; k < s.size(); ++k) {
+        const char c = s[k];
+        if (q == '"') {
+            if (c == '\\') ++k;
+            else if (c == '"') q = 0;
+        } else if (q == '\'') {
+            if (c == '\'') {
+                if (k + 1 < s.size() && s[k + 1] == '\'') ++k;
+                else q = 0;
+            }
+        } else if ((c == '"' || c == '\'') && opens_quote(s, k)) {
+            q = c;
+        } else if (c == '#' && (k == 0 || s[k - 1] == ' ' || s[k - 1] == '\t')) {
+            size_t e = k;
+            while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+            return s.substr(0, e);
+        }
+    }
+    return s;
+}
+
+// "key: |" / "- >-" etc.: the lines under it are a block scalar's text.
+bool block_indicator(const std::string& t) {
+    const size_t sp = t.find_last_of(' ');
+    if (sp == std::string::npos || sp == 0 || (t[sp - 1] != ':' && t[sp - 1] != '-')) return false;
+    const std::string v = t.substr(sp + 1);
+    return !v.empty() && (v[0] == '|' || v[0] == '>') && v.find_first_not_of("|>+-0123456789") == std::string::npos;
 }
 
 // Count trailing backslashes (odd => last one is a line-continuation escape).
@@ -298,12 +341,19 @@ Json parse_yaml_impl(const std::string& text) {
     while (std::getline(ss, line)) raw.push_back(line);
 
     std::vector<std::pair<int, std::string>> lines;  // {indent, content}
+    int block = -1;   // indent of a "key: |" line; deeper lines stay verbatim
     for (size_t i = 0; i < raw.size(); ++i) {
         std::string content = ltrim(raw[i]);
         if (content.empty() || content[0] == '#') continue;
         int indent = leading_indent(raw[i]);
         std::string text = raw[i].substr(indent);
         text = rtrim(text);
+        if (block >= 0 && indent > block) {
+            lines.emplace_back(indent, text);
+            continue;
+        }
+        block = -1;
+        text = strip_comment(text);
         // Fold unterminated quoted scalars.
         while (quote_state(text) != 0 && i + 1 < raw.size()) {
             ++i;
@@ -316,6 +366,8 @@ Json parse_yaml_impl(const std::string& text) {
                 text += cont;     // fold to a single space
             }
         }
+        text = strip_comment(text);
+        if (block_indicator(text)) block = indent;
         lines.emplace_back(indent, text);
     }
 

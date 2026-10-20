@@ -78,6 +78,32 @@ int main() {
     CHECK(c.has("model"), "has model");
     CHECK(!c.has("model.does_not_exist"), "no bogus key");
 
+    // trailing comments: after quoted values, on a key that opens a block
+    {
+        Config t(parse_yaml(
+            "model:\n"
+            "  api_key: \"\"        # none needed\n"
+            "  name: 'it''s'      # quoted, with an escaped quote\n"
+            "  base_url: http://h:1/v1#frag   # '#' inside a word stays\n"
+            "  note: it's fine    # an apostrophe mid-word is text\n"
+            "  color: \"#B026FF\"   # '#' inside quotes stays\n"
+            "mcp_servers:        # a block follows\n"
+            "  mz:\n"
+            "    tools:          # per-tool switch\n"
+            "      prune: {enabled: false}  # flow map\n"
+            "deny: []            # empty list\n"
+            "after: 1\n"));
+        CHECK(t.get_string("model.api_key") == "", "comment after \"\"");
+        CHECK(t.get_string("model.name") == "it's", "comment after ''");
+        CHECK(t.get_string("model.base_url") == "http://h:1/v1#frag", "# inside a word");
+        CHECK(t.get_string("model.note") == "it's fine", "apostrophe mid-word");
+        CHECK(t.get_string("model.color") == "#B026FF", "# inside quotes");
+        CHECK(t.get_string("mcp_servers.mz.tools.prune.enabled") == "false", "comment on a block key");
+        const Json* deny = t.get_list("deny");
+        CHECK(deny && deny->type == Json::Arr && deny->arr.empty(), "comment after []");
+        CHECK(t.get_int("after") == 1, "keys after the block survive");
+    }
+
     if (failures == 0) {
         std::cout << "all config tests passed\n";
         return 0;

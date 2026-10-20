@@ -1,0 +1,31 @@
+# ~/.daedalus/config.yaml — all dd_tui / dd_agent need; no Python Daedalus.
+#
+#   mkdir -p ~/.daedalus/logs && cp examples/daedalus/config.yaml ~/.daedalus/
+#
+# Env overrides: DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.
+# ~/.daedalus/logs is optional: dd_tui writes stderr there while the screen is up.
+
+model:
+  base_url: http://127.0.0.1:8080/v1     # OpenAI-compatible; must end in /v1
+  name: qwen3.8-flash-next-coder-iq1_m    # sent as "model"; llama-server ignores it
+  api_key: ""                             # llama.cpp needs none
+
+agent:
+  max_turns: 50          # LLM calls per turn; keep it low on a slow local model
+  system_prompt: ""      # appended after the built-in tool preamble
+
+display:
+  skin: neural           # ~/.daedalus/skins/<skin>.yaml if present, else the built-in neural palette
+
+# Streamable-HTTP MCP only (transport: http); stdio servers are skipped.
+# Without a mazemaker pod, set enabled: false (or drop the block).
+mcp_servers:
+  mazemaker:
+    enabled: true
+    transport: http
+    url: http://127.0.0.1:8765/mcp
+    tools:                                # optional per-tool switch
+      mazemaker_prune: {enabled: false}
+
+# run_terminal already refuses sudo/su/dd/mkfs/shutdown/force-push/...; add words here.
+command_denylist: []
