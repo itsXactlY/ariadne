@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "dd/core/mpsc.hpp"
+
 namespace dd {
 namespace ui {
 
@@ -98,61 +100,7 @@ private:
     bool full_ = true;
 };
 
-// Vyukov's intrusive MPSC queue: push is one atomic exchange plus a store
-// (wait-free, any thread); pop is the single consumer's. A pop that meets a
-// producer between its two steps returns false and the item comes next time.
-template <class T>
-class MpscQueue {
-public:
-    MpscQueue() : head_(&stub_), tail_(&stub_) {}
-    ~MpscQueue() {
-        T v;
-        while (pop(v)) {}
-    }
-    MpscQueue(const MpscQueue&) = delete;
-    MpscQueue& operator=(const MpscQueue&) = delete;
-
-    void push(T v) {
-        Node* n = new Node;
-        n->value = std::move(v);
-        link(n);
-    }
-
-    bool pop(T& out) {
-        Node* tail = tail_;
-        Node* next = tail->next.load(std::memory_order_acquire);
-        if (tail == &stub_) {
-            if (!next) return false;
-            tail_ = next;
-            tail = next;
-            next = next->next.load(std::memory_order_acquire);
-        }
-        if (!next) {
-            if (tail != head_.load(std::memory_order_acquire)) return false;
-            link(&stub_);
-            next = tail->next.load(std::memory_order_acquire);
-            if (!next) return false;
-        }
-        tail_ = next;
-        out = std::move(tail->value);
-        delete tail;
-        return true;
-    }
-
-private:
-    struct Node {
-        std::atomic<Node*> next{nullptr};
-        T value{};
-    };
-    void link(Node* n) {
-        n->next.store(nullptr, std::memory_order_relaxed);
-        Node* prev = head_.exchange(n, std::memory_order_acq_rel);
-        prev->next.store(n, std::memory_order_release);
-    }
-    Node stub_;
-    std::atomic<Node*> head_;
-    Node* tail_;
-};
+using core::MpscQueue;
 
 struct Theme {
     uint32_t border = rgb(0xB026FF), title = rgb(0xF000FF), accent = rgb(0xDA70D6),
@@ -200,6 +148,16 @@ struct LlmStats {
     long prompt_tokens = 0, completion_tokens = 0, cached_tokens = 0;
 };
 
+// The context tape as the sidebar shows it (dd/context TapeStats, flattened).
+struct TapeView {
+    bool on = false;
+    int epoch = 0, visible = 0, deferred = 0, main_slot = 0;
+    long history = 0, tape = 0, tokens = 0, rebase_at = 0, prompt = 0, reused = 0;
+    std::string level = "ok", prep, server;
+    bool maze = false;
+    unsigned long long soaked = 0, soak_queue = 0, spooled = 0;
+};
+
 struct Info {
     std::string model, endpoint, effort = "default";
     int tools = 0, max_turns = 0;
@@ -228,6 +186,8 @@ public:
     void llm_content(const std::string& delta);     // streamed answer
     void llm_end(const LlmStats& s);
     void set_effort(const std::string& label);
+    void set_tape(const TapeView& t);
+    void recall(bool active);                       // the turn's recall is running
     void turn_begin();
     void turn_end();
 
@@ -252,7 +212,7 @@ private:
     using clock = std::chrono::steady_clock;
     enum class Ev : uint8_t { Info, MaxTurns, User, Say, ToolCall, ToolBegin, ToolEnd, ToolResult,
                               Note, Error, Clear, LlmBegin, Reason, Content, LlmEnd, Effort,
-                              TurnBegin, TurnEnd };
+                              Tape, Recall, TurnBegin, TurnEnd };
     struct Event {
         Ev ev = Ev::Note;
         std::string a, b, c;
@@ -261,9 +221,10 @@ private:
         bool ok = false;
         LlmStats llm;
         std::shared_ptr<const Info> info;
+        std::shared_ptr<const TapeView> tape;
         clock::time_point at{};
     };
-    enum class Phase { Idle, Thinking, Reasoning, Writing, Tools };
+    enum class Phase { Idle, Recalling, Thinking, Reasoning, Writing, Tools };
 
     const Theme th_;
     MpscQueue<Event> q_;
@@ -275,6 +236,7 @@ private:
     std::deque<Cache> cache_;
     size_t printed_ = 0;     // drain_inline cursor (index into entries_)
     Info info_;
+    TapeView tape_;
     LlmStats last_{};
     std::deque<double> tps_hist_;
     long calls_total_ = 0;

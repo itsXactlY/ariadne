@@ -17,13 +17,18 @@
 //   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /clear /interrupt /quit
 
 #include "dd/agent/agent.hpp"
-#include "dd/agent/chat_stream.hpp"
+#include "dd/agent/http_llm.hpp"
+#include "dd/context/deck.hpp"
+#include "dd/context/endpoint.hpp"
+#include "dd/context/engine.hpp"
+#include "dd/context/maze.hpp"
 #include "dd/core/config.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
+#include "dd/tools/tool_search.hpp"
 #include "dd/ui.hpp"
 #include "dd/ui_simd.hpp"
 
@@ -66,20 +71,6 @@ using JsonSP = ddcore::JsonSP;
 // ---- tiny builders: Json value -> JsonSP (for init-lists) ----
 static JsonSP jsp(Json v) { return std::make_shared<Json>(std::move(v)); }
 
-// libcurl 8.16+ write callback: (buffer, capacity, actual_bytes, outstream).
-static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems, void* ud) {
-    (void)size;
-    auto* s = static_cast<std::string*>(ud);
-    s->append(buffer, nitems);
-    return nitems;
-}
-
-// Non-zero aborts the transfer: the interrupt flag reaches a call in flight.
-static int curl_cancel(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    const auto* flag = static_cast<const std::atomic<bool>*>(ud);
-    return flag && flag->load(std::memory_order_relaxed) ? 1 : 0;
-}
-
 // The effort ladder /effort and /reasoning offer; "off" goes out as "none",
 // which llama-server and Strata both read as thinking disabled.
 static const char* const kEfforts[] = {"off", "low", "medium", "high", "xhigh", "max", "ultra"};
@@ -95,208 +86,12 @@ static int effort_index(std::string s) {
 
 static std::string effort_label(int i) { return i < 0 ? "default" : kEfforts[i]; }
 
-// Stream sink: stop the moment Esc sets the flag; keep the raw bytes until
-// the first SSE chunk in case the server answers with plain JSON.
-struct StreamSink {
-    dd::agent::ChatStream cs;
-    std::string raw;
-    const std::atomic<bool>* cancel = nullptr;
-};
-
-static std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
-    auto* s = static_cast<StreamSink*>(ud);
-    if (s->cancel && s->cancel->load(std::memory_order_relaxed)) return 0;
-    if (!s->cs.saw_data() && s->raw.size() < (1u << 24)) s->raw.append(p, n);
-    s->cs.feed(p, n);
-    return n;
-}
-
 static std::string jerr(const std::string& m) {
     return json_dump(json_obj({{"error", jsp(json_str(m))}}));
 }
 
-static double num_at(const Json& o, const char* a, const char* b = nullptr) {
-    const Json* v = json_get(o, a);
-    if (v && b) v = v->type == Json::Obj ? json_get(*v, b) : nullptr;
-    return v && v->type == Json::Num ? v->num : 0.0;
-}
-
 static double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-}
-
-// ---- concrete provider transport: OpenAI chat/completions over libcurl ----
-struct HttpLLMClient : dd::agent::LLMClient {
-    std::string base_url, model, api_key;
-    const std::atomic<bool>* cancel = nullptr;
-    const std::atomic<int>* effort = nullptr;   // kEfforts index, -1 = endpoint default
-    dd::ui::Scene* scene = nullptr;
-    bool streamed = false;   // the last call's answer already reached the scene
-
-    dd::core::Message chat(const std::vector<dd::core::Message>& messages,
-                           const dd::core::Json& tools) override {
-        Json body = json_obj();
-        obj_set(body, "model", json_str(model));
-        Json msgs = json_arr();
-        for (const auto& m : messages) arr_push(msgs, ddcore::message_to_json(m));
-        obj_set(body, "messages", msgs);
-        if (tools.type == Json::Arr && !tools.arr.empty()) obj_set(body, "tools", tools);
-        obj_set(body, "stream", json_bool(true));
-        obj_set(body, "stream_options", json_obj({{"include_usage", jsp(json_bool(true))}}));
-        if (effort)
-            if (const int e = effort->load(std::memory_order_relaxed); e >= 0)
-                obj_set(body, "reasoning_effort", json_str(e == 0 ? "none" : kEfforts[e]));
-
-        std::string url = base_url;
-        if (!url.empty() && url.back() != '/') url += "/";
-        url += "chat/completions";
-
-        std::string payload = json_dump(body);
-        StreamSink sink;
-        sink.cancel = cancel;
-        if (scene) {
-            sink.cs.on_reasoning = [this](const std::string& d) { scene->llm_reasoning(d); };
-            sink.cs.on_content = [this](const std::string& d) { scene->llm_content(d); };
-        }
-
-        CURL* c = curl_easy_init();
-        if (!c) throw std::runtime_error("curl: out of memory for handle");
-        struct CurlGuard { CURL* c; ~CurlGuard() { curl_easy_cleanup(c); } } guard{c};
-
-        struct curl_slist* hdrs = nullptr;
-        hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-        if (!api_key.empty()) {
-            std::string auth = "Authorization: Bearer " + api_key;
-            hdrs = curl_slist_append(hdrs, auth.c_str());
-        }
-        struct SListGuard { struct curl_slist* h; ~SListGuard() { curl_slist_free_all(h); } } hguard{hdrs};
-
-        curl_easy_setopt(c, CURLOPT_POST, 1L);
-        curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload.c_str());
-        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (curl_off_t)payload.size());
-        curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
-        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, stream_sink);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
-        // Esc aborts a call, so the timeout only guards a dead server.
-        curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
-        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, curl_cancel);
-        curl_easy_setopt(c, CURLOPT_XFERINFODATA, cancel);
-
-        streamed = false;
-        if (scene) scene->llm_begin();
-        const auto t0 = std::chrono::steady_clock::now();
-        CURLcode rc = curl_easy_perform(c);
-        const bool cancelled = cancel && cancel->load(std::memory_order_relaxed);
-        if (rc == CURLE_ABORTED_BY_CALLBACK || (rc == CURLE_WRITE_ERROR && cancelled))
-            throw std::runtime_error("interrupted");
-        if (rc != CURLE_OK)
-            throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
-        sink.cs.finish();
-        long status = 0;
-        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
-
-        Json resp;   // a non-streamed reply: errors, or a server that ignores "stream"
-        if (!sink.cs.saw_data()) {
-            try { resp = json_parse(sink.raw); } catch (...) {}
-        }
-        auto fail = [&](std::string why) {
-            if (const Json* e = json_get(resp, "error"))
-                why = e->type == Json::Obj && json_get(*e, "message") ? json_get(*e, "message")->str : json_dump(*e);
-            throw std::runtime_error("HTTP " + std::to_string(status) + ": " + why);
-        };
-        if (status >= 400) fail(sink.raw.empty() ? std::string("no body") : sink.raw.substr(0, 400));
-        if (!sink.cs.error().empty()) fail(sink.cs.error());
-
-        dd::core::Message assistant;
-        if (sink.cs.saw_data()) {
-            assistant = sink.cs.message();
-            streamed = scene && !assistant.content.empty();
-            resp = json_obj({{"usage", jsp(sink.cs.usage())}, {"timings", jsp(sink.cs.timings())}});
-        } else if (const Json* choices = json_get(resp, "choices");
-                   choices && choices->type == Json::Arr && !choices->arr.empty()) {
-            const Json& ch0 = *choices->arr[0];
-            if (const Json* msg = json_get(ch0, "message")) {
-                assistant = ddcore::message_from_json(*msg);
-                if (const Json* r = json_get(*msg, "reasoning_content"); r && r->type == Json::Str && scene && !r->str.empty())
-                    scene->llm_reasoning(r->str);
-            }
-            if (assistant.finish_reason.empty())
-                if (const Json* fr = json_get(ch0, "finish_reason"))
-                    assistant.finish_reason = fr->type == Json::Str ? fr->str : "";
-        }
-        if (assistant.role.empty()) assistant.role = "assistant";
-
-        if (scene) {   // llama-server reports its own speeds under "timings"
-            dd::ui::LlmStats st;
-            st.latency_ms = ms_since(t0);
-            st.prompt_tokens = static_cast<long>(num_at(resp, "usage", "prompt_tokens"));
-            st.completion_tokens = static_cast<long>(num_at(resp, "usage", "completion_tokens"));
-            st.gen_tps = num_at(resp, "timings", "predicted_per_second");
-            st.pp_tps = num_at(resp, "timings", "prompt_per_second");
-            st.cached_tokens = static_cast<long>(num_at(resp, "timings", "cache_n"));
-            if (const Json* u = json_get(resp, "usage"); u && u->type == Json::Obj && st.cached_tokens == 0)
-                st.cached_tokens = static_cast<long>(num_at(*u, "prompt_tokens_details", "cached_tokens"));
-            scene->llm_end(st);
-        }
-        return assistant;
-    }
-};
-
-struct Props {
-    bool ok = false;
-    long n_ctx = 0;
-    std::string chat_template;
-};
-
-// llama-server / Strata /props: context size and the chat template.
-static Props fetch_props(std::string base_url) {
-    Props p;
-    while (!base_url.empty() && base_url.back() == '/') base_url.pop_back();
-    if (base_url.size() >= 3 && base_url.compare(base_url.size() - 3, 3, "/v1") == 0) base_url.resize(base_url.size() - 3);
-    CURL* c = curl_easy_init();
-    if (!c) return p;
-    std::string out, url = base_url + "/props";
-    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_sink);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 3L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 2L);
-    const CURLcode rc = curl_easy_perform(c);
-    curl_easy_cleanup(c);
-    if (rc != CURLE_OK) return p;
-    try {
-        Json j = json_parse(out);
-        double n = num_at(j, "default_generation_settings", "n_ctx");
-        p.n_ctx = static_cast<long>(n > 0 ? n : num_at(j, "n_ctx"));
-        if (const Json* t = json_get(j, "chat_template"); t && t->type == Json::Str) p.chat_template = t->str;
-        p.ok = true;
-    } catch (...) {
-    }
-    return p;
-}
-
-// The efforts this model's chat template implements: any other level makes
-// the template raise (HTTP 500), so xhigh/max/ultra appear only when the
-// template names them. No template to read: offer the whole ladder.
-static std::vector<std::string> template_efforts(const Props& p) {
-    std::vector<std::string> out;
-    if (!p.ok || p.chat_template.empty()) {
-        for (const char* e : kEfforts) out.emplace_back(e);
-        return out;
-    }
-    const std::string& t = p.chat_template;
-    const bool levels = t.find("reasoning_effort") != std::string::npos;
-    if (!levels && t.find("enable_thinking") == std::string::npos) return out;   // no switch at all
-    out.emplace_back("off");
-    for (int i = 1; i < kEffortCount; ++i) {
-        const std::string e = kEfforts[i];
-        if (!levels ? i <= 3 : t.find("'" + e + "'") != std::string::npos || t.find("\"" + e + "\"") != std::string::npos)
-            out.push_back(e);
-    }
-    return out;
 }
 
 static bool result_failed(const std::string& r) {
@@ -312,14 +107,31 @@ static bool result_failed(const std::string& r) {
 }
 
 // ---- filesystem tool handlers (real I/O) ----
+// Numbered lines "     N|text" from offset (1-based), limit lines at a time:
+// a result cut for the window says where to continue.
 static std::string h_read_file(const Json& args) {
     const Json* p = json_get(args, "path");
     if (!p || p->type != Json::Str) return jerr("path required");
     std::ifstream f(p->str, std::ios::binary);
     if (!f) return jerr("cannot open " + p->str);
-    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    long offset = 1, limit = 2000;
+    if (const Json* o = json_get(args, "offset"); o && o->type == Json::Num) offset = std::max(1L, static_cast<long>(o->num));
+    if (const Json* l = json_get(args, "limit"); l && l->type == Json::Num) limit = std::max(1L, static_cast<long>(l->num));
+    std::string out, line;
+    long n = 0, shown = 0;
+    char num[24];
+    while (std::getline(f, line)) {
+        ++n;
+        if (n < offset || shown >= limit) continue;
+        std::snprintf(num, sizeof num, "%6ld|", n);
+        out += num + line + "\n";
+        ++shown;
+    }
     return json_dump(json_obj({{"path", jsp(json_str(p->str))},
-                               {"content", jsp(json_str(s))}}));
+                               {"content", jsp(json_str(out))},
+                               {"total_lines", jsp(json_num(static_cast<double>(n)))},
+                               {"offset", jsp(json_num(static_cast<double>(offset)))},
+                               {"lines", jsp(json_num(static_cast<double>(shown)))}}));
 }
 static std::string h_write_file(const Json& args) {
     const Json* p = json_get(args, "path");
@@ -730,7 +542,8 @@ struct Editor {
     }
 };
 
-static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/clear", "/interrupt", "/quit"};
+static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/context", "/rebase",
+                                        "/clear", "/new", "/interrupt", "/quit"};
 
 static std::string trim_ws(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
@@ -767,6 +580,7 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
 }
 
 int main(int argc, char** argv) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
     const char* h_env = std::getenv("HOME");
     std::string home = h_env ? h_env : std::string("/home/alca");
     std::string config_path = home + "/.daedalus/config.yaml";
@@ -829,7 +643,21 @@ int main(int argc, char** argv) {
         };
         reg.register_tool(e);
     };
-    { ToolEntry e; e.name = "read_file"; e.schema = fs_schema({"path"}, "Read a file's UTF-8 text content."); e.handler = h_read_file; add_tool(e); }
+    {
+        ToolEntry e;
+        e.name = "read_file";
+        const std::string desc = "Read a text file as numbered lines (\"     N|text\"). Long files: page with offset "
+                                 "(first line, 1-based) and limit (lines, default 2000).";
+        Json props = json_obj({{"path", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("file to read"))}}))},
+                               {"offset", jsp(json_obj({{"type", jsp(json_str("integer"))}, {"description", jsp(json_str("first line, 1-based"))}}))},
+                               {"limit", jsp(json_obj({{"type", jsp(json_str("integer"))}, {"description", jsp(json_str("how many lines"))}}))}});
+        e.schema = json_obj({{"description", jsp(json_str(desc))},
+                             {"parameters", jsp(json_obj({{"type", jsp(json_str("object"))},
+                                                          {"properties", jsp(std::move(props))},
+                                                          {"required", jsp(json_arr({jsp(json_str("path"))}))}}))}});
+        e.handler = h_read_file;
+        add_tool(e);
+    }
     { ToolEntry e; e.name = "write_file"; e.schema = fs_schema({"path", "content"}, "Write text content to a file."); e.handler = h_write_file; add_tool(e); }
     { ToolEntry e; e.name = "list_dir"; e.schema = fs_schema({"path"}, "List entries of a directory."); e.handler = h_list_dir; add_tool(e); }
     {
@@ -861,6 +689,7 @@ int main(int argc, char** argv) {
         "decisions and history, never for current measurements.";
     if (std::string cp = cfg.get_string("agent.system_prompt"); !cp.empty()) system_prompt += "\n\n" + cp;
     std::vector<std::unique_ptr<MCPClient>> mcps;  // stable addresses
+    std::string maze_url;                           // the server that answers mazemaker_recall
     if (const Json* srvs = cfg.get_map("mcp_servers"); srvs && srvs->type == Json::Obj) {
         for (const auto& [srvname, sroot] : srvs->obj) {
             if (!sroot || sroot->type != Json::Obj) continue;
@@ -888,6 +717,7 @@ int main(int argc, char** argv) {
                         const Json* nm = json_get(*tsp, "name");
                         if (!nm || nm->type != Json::Str) continue;
                         const std::string tname = nm->str;
+                        if (tname == "mazemaker_recall") maze_url = u->str;
                         if (tmap) {
                             if (const Json* en = json_get(*tmap, tname))
                                 if (en->type == Json::Obj)
@@ -922,25 +752,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- assemble the agent ----
-    dd::agent::Agent agent;
-    HttpLLMClient llm;
-    llm.base_url = base_url;
-    llm.model = model;
-    llm.api_key = api_key;
-    llm.cancel = &agent.interrupt_requested;
-    llm.scene = &scene;
-
-    agent.model = model;
-    agent.max_iterations = max_iterations;
-    agent.quiet_mode = true;
-    agent.system_prompt = system_prompt;
-    agent.registry = &reg;
-    agent.llm = &llm;
-
-    // ---- reasoning: effort from config, levels from the model's template ----
-    const Props props = fetch_props(base_url);
-    const std::vector<std::string> efforts = template_efforts(props);
+    // ---- the server, and what each request tells it ----
+    dd::context::Endpoint ep(base_url);
+    ep.probe();
+    ep.thinking_budget = cfg.has("agent.thinking_budget") ? static_cast<int>(cfg.get_int("agent.thinking_budget")) : 1024;
+    const std::vector<std::string> efforts = ep.efforts();
     auto offered = [&](int i) {
         return i >= 0 && std::find(efforts.begin(), efforts.end(), kEfforts[i]) != efforts.end();
     };
@@ -953,8 +769,101 @@ int main(int argc, char** argv) {
             boot_errors.push_back("agent.reasoning_effort '" + want + "' is not in this model's template; using " +
                                   effort_label(effort.load()));
     }
-    llm.effort = &effort;
     if (cfg.get_string("display.show_reasoning") == "false") scene.set_reason_view(dd::ui::ReasonView::Hide);
+
+    // ---- tools in the window: the harness's own + always_load; the rest behind the bridges ----
+    const Json* ts_raw = cfg.get_map("tool_search");
+    dd::context::ToolDeck deck(reg, dd::tools::ToolSearchConfig::from_raw(ts_raw ? *ts_raw : Json{}));
+    deck.registrar = [&](const ToolEntry& e) { add_tool(e); };
+    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal"});
+
+    // ---- the maze: what ages out of the window comes back from here ----
+    auto maze = std::make_shared<dd::context::Maze>(maze_url);
+    if (maze->configured()) maze->probe();
+    std::error_code cwd_ec;
+    const std::string work = std::filesystem::current_path(cwd_ec).string() + "/.daedalus";
+    dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
+
+    // ---- the transport ----
+    dd::agent::Agent agent;
+    dd::agent::HttpLLM llm;
+    llm.base_url = base_url;
+    llm.model = model;
+    llm.api_key = api_key;
+    llm.cancel = &agent.interrupt_requested;
+    llm.effort = [&effort]() -> std::string {
+        const int e = effort.load(std::memory_order_relaxed);
+        return e < 0 ? std::string() : e == 0 ? std::string("none") : std::string(kEfforts[e]);
+    };
+    llm.shape = [&ep, &effort](Json& b) { ep.shape(b, ep.main_slot(), effort.load(std::memory_order_relaxed) != 0); };
+    llm.on_begin = [&scene] { scene.llm_begin(); };
+    llm.on_reasoning = [&scene](const std::string& d) { scene.llm_reasoning(d); };
+    llm.on_content = [&scene](const std::string& d) { scene.llm_content(d); };
+
+    // ---- the context tape ----
+    auto num_or = [&](const char* key, double def) {
+        return cfg.has(key) ? cfg.get_double(key) : def;
+    };
+    dd::context::EngineConfig ec;
+    ec.tape = !cfg.has("context.payload_tape") || cfg.get_bool("context.payload_tape");
+    ec.render.window_turns = cfg.has("memory.soak.window_turns") ? static_cast<int>(cfg.get_int("memory.soak.window_turns")) : -1;
+    ec.render.reasoning_window = static_cast<int>(num_or("context.reasoning_window", 3));
+    ec.render.tool_group_ttl = static_cast<int>(num_or("context.tool_group_ttl", 8));
+    ec.render.context_length = ep.info().n_ctx;
+    ec.fast_layer_tokens = static_cast<long>(num_or("compression.fast_layer_tokens", 0));
+    ec.low = num_or("compression.watermarks.low", 0.60);
+    ec.high = num_or("compression.watermarks.high", 0.80);
+    ec.hard = num_or("compression.watermarks.hard", 0.90);
+    ec.ceiling = num_or("compression.hot_swap_hard_ratio", 0.85);
+    ec.protect_last_n = static_cast<int>(num_or("compression.protect_last_n", 6));
+    ec.turn_recall = !cfg.has("memory.turn_recall") || cfg.get_bool("memory.turn_recall");
+    ec.prewarm = !cfg.has("compression.prewarm") || cfg.get_bool("compression.prewarm");
+    if (const char* v = std::getenv("DD_FAST_LAYER")) ec.fast_layer_tokens = std::atol(v);   // tests force a rebase
+    dd::context::TapeEngine engine(ec, system_prompt, ep, maze, maze->configured() ? &soaker : nullptr, deck, llm,
+                                   work + "/spill");
+    engine.on_note = [&scene](const std::string& n) { scene.note(n); };
+    engine.on_recall = [&scene](bool on) { scene.recall(on); };
+    engine.on_stats = [&scene](const dd::context::TapeStats& t) {
+        dd::ui::TapeView v;
+        v.on = true;
+        v.epoch = t.epoch;
+        v.history = static_cast<long>(t.history);
+        v.tape = static_cast<long>(t.tape);
+        v.tokens = t.tokens;
+        v.rebase_at = t.rebase_at;
+        v.prompt = t.prompt;
+        v.reused = t.reused;
+        v.level = t.level;
+        v.prep = t.prep;
+        v.server = t.server;
+        v.visible = t.visible;
+        v.deferred = t.deferred;
+        v.main_slot = t.main_slot;
+        v.maze = t.maze;
+        v.soaked = t.soaked;
+        v.soak_queue = t.soak_queue;
+        v.spooled = t.spooled;
+        scene.set_tape(v);
+    };
+    llm.on_stats = [&scene, &engine](const dd::agent::CallStats& st) {
+        dd::ui::LlmStats u;
+        u.latency_ms = st.latency_ms;
+        u.gen_tps = st.gen_tps;
+        u.pp_tps = st.pp_tps;
+        u.prompt_tokens = st.prompt_tokens;
+        u.completion_tokens = st.completion_tokens;
+        u.cached_tokens = st.cached_tokens;
+        scene.llm_end(u);
+        engine.on_call(st);
+    };
+
+    agent.model = model;
+    agent.max_iterations = max_iterations;
+    agent.quiet_mode = true;
+    agent.system_prompt = system_prompt;
+    agent.registry = &reg;
+    agent.llm = &llm;
+    agent.context = &engine;
 
     const int tool_count = static_cast<int>(reg.get_all_tool_names().size());
     {
@@ -964,11 +873,14 @@ int main(int argc, char** argv) {
         info.effort = effort_label(effort.load());
         info.tools = tool_count;
         info.max_turns = max_iterations;
-        info.n_ctx = props.n_ctx;
+        info.n_ctx = ep.info().n_ctx;
         info.sources = sources;
         scene.set_info(info);
     }
     for (const auto& e : boot_errors) scene.error(e);
+    if (engine.on_stats) engine.on_stats(engine.stats());
+    if (maze_url.empty()) scene.note("no mazemaker server: the tape forgets what ages out and nothing brings it back");
+    else if (!maze->up()) scene.error("mazemaker at " + maze_url + " is not answering: rebases cannot recall, soaks spool to " + work);
 
     std::function<void()> flush_inline;
     agent.step_hook = [&](const dd::core::Message& m) {
@@ -1096,8 +1008,8 @@ int main(int argc, char** argv) {
                 quit = true;
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
-                           "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /tools  /turns N  "
-                           "/clear  /interrupt  /quit");
+                           "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /context  /rebase  "
+                           "/tools  /turns N  /clear (new session)  /interrupt  /quit");
             } else if (cmd == "/tools") {
                 std::string all;
                 for (const auto& n : reg.get_all_tool_names()) all += (all.empty() ? "" : "  ") + n;
@@ -1112,8 +1024,29 @@ int main(int argc, char** argv) {
                 } else {
                     effort_cmd(arg);
                 }
-            } else if (cmd == "/clear") {
-                scene.clear();
+            } else if (cmd == "/clear" || cmd == "/new") {
+                if (running.load()) {
+                    scene.note(cmd + " applies between turns");
+                } else {
+                    engine.reset();
+                    scene.clear();
+                    scene.note("new session " + engine.session().id() + " · the maze still has the last one");
+                }
+            } else if (cmd == "/context") {
+                const auto t = engine.stats();
+                const int reuse = t.prompt > 0 ? static_cast<int>(100.0 * static_cast<double>(t.reused) / static_cast<double>(t.prompt) + 0.5) : -1;
+                scene.note("session " + t.session + " · epoch " + std::to_string(t.epoch) + " · history " +
+                           std::to_string(t.history) + " msgs, tape " + std::to_string(t.tape) + "\nwindow " +
+                           std::to_string(t.tokens) + " tokens (" + t.level + ") · rebase at " + std::to_string(t.rebase_at) +
+                           " · prewarm at " + std::to_string(t.high_at) + (t.prep.empty() ? "" : " · next epoch " + t.prep) +
+                           "\nlast call reused " + (reuse >= 0 ? std::to_string(reuse) + "% of " + std::to_string(t.prompt) : std::string("—")) +
+                           " · tools " + std::to_string(t.visible) + " in window, " + std::to_string(t.deferred) +
+                           " deferred · server " + t.server + ", main slot " + std::to_string(t.main_slot) +
+                           "\nmaze " + (t.maze ? "up" : "down") + " · " + std::to_string(t.soaked) + " soaked, " +
+                           std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled");
+            } else if (cmd == "/rebase") {
+                if (running.load()) scene.note("/rebase applies between turns");
+                else engine.rebase_now();
             } else if (cmd == "/interrupt") {
                 interrupt();
             } else if (cmd == "/turns") {

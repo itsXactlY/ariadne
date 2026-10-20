@@ -61,6 +61,18 @@ build/dd_tui path/to/config.yaml -- "msg"      # single-shot
 - **No tty** (`-- msg` or piped stdin): the same cards print inline, in order.
 - `run_terminal` runs `{ cmd; } </dev/null 2>&1`: a child never reads the raw-mode tty.
 
+### Context tape (`dd::context`, `src/context/`)
+
+The agent loop no longer re-sends a growing transcript. `TapeEngine` (an `agent::ContextEngine`) keeps the session and decides what each request carries — the Daedalus tape, ported:
+
+- **Render once, append only.** The first call of an epoch renders the whole view with every hygiene layer; after that a message is rendered once, when it enters the payload, and every later request reuses those bytes. The previous request is an exact prefix of the next, so the server re-reads only what is new (`context_test`: 0 prefix breaks over 20 tool-heavy calls, 18 without the tape). `context.payload_tape: false` renders every call from scratch.
+- **Hygiene only at an epoch start** (`Renderer::epoch`): head window (`memory.soak.window_turns` × 2 messages), finished tool exchanges past `context.tool_group_ttl` (8) collapsed to one line naming each call, reasoning past `context.reasoning_window` (3) dropped — the maze has it. Tool results are capped to their share of the window as they enter (`[[RESULT CUT …]]` says how to continue; `read_file` pages by `offset`/`limit`).
+- **Retrieval is the memory.** Every finished turn is soaked to mazemaker (`auto:turn:<session>:<ts>`), reasoning the first time it is sent (`auto:reasoning:…`); tool calls and output never are, turns without an answer neither. A lock-free queue feeds one writer thread; disk (`<cwd>/.daedalus/`) only while the pod is dead — a spool, replayed one write at a time when it answers. One recall per turn is rendered onto the question (`memory.turn_recall`).
+- **Rebase from retrieval at the watermarks.** Pool tokens (as the server counts them, both slots) against `compression.fast_layer_tokens`: past *low* an idle sidekick slot is erased, past *high* the next epoch is prewarmed between turns (sidekick slot on a multi-slot llama-server, parked and cancellable on Strata), past *hard* main moves onto it — or rebases inline. Turn 0 of an epoch: the question, a `[rebased]` anchor naming `auto:turn:<session>:*`, `[this turn so far]` (one line per call already run), one recall, the protected tail (`compression.protect_last_n`). No summarizer.
+- **Tools are discovered, not carried.** Local tools and `tool_search.always_load` stay in the array; the rest is reached through `tool_search` / `tool_describe` / `tool_call`, so the array never changes and stays in the cached prefix. On the reference pod: 38 tools (~5.8k tokens) → 11 in the window (~2.0k), 30 deferred.
+- **The endpoint is told how to behave** (`Endpoint::shape`): main pinned to slot 1 on a multi-slot llama-server (`id_slot`), `cache_prompt`, `n_cache_reuse 256`, `reasoning_budget_tokens` (`agent.thinking_budget`, default 1024) with its message; `reasoning_effort` from `/effort`.
+- TUI: a `tape` panel (epoch, window vs rebase point, prefix reuse of the last call, history vs tape, tools in/deferred, maze and soak counters), `reuse` in the status row, `/context`, `/rebase`, `/clear` (new session). `DD_FAST_LAYER=N` overrides the fast layer (forces rebases for testing).
+
 What it wires in, all **real**:
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
 - `run_terminal` — everything is allowed except a denylist (`sudo`, `su`, recursive `rm` on `/`·`~`·`*`, `mkfs`, `dd`, shutdown/reboot, curl-pipe-shell, force-push, …); extra words via config `command_denylist`. It is a guard, **not** a jail — do not treat it as sandboxing.

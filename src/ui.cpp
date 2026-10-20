@@ -661,6 +661,14 @@ void Scene::turn_end() { Event e; e.ev = Ev::TurnEnd; post(std::move(e)); }
 void Scene::llm_reasoning(const std::string& delta) { Event e; e.ev = Ev::Reason; e.a = delta; post(std::move(e)); }
 void Scene::llm_content(const std::string& delta) { Event e; e.ev = Ev::Content; e.a = delta; post(std::move(e)); }
 void Scene::set_effort(const std::string& label) { Event e; e.ev = Ev::Effort; e.a = label; post(std::move(e)); }
+void Scene::recall(bool active) { Event e; e.ev = Ev::Recall; e.ok = active; post(std::move(e)); }
+
+void Scene::set_tape(const TapeView& t) {
+    Event e;
+    e.ev = Ev::Tape;
+    e.tape = std::make_shared<const TapeView>(t);
+    post(std::move(e));
+}
 
 void Scene::llm_end(const LlmStats& s) {
     Event e;
@@ -773,6 +781,18 @@ void Scene::apply(Event& e) {
         break;
     case Ev::Effort:
         info_.effort = e.a;
+        break;
+    case Ev::Tape:
+        if (e.tape) tape_ = *e.tape;
+        break;
+    case Ev::Recall:
+        if (e.ok) {
+            phase_ = Phase::Recalling;
+            phase_t0_ = e.at;
+        } else if (phase_ == Phase::Recalling) {
+            phase_ = Phase::Thinking;
+            phase_t0_ = e.at;
+        }
         break;
     case Ev::Note:
         push(Kind::Note, e.a);
@@ -1150,7 +1170,8 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     };
 
     const bool engine = h >= 20;
-    const int sh = 8, eh = engine ? 7 : 0, th = h - sh - eh;
+    const bool tape = tape_.on && h >= 28;
+    const int sh = 8, eh = engine ? 7 : 0, tph = tape ? 7 : 0, th = h - sh - eh - tph;
 
     f.box(x, y, w, sh, b, true);
     f.title(x + 2, y, "session", head, b);
@@ -1206,8 +1227,45 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         }
     }
 
+    if (tape) {
+        const int py = y + sh + eh;
+        f.box(x, py, w, tph, b, true);
+        f.title(x + 2, py, "tape · epoch " + std::to_string(tape_.epoch), head, b);
+        if (!tape_.prep.empty())
+            f.title_right(x + w - 2, py, tape_.prep == "ready" ? "next ready" : "warming",
+                          Style{tape_.prep == "ready" ? th_.ok : th_.hot}, b);
+        // the window against its rebase point
+        if (tape_.rebase_at > 0) {
+            const double frac = std::clamp(static_cast<double>(tape_.tokens) / static_cast<double>(tape_.rebase_at), 0.0, 1.0);
+            const std::string tail = " " + fmt_tok(tape_.tokens) + "/" + fmt_tok(tape_.rebase_at);
+            const int bw = std::max(4, vw - text_width(tail));
+            f.text(x + 2, py + 1, "window", lab);
+            const int filled = static_cast<int>(frac * bw + 0.5);
+            for (int i = 0; i < bw; ++i) {
+                const double t = static_cast<double>(i) / std::max(1, bw - 1);
+                f.put(vx + i, py + 1, i < filled ? U'▰' : U'▱', i < filled ? Style{tri(th_.ok, th_.warn, th_.error, t)} : Style{th_.dim});
+            }
+            f.text(vx + bw, py + 1, tail, mut);
+        } else {
+            row(py + 1, "window", fmt_tok(tape_.tokens) + " tok · no rebase point", val);
+        }
+        if (tape_.prompt > 0) {
+            const int pct = static_cast<int>(100.0 * static_cast<double>(tape_.reused) / static_cast<double>(tape_.prompt) + 0.5);
+            row(py + 2, "reuse", std::to_string(pct) + "% of " + fmt_tok(tape_.prompt), pct >= 90 ? Style{th_.ok} : pct >= 50 ? Style{th_.warn} : Style{th_.error});
+        } else {
+            row(py + 2, "reuse", "—", mut);
+        }
+        row(py + 3, "history", std::to_string(tape_.history) + " msgs · tape " + std::to_string(tape_.tape), val);
+        row(py + 4, "tools", std::to_string(tape_.visible) + " in · " + std::to_string(tape_.deferred) + " deferred", val);
+        std::string mz = tape_.maze ? "● up" : "○ down";
+        mz += " · " + std::to_string(tape_.soaked) + " soaked";
+        if (tape_.soak_queue) mz += " · " + std::to_string(tape_.soak_queue) + " queued";
+        if (tape_.spooled) mz += " · " + std::to_string(tape_.spooled) + " spooled";
+        row(py + 5, "maze", mz, tape_.maze ? Style{th_.ok} : Style{th_.error});
+    }
+
     if (th < 3) return;
-    const int ty = y + sh + eh;
+    const int ty = y + sh + eh + tph;
     f.box(x, ty, w, th, b, true);
     f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
     int ry = ty + 1;
@@ -1276,6 +1334,10 @@ void Scene::paint_status(Frame& f, int y, int w) const {
     if (busy_ && phase_ == Phase::Tools) {
         left = "⚙ " + running_tool_;
         ls = Style{th_.gold, bg, kBold};
+    } else if (busy_ && phase_ == Phase::Recalling) {
+        const long secs = static_cast<long>(std::chrono::duration<double>(clock::now() - phase_t0_).count());
+        left = "◈ recalling from mazemaker · " + std::to_string(secs) + "s";
+        ls = Style{th_.accent, bg, kItalic};
     } else if (busy_ && phase_ == Phase::Reasoning) {
         const auto& wing = th_.wings[static_cast<size_t>(tick_ / 4) % th_.wings.size()];
         left = wing.first + " reasoning · " + std::to_string(live_reason_ ? live_reason_->n : 0) + " tok " + wing.second;
@@ -1301,6 +1363,9 @@ void Scene::paint_status(Frame& f, int y, int w) const {
     if (info_.n_ctx > 0 && last_.prompt_tokens > 0)
         segs.push_back({"ctx ", std::to_string(static_cast<int>(100.0 * static_cast<double>(last_.prompt_tokens) /
                                                                  static_cast<double>(info_.n_ctx) + 0.5)) + "%"});
+    if (tape_.on && tape_.prompt > 0)
+        segs.push_back({"reuse ", std::to_string(static_cast<int>(100.0 * static_cast<double>(tape_.reused) /
+                                                                   static_cast<double>(tape_.prompt) + 0.5)) + "%"});
     segs.push_back({"", std::to_string(info_.tools) + " tools"});
     const std::string brand = "⟁ daedalus-cpp";
 

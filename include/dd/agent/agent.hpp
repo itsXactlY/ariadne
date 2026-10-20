@@ -35,6 +35,21 @@ struct LLMClient {
                                const core::Json& tools) = 0;
 };
 
+// What the loop sends, owned by someone who remembers across turns. Without
+// one, run() sends its own per-turn transcript (the original port). With one,
+// every request is the engine's payload (dd/context: the tape), and the loop
+// reports what it appends so the engine can keep the history.
+struct ContextEngine {
+    virtual ~ContextEngine() = default;
+    virtual void begin_turn(const std::string& user_message) = 0;
+    virtual std::vector<core::Message> payload() = 0;   // system prompt included
+    virtual core::Json tools() = 0;
+    virtual void on_assistant(const core::Message& m) = 0;
+    virtual void on_tool_results(const std::vector<core::Message>& results) = 0;
+    virtual void after_tools() = 0;                     // between calls: watermarks
+    virtual void end_turn(const std::string& final_response, bool interrupted) = 0;
+};
+
 class Agent {
 public:
     // ---- configuration ----
@@ -58,6 +73,7 @@ public:
     // ---- collaborators (not owned) ----
     tools::ToolRegistry* registry = nullptr;
     LLMClient* llm = nullptr;
+    ContextEngine* context = nullptr;
 
     // ---- owned state ----
     std::unique_ptr<IterationBudget> budget;

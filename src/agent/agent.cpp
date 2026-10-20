@@ -196,6 +196,7 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
             am.content = text;
             am.finish_reason = "stop";
             messages.push_back(am);
+            if (context) context->on_assistant(am);
             return text;
         }
         return "I reached the iteration limit and couldn't generate a summary.";
@@ -207,6 +208,7 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
 
 // ---- run loop (run_agent.py:10202) ----
 std::string Agent::run(const std::string& user_message) {
+    if (context) context->begin_turn(user_message);
     std::vector<core::Message> messages;
     if (!system_prompt.empty()) {
         core::Message sys;
@@ -246,9 +248,13 @@ std::string Agent::run(const std::string& user_message) {
         }
 
         core::Json tools = core::json_arr();
-        if (registry)
+        if (context) {
+            payload = context->payload();
+            tools = context->tools();
+        } else if (registry) {
             for (auto& d : registry->get_definitions(registry->get_all_tool_names()))
                 core::arr_push(tools, d);
+        }
 
         core::Message assistant;
         if (llm) assistant = llm->chat(payload, tools);
@@ -257,6 +263,7 @@ std::string Agent::run(const std::string& user_message) {
             assistant.finish_reason = assistant.has_tool_calls() ? "tool_calls" : "stop";
 
         messages.push_back(assistant);
+        if (context) context->on_assistant(assistant);
         if (step_hook) step_hook(assistant);
 
         if (!assistant.has_tool_calls()) {
@@ -266,12 +273,18 @@ std::string Agent::run(const std::string& user_message) {
 
         core::Message norm = assistant;
         norm.tool_calls = cap_delegate_calls(dedup_tool_calls(assistant.tool_calls), 3);
+        const size_t before = messages.size();
         execute_tool_calls(norm, messages, api_call_count);
+        if (context) {
+            context->on_tool_results(std::vector<core::Message>(messages.begin() + static_cast<long>(before), messages.end()));
+            context->after_tools();
+        }
     }
 
     if (final_response.empty() && !interrupted && api_call_count >= max_iterations)
         final_response = handle_max_iterations(messages, api_call_count);
 
+    if (context) context->end_turn(final_response, interrupted || interrupt_requested.load());
     return final_response;
 }
 
