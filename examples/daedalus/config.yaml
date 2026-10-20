@@ -4,6 +4,8 @@
 #
 # Env overrides: DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.
 # ~/.daedalus/logs is optional: dd_tui writes stderr there while the screen is up.
+# The values below are the reference box's (daedalus doctor on :8080, the
+# mazemaker pod on :8765); the comments say what to change on another one.
 
 model:
   base_url: http://127.0.0.1:8080/v1     # OpenAI-compatible; must end in /v1
@@ -11,14 +13,49 @@ model:
   api_key: ""                             # llama.cpp needs none
 
 agent:
-  max_turns: 50          # LLM calls per turn; keep it low on a slow local model
-  system_prompt: ""      # appended after the built-in tool preamble
+  max_turns: 50            # LLM calls per turn; keep it low on a slow local model
+  system_prompt: ""        # appended after the built-in tool preamble
+  reasoning_effort: none   # off | low | medium | high | xhigh | max | ultra (only what the template has)
+  thinking_budget: 1024    # max thinking tokens per call on a local server; 0 = no cap
 
 display:
-  skin: neural           # ~/.daedalus/skins/<skin>.yaml if present, else the built-in neural palette
+  skin: neural             # ~/.daedalus/skins/<skin>.yaml if present, else the built-in neural palette
+  show_reasoning: true     # false starts with reasoning cards folded to one line
+
+# The context tape: what each request carries.
+context:
+  payload_tape: true       # render once, append only; false renders every call from scratch
+  reasoning_window: 3      # newest reasoning blocks kept at an epoch start
+  tool_group_ttl: 8        # newest tool exchanges kept whole at an epoch start
+
+# Rebase from retrieval at the fast-layer watermarks (server tokens, both slots).
+compression:
+  fast_layer_tokens: 65536 # the GPU-resident KV budget; 0 = rebase at hot_swap_hard_ratio of n_ctx
+  watermarks:
+    low: 0.7               # erase an idle sidekick slot's leftovers
+    high: 0.88             # prewarm the next epoch between turns
+    hard: 0.95             # swap to it, or rebase inside the turn
+  hot_swap_hard_ratio: 0.9
+  protect_last_n: 10       # the tail a rebase keeps (shrunk if the new epoch would not fit)
+  prewarm: true
+
+memory:
+  turn_recall: true        # one recall per turn, enriched from the graph, on the question
+  soak:
+    window_turns: 18       # an epoch's head window: 2x this many messages before the question
+
+# Local tools and these stay in the window; the rest is found with tool_search.
+tool_search:
+  enabled: true
+  always_load:
+    - mazemaker_recall
+    - mazemaker_think
+    - mazemaker_get
+    - mazemaker_remember
 
 # Streamable-HTTP MCP only (transport: http); stdio servers are skipped.
-# Without a mazemaker pod, set enabled: false (or drop the block).
+# The server that answers mazemaker_recall is the tape's memory: soaks, rebases,
+# skills, /resume. Without one the tape forgets what ages out.
 mcp_servers:
   mazemaker:
     enabled: true
