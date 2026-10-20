@@ -893,7 +893,8 @@ int main(int argc, char** argv) {
             "- When the window is rebuilt, the earlier turns are named by memory id: mazemaker_get(memory_ids=[…]) "
             "reads them back at once, no search needed.\n"
             "- Skills live in mazemaker: skill_load(name) reads a skill's full instructions.";
-    dd::context::TapeEngine engine(ec, system_prompt, ep, maze, maze->configured() ? &soaker : nullptr, deck, llm,
+    const bool soak = maze->configured() && !std::getenv("DD_NO_SOAK");   // test runs: recall, never write
+    dd::context::TapeEngine engine(ec, system_prompt, ep, maze, soak ? &soaker : nullptr, deck, llm,
                                    work + "/spill", &skills);
     engine.on_note = [&scene](const std::string& n) { scene.note(n); };
     engine.on_recall = [&scene](bool on) { scene.recall(on); };
