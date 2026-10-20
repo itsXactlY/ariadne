@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⟁ DAEDALUS ⟁ — daedalus-cpp · a harness in pure C++20</title>
+<meta name="description" content="daedalus-cpp: C++20 port of the Daedalus agent harness. Plain g++ + Makefile, one real agent binary driving a live llama.cpp OpenAI endpoint via libcurl, real filesystem tools, 34 live MCP tools from a mazemaker pod, lockfree TUI with AVX-512/OpenMP kernels.">
+<style>
+:root{
+  --bg:#0b0e12; --panel:#11161c; --line:#232c36; --ink:#c9d4de; --dim:#8b98a6;
+  --gold:#e8b84a; --teal:#4fd6c2; --red:#e86a5e; --mono:"JetBrains Mono","Fira Code",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif;font-size:16px;line-height:1.6;margin:0}
+code,pre,kbd{font-family:var(--mono)}
+a{color:var(--teal);text-decoration:none}
+.wrap{max-width:980px;margin:0 auto;padding:24px 20px 48px}
+header{border-bottom:1px solid var(--line);padding:28px 0 20px}
+header h1{font-family:var(--mono);color:var(--gold);font-size:1.6rem;margin:0}
+header .sub{color:var(--dim);font-size:.95rem}
+nav{font-family:var(--mono);color:var(--dim);font-size:.85rem}
+nav a{margin-right:14px}
+.grid{display:flex;flex-wrap:wrap;gap:12px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+h2{font-family:var(--mono);color:var(--teal);font-size:1.15rem;margin:34px 0 12px}
+h3{font-size:1.02rem;color:var(--ink);margin:22px 0 8px}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:.85rem;line-height:1.55;color:#dbe5ee}
+.warn{color:var(--red)}
+.dim{color:var(--dim)}
+.tl{color:var(--gold);font-weight:700}
+.tool{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin:12px 0}
+.tool .tname{font-family:var(--mono);color:var(--gold);font-weight:700}
+.tool .tdesc{color:var(--dim);font-size:.9rem}
+.tool .tsample{font-family:var(--mono);font-size:.78rem;color:var(--dim)}
+figure{margin:14px 0}
+figure img{border:1px solid var(--line);border-radius:6px;max-width:100%;height:auto}
+figure figcaption{color:var(--dim);font-size:.85rem;margin-top:6px}
+ul,ol{padding-left:1.3rem}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+th{background:var(--panel)}
+td code{font-size:.85rem;color:var(--teal)}
+footer{border-top:1px solid var(--line);color:var(--dim);font-size:.85rem;padding:16px 0;margin-top:40px}
+.badges{display:flex;gap:8px;flex-wrap:wrap}
+.badges span{font-family:var(--mono);font-size:.72rem;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:3px 8px;color:var(--dim)}
+@media print{body{background:#fff;color:#111}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>⟁ DAEDALUS ⟁&nbsp;&nbsp;daedalus-cpp</h1>
+  <p class="sub"><span class="tl">TL;DR:</span> C++20 port of the Daedalus agent harness. Plain <code>g++</code> + <code>Makefile</code>
+  (<code>-std=c++20 -Wall -Wextra -Werror -O2 -Iinclude</code> — CMake 4.4.3 is broken for this tree, the Makefile is the source of truth).
+  One real agent binary (<code>build/dd_agent</code>) that drives the ported run loop over a <b>live llama.cpp OpenAI endpoint</b> via libcurl,
+  with working <code>read_file</code>/<code>write_file</code>/<code>list_dir</code> tools doing real I/O — and the full harness kit <code>build/dd_tui</code>:
+  a lockfree, SIMD'd terminal UI that renders every call.</p>
+  <div class="badges">
+    <span>C++20 · -Werror</span><span>~200 TUs · 23k LOC</span><span>64 test suites</span><span>libcurl 8.16+</span><span>Streamable-HTTP MCP</span><span>AVX-512 · OpenMP</span><span>34 live MCP tools</span><span>zero mock-based checks</span>
+  </div>
+  <nav>
+    <a href="#tools">Tools</a> · <a href="#harness">dd_tui</a> · <a href="#gallery">Gallery</a> · <a href="#build">Build</a> · <a href="#gotchas">Gotchas</a> · <a href="#tape">Tape</a> · <a href="BLOG.md">Blog</a>
+  </nav>
+</header>
+
+<h2 id="tools">The tools — wired in, all real</h2>
+<p class="dim">Every tool the model can call is registered live: the core four ship compiled-in; the remaining
+<b>34</b> are discovered at startup from the mazemaker pod through MCP <code>tools/list</code>, each with its real
+<code>inputSchema</code>. The server's <code>initialize</code> <b>instructions</b> — the MAZEMAKER MEMORY PROTOCOL
+(recall-first, persist-after-turn) — are appended to <code>agent.system_prompt</code>. That is what makes recall-first behavior <b>real, not simulated</b>.</p>
+
+<h3>Core four — compiled in, real filesystem I/O</h3>
+<div class="grid">
+<div class="tool"><div class="tname">read_file</div><div class="tdesc">Read a file's UTF-8 text content.</div><div class="tsample">read_file("src/agent/agent.cpp") → full source text</div></div>
+<div class="tool"><div class="tname">write_file</div><div class="tdesc">Write text content to a file.</div><div class="tsample">write_file("out.txt", content="...")</div></div>
+<div class="tool"><div class="tname">list_dir</div><div class="tdesc">List entries of a directory.</div><div class="tsample">list_dir("/tmp") → "drwxr-xr-x … 14 entries"</div></div>
+<div class="tool"><div class="tname">run_terminal</div><div class="tdesc">Run a shell command — everything allowed except a denylist
+(<code>sudo</code>, <code>su</code>, recursive <code>rm</code> on <code>/</code>·<code>~</code>·<code>*</code>, <code>mkfs</code>, <code>dd</code>, shutdown/reboot, curl-pipe-shell, force-push, …;
+extra words via config <code>command_denylist</code>). Runs <code>{ cmd; } &lt;/dev/null 2&gt;&amp;1</code> so a child never reads the raw-mode tty.
+<span class="warn">It is a guard, not a jail — do not treat it as sandboxing.</span></div>
+<div class="tsample">returns exit code + stdout</div></div>
+</div>
+
+<h3>The mazemaker pod — 34 live MCP tools (registered at startup)</h3>
+<div class="grid">
+<div class="tool"><div class="tname">mazemaker_recall</div><div class="tdesc">Semantic search over the persistent memory graph — hybrid recall (semantic + FTS + ColBERT + DAE + salience channels) with a recency channel. The recall-first protocol anchor.</div></div>
+<div class="tool"><div class="tname">mazemaker_recall_advanced</div><div class="tdesc">Same shape, per-call channel tuning: ColBERT/DAE weights, temporal weight, MMR diversity, score-percentile filter, retrieval mode. A debugging tool, not the hot path.</div></div>
+<div class="tool"><div class="tname">mazemaker_recall_multi</div><div class="tdesc">Two-to-five phrasings in parallel, fused via Reciprocal Rank Fusion — for when one phrasing misses a stored fact.</div></div>
+<div class="tool"><div class="tname">mazemaker_get</div><div class="tdesc">Primary-key lookup by memory_id; on miss it returns nearest ids above/below so the agent can offer "did you mean X?" instead of hallucinating.</div></div>
+<div class="tool"><div class="tname">mazemaker_think</div><div class="tdesc">Spreading-activation graph traversal from a memory (depth 1–5) — concepts connected by the graph, not just by cosine.</div></div>
+<div class="tool"><div class="tname">mazemaker_remember</div><div class="tdesc">Persist a curated fact / decision / bug / invariant / ops / user / status memory. One memory per discrete fact, 60–300 words.</div></div>
+<div class="tool"><div class="tname">mazemaker_browse · stats · graph · health</div><div class="tdesc">Chronological browse (created_at DESC, optional label prefix), graph overview, corpus + AFE + dream + DAE health blob.</div></div>
+<div class="tool"><div class="tname">mazemaker_dream · nrem · rem · insight · supersedes</div><div class="tdesc">The dream cycle: NREM replay + edge strengthening, REM bridge discovery between isolated memories, Louvain communities + cluster summaries, cross-session conflict marking via SUPERSEDES.</div></div>
+<div class="tool"><div class="tname">mazemaker_dream_afe · synthesize · rebake · afe_facts · synth_lineage</div><div class="tdesc">AFE atomic-fact extraction (markdown → NER → LLM user-state), Stage S crystallisation (~10% yield by design), query-conditional Stage C rebake on missed sessions. Pro tier; Community calls return structured "skipped" payloads.</div></div>
+<div class="tool"><div class="tname">mazemaker_prune · dream_control · dream_config · delete_by_labels · count/list_by_label_prefix</div><div class="tdesc">Edge pruning with age protection + dry-run preview; dream daemon pause/resume/status; cadence knobs; FK-safe label deletion and uncapped namespace walks.</div></div>
+<div class="tool"><div class="tname">mazemaker_classify_intent · ablate · diagnose · supersedes_log · get_by_prefix</div><div class="tdesc">Cheap regex intent routing (preference / temporal / factual / general), channel-ablation matrix, typed-miss diagnostics on the live corpus.</div></div>
+</div>
+
+<h2 id="harness">Full harness kit — <code>build/dd_tui</code></h2>
+<pre>make build/dd_tui
+build/dd_tui                                   # interactive REPL (you&gt; ), config from ~/.daedalus
+build/dd_tui path/to/config.yaml -- "msg"      # single-shot</pre>
+<p>Same run loop (<code>Agent::run</code>) as <code>dd_agent</code> — no fork of the loop, one <code>step_hook</code> added to
+<code>agent.hpp/.cpp</code> for per-step streaming. Next-gen OOP TUI (<code>dd::ui</code>: double-buffered cell-diff <code>Frame</code> +
+<code>Widget</code> subclasses + <code>Scene</code> row layout):</p>
+<ul>
+  <li><b>Fixed geometry:</b> transcript panel | 34-col sidebar (<code>session</code>, <code>engine</code>, <code>tools</code>) over a 3-row prompt box and a status row; rounded panels with titles set into the border; sidebar drops under 100 cols; under 60×14 the screen says so.</li>
+  <li><b>Cards:</b> user = gold bar · answer = rounded <code>⟁ DAEDALUS ⟁</code> box with the call latency · tool = square card of fixed height (name, status <code>queued</code>/spinner/<code>✓ 1.2s</code>/<code>✗</code>, flattened args, two-line result preview) · notes, errors, and a rule closing each turn (<code>turn 3 · 4 calls · 2 tools · 41.2s</code>).</li>
+  <li><b>Skins:</b> colours, spinner wings, thinking verbs and branding from <code>~/.daedalus/skins/&lt;display.skin&gt;.yaml</code> (neural defaults built in). Truecolor when <code>COLORTERM=truecolor|24bit</code>, else xterm-256.</li>
+  <li><b>Engine stats are real:</b> per-call llama-server <code>timings</code> (gen/prefill t/s, <code>cache_n</code>) and <code>usage</code>; <code>n_ctx</code> from <code>/props</code> once at start (the ctx meter).</li>
+  <li><b>Render:</b> <code>Canvas</code> (16-byte padding-free <code>Cell</code>, wide-glyph aware) → <code>Frame::present()</code> diffs against the last frame and emits only changed cells, inside synchronized output (<code>?2026</code>) on the alternate screen. An unchanged frame writes nothing.</li>
+  <li><b>Threads, no locks:</b> worker and tool threads only <code>push</code> events into a Vyukov MPSC queue (one atomic exchange); the render thread owns every bit of scene state and drains the queue each frame. <code>interrupt_requested</code> is <code>std::atomic&lt;bool&gt;</code> and doubles as the libcurl abort flag — Esc cancels an LLM call in flight (measured 0.86 s from Esc to ready during a live generation).</li>
+  <li><b>SIMD + OpenMP (<code>dd/ui_simd.hpp</code>):</b> cell diff, ASCII scan/width/widen as AVX-512 (F+BW+VL) / AVX2 / scalar kernels, picked once by CPUID — one binary for every box. Rows encode in parallel on big frames, cards re-wrap in parallel after a resize; small frames stay serial so the TUI never wakes threads on cores the model uses. <code>tests/ui_test.cpp</code> checks each kernel set the CPU has against scalar, and 1-thread vs 8-thread frames byte for byte. (AVX-512 set hasn't run on hardware yet — Zen 2 here, QEMU TCG has none.)</li>
+  <li><b>Input:</b> raw <code>termios</code> (restored on exit and fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse wheel (<code>DD_TUI_MOUSE=0</code> leaves the mouse to the terminal), UTF-8 line editing, history. Enter sends (while busy: queued for end of turn), Esc/Ctrl-C interrupt, PgUp/PgDn or wheel scroll, Tab completes <code>/help /tools /turns N /clear /interrupt /quit</code>, Ctrl-L redraws. stderr goes to <code>~/.daedalus/logs/dd_tui.log</code> while the screen is up.</li>
+  <li><b>No tty</b> (<code>-- msg</code> or piped stdin): the same cards print inline, in order.</li>
+</ul>
+<p class="dim">Verified smoke (<code>DD_MAX_TURNS=4</code>, local IQ1 model ≈17 s/turn + ≈22 s/recall): registers 34 mazemaker tools,
+the model answers "as required by the memory protocol", issues <code>mazemaker_recall</code>, and the round-trip returns
+live memory (top hit sim 0.54). Transport lives in <code>src/tools/mcp.hpp</code> / <code>src/tools/mcp_client.cpp</code>.</p>
+
+<h2 id="gallery">Gallery — the TUI, live</h2>
+<div class="grid">
+<figure><img src="screenshots/01-splash.png" alt="splash screen"><figcaption>01 · splash — branding comes from the skin yaml</figcaption></figure>
+<figure><img src="screenshots/03-thinking.png" alt="thinking spinner"><figcaption>03 · thinking — spinner wings + thinking verbs</figcaption></figure>
+<figure><img src="screenshots/04-tools.png" alt="tool cards"><figcaption>04 · tool cards — fixed height, status + args + result preview</figcaption></figure>
+<figure><img src="screenshots/05-done.png" alt="turn complete"><figcaption>05 · turn closed — the rule: <code>turn N · calls · tools · time</code></figcaption></figure>
+<figure><img src="screenshots/06-resized-100x32.png" alt="resized 100x32"><figcaption>06 · resized to 100×32 — cards re-wrap in parallel, sidebar drops</figcaption></figure>
+<figure><img src="screenshots/07-hint.png" alt="input hint"><figcaption>07 · input hint — Tab completes the slash commands</figcaption></figure>
+<figure><img src="screenshots/08-generating.png" alt="generating"><figcaption>08 · generating — latency-tagged ⟁ DAEDALUS ⟁ answer box</figcaption></figure>
+<figure><img src="screenshots/09-interrupted.png" alt="interrupted"><figcaption>09 · Esc interrupt mid-generation — 0.86 s from Esc to ready</figcaption></figure>
+<figure><img src="screenshots/cli_first_init_build.png" alt="cli first init"><figcaption>cli · first init / build</figcaption></figure>
+</div>
+
+<h2 id="build">Build &amp; run</h2>
+<pre>make build/dd_agent          # agent binary (links -lcurl)
+make                         # build/dd (CLI entry)
+make test                    # 64 test suites</pre>
+<pre>build/dd_agent                                  # msg on stdin, config from ~/.daedalus/config.yaml
+build/dd_agent path/to/config.yaml -- hello     # config arg, then -- , then message words
+echo "list files in /tmp/ using list_dir" | build/dd_agent</pre>
+<p class="dim">Output: a <code>[base=... model=... turns=...]</code> header, then <code>=== final (N LLM calls) ===</code> plus the assistant's final answer.</p>
+<p class="dim">No Python Daedalus on the box? <code>mkdir -p ~/.daedalus/logs &amp;&amp; cp examples/daedalus/config.yaml ~/.daedalus/</code> —
+that file <em>is</em> the whole config (model, turns, skin, MCP, denylist).</p>
+<table>
+<tr><th>Env</th><th>Overrides</th></tr>
+<tr><td><code>DD_BASE_URL</code></td><td><code>model.base_url</code> — must end <code>/v1</code>; the code POSTs <code>/chat/completions</code></td></tr>
+<tr><td><code>DD_MODEL</code></td><td><code>model.name</code></td></tr>
+<tr><td><code>DD_API_KEY</code></td><td><code>model.api_key</code> (llama.cpp needs none)</td></tr>
+<tr><td><code>DD_MAX_TURNS</code></td><td><code>agent.max_turns</code> — config default <b>400</b>, <span class="tl">cap it</span>: a bad sample loops for minutes (~17 s/turn on the local model)</td></tr>
+</table>
+
+<h2 id="gotchas">Gotchas that bit once</h2>
+<p><b>libcurl 8.16+ calls the write callback with four args</b> — <code>fn(char*, size_t, size_t nitems, void*)</code>
+(<code>curl.h:285</code>), not the classic three. A 3-param sink reads <code>nitems</code> (a byte count) as the userptr →
+<span class="warn">SIGSEGV</span>. Correct form appends <code>nitems</code> and returns it:</p>
+<pre>static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems, void* ud) {
+    auto* s = static_cast&lt;std::string*&gt;(ud);
+    s-&gt;append(buffer, nitems);
+    return nitems;                       // return != nitems =&gt; CURLE_WRITE_ERROR
+}</pre>
+<ul>
+  <li><b>CMake is 4.4.3 and broken here.</b> The <code>Makefile</code> is the source of truth; a <code>CMakeLists.txt</code> exists but is not the working path.</li>
+  <li><code>-Werror=unused-function</code> is strict: every non-<code>inline</code> <code>static</code> helper must be referenced in its TU. Prefer <code>inline</code>/<code>constexpr</code>.</li>
+  <li><code>std::regex</code> here gets no lookaround; <code>\w</code>/<code>\d</code> are ASCII-only.</li>
+  <li><code>core::Json</code> is a hand-rolled value type (<code>Type{Null,Bool,Num,Str,Arr,Obj}</code>, <code>JsonSP = shared_ptr&lt;Json&gt;</code>): init-lists take <code>JsonSP</code> (wrap with <code>jsp(...)</code>), <code>arr_push</code>/<code>obj_set</code> take a bare <code>Json</code>, read size <b>before</b> a move. Wire <code>finish_reason</code> is a <em>sibling</em> of <code>message</code> on <code>choices[0]</code>.</li>
+</ul>
+
+<h2 id="tape">The whole deal — context tape</h2>
+<ol>
+  <li><b>Seed.</b> One plain goal: a running <code>int main()</code> agent driving the already-ported run loop against the real llama.cpp endpoint — libcurl transport + real FS tools.</li>
+  <li><b>Ported base, not rewritten.</b> Run loop, <code>core::Message</code>, <code>core::Json</code>, tool registry were already green (64 suites). Only the missing leaves got written: HTTP transport, FS handlers, entrypoint.</li>
+  <li><b>Scale.</b> Long evolution, heavy tool churn, one hard crash (the libcurl 4-arg callback SIGSEGV) burned most of the tokens — then the 4-param sink fix, a clean <code>-Werror</code> rebuild, live smoke.</li>
+  <li><b>Proof of concept.</b> Working binary + documented gotchas + verified smoke = the PoC baseline. Everything open now builds <em>on top</em> of it without disturbing it.</li>
+</ol>
+<p class="dim">The four-prompt story — whataboredome, the bug worth its own header, and what it deliberately doesn't do — is in <a href="BLOG.md"><code>BLOG.md</code></a>.</p>
+
+<footer>⟁ daedalus-cpp ⟁ · layout: <code>src/</code> (port TUs) · <code>include/dd/</code> (headers) · <code>tests/</code> (64 <code>_test.cpp</code> suites) · <code>build/</code> (outputs) · continuity across REPL turns rides on the external memory graph — the protocol's own design, not a persistent in-process transcript.</footer>
+</div>
+</body>
+</html>
