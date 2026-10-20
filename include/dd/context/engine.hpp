@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <functional>
+#include <set>
 #include <memory>
 #include <string>
 #include <thread>
@@ -30,6 +31,8 @@
 #include "dd/context/deck.hpp"
 #include "dd/context/endpoint.hpp"
 #include "dd/context/maze.hpp"
+#include "dd/context/memory.hpp"
+#include "dd/context/recall.hpp"
 #include "dd/context/render.hpp"
 #include "dd/context/tape.hpp"
 
@@ -57,14 +60,16 @@ struct TapeStats {
     std::string level = "ok", prep, server;
     int visible = 0, deferred = 0, main_slot = 0;
     bool maze = false;
-    uint64_t soaked = 0, soak_queue = 0, spooled = 0;
-    std::string session;
+    uint64_t soaked = 0, soak_queue = 0, spooled = 0, edges = 0;
+    size_t ledger = 0, skills = 0;   // this session's nodes in the graph, skills indexed
+    std::string session, recall;     // the last turn recall, summarised
 };
 
 class TapeEngine : public agent::ContextEngine {
 public:
-    TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Maze> maze,
-               Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root);
+    TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Memory> memory,
+               Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root,
+               const SkillIndex* skills = nullptr);
     ~TapeEngine() override;
 
     // ---- agent loop (the worker thread) ----
@@ -80,7 +85,16 @@ public:
     // ---- between turns (no turn running) ----
     void reset();                                // a fresh session
     void rebase_now();                           // /rebase
+    // Rebuild a session from its auto:turn chain in the maze (a dd session or
+    // a Python Daedalus one): the maze is the session store.
+    bool resume(const std::string& session_id, std::string* why = nullptr);
+    struct SessionRef {
+        std::string id, last;   // last: UTC of its newest turn
+        int turns = 0;
+    };
+    std::vector<SessionRef> recent_sessions(const std::string& prefix = "dd-", int limit = 8) const;
     TapeStats stats() const;
+    void sync() { drain_ledger(); }              // between turns: take in what the soak worker wrote
     const Session& session() const { return *session_; }
 
     std::function<void(const std::string&)> on_note;      // any thread
@@ -99,8 +113,12 @@ private:
     EngineConfig cfg_;
     std::string system_;
     Endpoint& ep_;
-    std::shared_ptr<Maze> maze_;
+    std::shared_ptr<Memory> mem_;
     Soaker* soaker_;
+    const SkillIndex* skills_;
+    Recaller recaller_;
+    std::vector<LedgerEntry> ledger_;   // this session's nodes in the graph, oldest first
+    std::string last_recall_;
     ToolDeck& deck_;
     agent::HttpLLM& llm_;
     std::string spill_root_;
@@ -130,7 +148,10 @@ private:
     void join_prep(bool cancel);
     // ratio: server tokens per chars/4, so the new epoch is sized as the server will count it
     std::vector<ItemPtr> retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                        bool* recalled, double ratio) const;
+                                        bool* recalled, double ratio, const std::vector<long>& turn_ids) const;
+    void drain_ledger();
+    std::set<long> in_window() const;              // ids written in this epoch: on the tape now
+    std::vector<long> turn_ids(bool earlier_only) const;
     long prefix_tokens(double ratio) const;   // system prompt + tools array
     long epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const;   // a new epoch, as the server counts it
     int skipped_gen_ = -1;   // the epoch whose rebase could not make room (said once)

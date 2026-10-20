@@ -3,6 +3,7 @@
 
 #include "dd/core/json.hpp"
 #include "dd/net/http.hpp"
+#include "dd/tools/mcp.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -56,13 +57,60 @@ long long now_s() {
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+long num(const Json& o, const char* k) {
+    const Json* v = core::json_get(o, k);
+    return v && v->type == Json::Num ? static_cast<long>(v->num) : 0;
+}
+
+std::string str(const Json& o, const char* k) {
+    const Json* v = core::json_get(o, k);
+    return v && v->type == Json::Str ? v->str : "";
+}
+
+// [{id,label,content?,similarity|activation|salience}] or {"results": [...]}
+std::vector<Hit> hits_of(const std::string& text) {
+    std::vector<Hit> out;
+    try {
+        const Json j = core::json_parse(text);
+        const Json* arr = j.type == Json::Arr ? &j : core::json_get(j, "results");
+        if (!arr || arr->type != Json::Arr) return out;
+        for (const auto& sp : arr->arr) {
+            if (!sp || sp->type != Json::Obj) continue;
+            const Json& o = core::json_get(*sp, "memory") ? *core::json_get(*sp, "memory") : *sp;   // get()'s shape
+            if (const Json* f = core::json_get(*sp, "found"); f && f->type == Json::Bool && !f->b) continue;
+            Hit h;
+            h.id = num(o, "id");
+            h.label = str(o, "label");
+            h.content = str(o, "content");
+            for (const char* k : {"similarity", "activation", "salience", "score"})
+                if (const Json* s = core::json_get(o, k); s && s->type == Json::Num) {
+                    h.score = s->num;
+                    break;
+                }
+            if (h.id || !h.label.empty()) out.push_back(std::move(h));
+        }
+    } catch (...) {
+    }
+    return out;
+}
+
+Json edges_json(const std::vector<Edge>& edges, long long created) {
+    Json rows = core::json_arr();
+    for (const auto& e : edges)
+        core::arr_push(rows, core::json_obj({{"a_label", jsp(core::json_str(e.a))},
+                                             {"b_label", jsp(core::json_str(e.b))},
+                                             {"weight", jsp(core::json_num(e.weight))},
+                                             {"edge_type", jsp(core::json_str(e.type))},
+                                             {"created_at", jsp(core::json_num(static_cast<double>(created)))}}));
+    return rows;
+}
+
 }  // namespace
 
 // ---------------- Maze ----------------
 
 Maze::Maze(std::string mcp_url) : url_(std::move(mcp_url)) {
-    // http://host:port/mcp -> http://host:port/health
-    if (const size_t scheme = url_.find("://"); scheme != std::string::npos) {
+    if (const size_t scheme = url_.find("://"); scheme != std::string::npos) {   // http://host:port/mcp -> /health
         const size_t path = url_.find('/', scheme + 3);
         health_ = (path == std::string::npos ? url_ : url_.substr(0, path)) + "/health";
     }
@@ -84,93 +132,122 @@ bool Maze::probe() {
     return ok;
 }
 
-std::vector<Maze::Hit> Maze::recall(const std::string& query, int limit, bool rerank, long timeout_ms) {
-    std::vector<Hit> hits;
-    if (url_.empty() || trim(query).empty()) return hits;
-    tools::MCPClient mcp;
-    mcp.url = url_;
-    mcp.timeout_ms = timeout_ms;
-    Json args = core::json_obj({{"query", jsp(core::json_str(query))},
-                                {"limit", jsp(core::json_num(limit))},
-                                {"max_chars", jsp(core::json_num(600))},
-                                {"rerank", jsp(core::json_bool(rerank))}});
-    std::string text;
-    try {
-        text = mcp.call("mazemaker_recall", args);
-    } catch (...) {
-        up_.store(false, std::memory_order_relaxed);
-        return hits;
-    }
-    if (text.empty()) {
-        up_.store(false, std::memory_order_relaxed);
-        return hits;
-    }
-    up_.store(true, std::memory_order_relaxed);
-    try {
-        const Json j = core::json_parse(text);
-        const Json* arr = j.type == Json::Arr ? &j : core::json_get(j, "results");
-        if (!arr || arr->type != Json::Arr) return hits;
-        for (const auto& sp : arr->arr) {
-            if (!sp || sp->type != Json::Obj) continue;
-            const Json* label = core::json_get(*sp, "label");
-            const Json* content = core::json_get(*sp, "content");
-            if (!content || content->type != Json::Str) continue;
-            Hit h;
-            h.label = label && label->type == Json::Str ? label->str : "";
-            h.content = content->str;
-            if (const Json* s = core::json_get(*sp, "similarity"); s && s->type == Json::Num) h.similarity = s->num;
-            hits.push_back(std::move(h));
-        }
-    } catch (...) {
-    }
-    return hits;
-}
-
-bool Maze::remember(const std::string& label, const std::string& content, long timeout_ms) {
-    if (url_.empty()) return false;
+std::string Maze::call(const std::string& tool, const std::string& args_json, long timeout_ms, bool mark) {
+    if (url_.empty()) return "";
     tools::MCPClient mcp;
     mcp.url = url_;
     mcp.timeout_ms = timeout_ms;
     std::string text;
     try {
-        text = mcp.call("mazemaker_remember", core::json_obj({{"content", jsp(core::json_str(content))},
-                                                              {"label", jsp(core::json_str(label))}}));
+        text = mcp.call(tool, core::json_parse(args_json));
     } catch (...) {
         text.clear();
     }
-    const bool ok = text.find("\"stored\"") != std::string::npos || text.find("\"id\"") != std::string::npos;
-    up_.store(ok, std::memory_order_relaxed);
-    return ok;
+    if (mark) up_.store(!text.empty(), std::memory_order_relaxed);
+    return text;
 }
 
-std::string Maze::context_block(const std::vector<Hit>& hits) {
-    std::string lines;
-    for (const auto& h : hits) {
-        std::string body = h.content;
-        std::replace(body.begin(), body.end(), '\n', ' ');
-        lines += "- " + (h.label.empty() ? std::string() : "[" + h.label + "] ") + body + "\n";
+std::vector<Hit> Maze::recall(const std::string& query, int limit, const std::string& scope) {
+    if (trim(query).empty()) return {};
+    Json args = core::json_obj({{"query", jsp(core::json_str(query))},
+                                {"limit", jsp(core::json_num(limit))},
+                                {"max_chars", jsp(core::json_num(600))},
+                                {"rerank", jsp(core::json_bool(false))}});   // the CPU rerank costs seconds per hit
+    if (!scope.empty()) core::obj_set(args, "scope", core::json_str(scope));
+    return hits_of(call("mazemaker_recall", core::json_dump(args), recall_timeout_ms));
+}
+
+long Maze::remember(const std::string& label, const std::string& content) {
+    const std::string text = call("mazemaker_remember",
+                                  core::json_dump(core::json_obj({{"content", jsp(core::json_str(content))},
+                                                                  {"label", jsp(core::json_str(label))}})),
+                                  60000);
+    try {
+        const Json j = core::json_parse(text);
+        if (const long id = num(j, "id"); id > 0) return id;
+    } catch (...) {
     }
-    if (trim(lines).empty()) return "";
+    if (!text.empty()) up_.store(false, std::memory_order_relaxed);   // answered, but stored nothing
+    return -1;
+}
+
+std::vector<Hit> Maze::think(long id, int depth) {
+    return hits_of(call("mazemaker_think", "{\"memory_id\":" + std::to_string(id) + ",\"depth\":" + std::to_string(depth) + "}", 15000, false));
+}
+
+std::vector<Hit> Maze::get(const std::vector<long>& ids) {
+    std::vector<Hit> out;
+    for (size_t i = 0; i < ids.size(); i += 25) {   // the tool takes 25 per call
+        std::string list;
+        for (size_t k = i; k < std::min(ids.size(), i + 25); ++k) list += (list.empty() ? "" : ",") + std::to_string(ids[k]);
+        auto part = hits_of(call("mazemaker_get", "{\"memory_ids\":[" + list + "]}", 15000, false));
+        out.insert(out.end(), part.begin(), part.end());
+    }
+    return out;
+}
+
+std::vector<Hit> Maze::facts(long source_id, int limit) {
+    return hits_of(call("mazemaker_afe_facts", "{\"source_id\":" + std::to_string(source_id) + ",\"limit\":" + std::to_string(limit) + "}", 10000, false));
+}
+
+std::string Maze::intent(const std::string& query) {
+    const std::string text = call("mazemaker_classify_intent", core::json_dump(core::json_obj({{"query", jsp(core::json_str(query))}})), 5000, false);
+    try {
+        const Json j = core::json_parse(text);
+        if (j.type == Json::Str) return j.str;
+        return str(j, "intent");
+    } catch (...) {
+        return "";
+    }
+}
+
+std::vector<Hit> Maze::labels(const std::string& prefix, int offset, int limit) {
+    return hits_of(call("mazemaker_list_by_label_prefix",
+                        core::json_dump(core::json_obj({{"prefix", jsp(core::json_str(prefix))},
+                                                        {"offset", jsp(core::json_num(offset))},
+                                                        {"limit", jsp(core::json_num(limit))}})),
+                        15000, false));
+}
+
+int Maze::connect(const std::vector<Edge>& edges) {
+    if (edges.empty()) return 0;
+    const std::string text = call("mazemaker_connections_import",
+                                  core::json_dump(core::json_obj({{"rows", jsp(edges_json(edges, now_s()))}})), 15000, false);
+    try {
+        return static_cast<int>(num(core::json_parse(text), "imported"));
+    } catch (...) {
+        return 0;
+    }
+}
+
+std::string context_block(const std::string& body) {
+    if (trim(body).empty()) return "";
     return "<memory-context>\n"
            "[System note: The following is recalled memory context, NOT new user input. It is background "
            "and may be outdated: the files and tools show the current state.]\n\n" +
-           lines + "</memory-context>";
+           trim(body) + "\n</memory-context>";
 }
 
 // ---------------- Soaker ----------------
 
 struct Soaker::State {
-    std::shared_ptr<Maze> maze;
+    std::shared_ptr<Memory> mem;
     std::string spool;
     core::MpscQueue<Job> q;
+    core::MpscQueue<LedgerEntry> out;
     std::atomic<uint32_t> bell{0};
     std::atomic<bool> stop{false}, busy{false};
-    std::atomic<uint64_t> queued{0}, written{0}, spooled{0}, skipped{0};
+    std::atomic<uint64_t> queued{0}, written{0}, spooled{0}, skipped{0}, edges{0};
 
     void spool_job(const Job& j) {
         if (spool.empty()) return;
+        Json e = core::json_arr();
+        for (const auto& ed : j.edges)
+            core::arr_push(e, core::json_obj({{"a", jsp(core::json_str(ed.a))}, {"b", jsp(core::json_str(ed.b))},
+                                              {"w", jsp(core::json_num(ed.weight))}, {"t", jsp(core::json_str(ed.type))}}));
         const std::string line = core::json_dump(core::json_obj({{"label", jsp(core::json_str(j.label))},
-                                                                 {"content", jsp(core::json_str(j.content))}})) + "\n";
+                                                                 {"content", jsp(core::json_str(j.content))},
+                                                                 {"edges", jsp(std::move(e))}})) + "\n";
         std::error_code ec;   // the work dir appears only when something has to land on disk
         std::filesystem::create_directories(std::filesystem::path(spool).parent_path(), ec);
         const int fd = ::open(spool.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
@@ -192,19 +269,30 @@ struct Soaker::State {
         in.close();
         try {
             const Json j = core::json_parse(first);
-            const Json* l = core::json_get(j, "label");
-            const Json* c = core::json_get(j, "content");
-            if (l && c && l->type == Json::Str && c->type == Json::Str && !maze->remember(l->str, c->str, 60000)) return;
+            const std::string l = str(j, "label"), c = str(j, "content");
+            if (!l.empty() && mem->remember(l, c) < 0) return;
+            std::vector<Edge> edges;
+            if (const Json* e = core::json_get(j, "edges"); e && e->type == Json::Arr)
+                for (const auto& sp : e->arr)
+                    if (sp) {
+                        const Json* w = core::json_get(*sp, "w");
+                        edges.push_back(Edge{str(*sp, "a"), str(*sp, "b"), w && w->type == Json::Num ? w->num : 0.5, str(*sp, "t")});
+                    }
+            edges_n(mem->connect(edges));
         } catch (...) {   // a torn line is dropped, not retried forever
         }
         const std::string tmp = spool + ".tmp";
         {
-            std::ofstream out(tmp, std::ios::trunc);
-            out << rest.str();
+            std::ofstream o(tmp, std::ios::trunc);
+            o << rest.str();
         }
         if (rest.str().empty()) std::remove(spool.c_str());
         else std::rename(tmp.c_str(), spool.c_str());
         std::remove(tmp.c_str());
+    }
+
+    void edges_n(int n) {
+        if (n > 0) edges.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
     }
 
     void run() {
@@ -217,8 +305,10 @@ struct Soaker::State {
                     continue;
                 }
                 busy.store(true, std::memory_order_release);
-                if (maze->remember(j.label, j.content, 60000)) {
+                if (const long id = mem->remember(j.label, j.content); id > 0) {
                     written.fetch_add(1, std::memory_order_relaxed);
+                    out.push(LedgerEntry{j.kind, j.label, j.session, id, j.epoch});
+                    edges_n(mem->connect(j.edges));
                     replay_one();
                 } else {
                     spool_job(j);
@@ -232,8 +322,8 @@ struct Soaker::State {
     }
 };
 
-Soaker::Soaker(std::shared_ptr<Maze> maze, std::string spool_path) : st_(std::make_shared<State>()) {
-    st_->maze = std::move(maze);
+Soaker::Soaker(std::shared_ptr<Memory> memory, std::string spool_path) : st_(std::make_shared<State>()) {
+    st_->mem = std::move(memory);
     st_->spool = std::move(spool_path);
     std::thread([st = st_] { st->run(); }).detach();
 }
@@ -255,8 +345,17 @@ void Soaker::push(Job j) {
     st_->bell.notify_one();
 }
 
+bool Soaker::take(LedgerEntry& e) { return st_->out.pop(e); }
+
 Soaker::Stats Soaker::stats() const {
-    return Stats{st_->queued.load(), st_->written.load(), st_->spooled.load(), st_->skipped.load()};
+    return Stats{st_->queued.load(), st_->written.load(), st_->spooled.load(), st_->skipped.load(), st_->edges.load()};
+}
+
+// Labels stay unique per session and kind (edges resolve by label): two
+// writes in one second take the next second.
+long long Soaker::next_ts(long long& last) {
+    last = std::max(now_s(), last + 1);
+    return last;
 }
 
 bool Soaker::non_answer(const std::string& text) {
@@ -303,19 +402,26 @@ std::string Soaker::reasoning_content(const std::string& session, const std::str
     return "session:" + session + " @ " + iso_utc(unix_s) + "\n\n=== REASONING ===\n" + body;
 }
 
-void Soaker::turn(const std::string& session, const std::string& user, const std::string& assistant) {
+void Soaker::turn(const std::string& session, const std::string& user, const std::string& assistant, int epoch) {
     if (non_answer(scrub_think(assistant))) {
         st_->skipped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    const long long t = now_s();
-    push(Job{label("turn", session, t), turn_content(session, user, assistant, t)});
+    const long long t = next_ts(last_ts_turn_);
+    Job j{"turn", session, label("turn", session, t), turn_content(session, user, assistant, t), epoch, {}};
+    if (!prev_turn_.empty()) j.edges.push_back(Edge{prev_turn_, j.label, 0.8, "session_next"});
+    for (const auto& r : reasoning_since_turn_) j.edges.push_back(Edge{r, j.label, 0.7, "reasoned_in"});
+    reasoning_since_turn_.clear();
+    prev_turn_ = j.label;
+    push(std::move(j));
 }
 
-void Soaker::reasoning(const std::string& session, const std::string& text) {
+void Soaker::reasoning(const std::string& session, const std::string& text, int epoch) {
     if (trim(scrub_think(text)).empty()) return;
-    const long long t = now_s();
-    push(Job{label("reasoning", session, t), reasoning_content(session, text, t)});
+    const long long t = next_ts(last_ts_reasoning_);
+    Job j{"reasoning", session, label("reasoning", session, t), reasoning_content(session, text, t), epoch, {}};
+    reasoning_since_turn_.push_back(j.label);
+    push(std::move(j));
 }
 
 }  // namespace context

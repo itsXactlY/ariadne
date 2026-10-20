@@ -75,6 +75,17 @@ The agent loop no longer re-sends a growing transcript. `TapeEngine` (an `agent:
 - **The endpoint is told how to behave** (`Endpoint::shape`): main pinned to slot 1 on a multi-slot llama-server (`id_slot`), `n_cache_reuse 256`, `reasoning_budget_tokens` (`agent.thinking_budget`, default 1024) with its message; `reasoning_effort` from `/effort`.
 - TUI: a `tape` panel (epoch, window vs rebase point, prefix reuse of the last call, history vs tape, tools in/deferred, maze and soak counters), `reuse` in the status row, `/context`, `/rebase`, `/clear` (new session). `DD_FAST_LAYER=N` overrides the fast layer (forces rebases for testing).
 
+### Bound to mazemaker (`dd/context/memory`, `maze`, `recall`)
+
+The harness forgets on purpose; mazemaker is where everything it drops lives — and where the session itself is written. One interface (`dd::context::Memory`), the pod behind it over MCP, a fake graph in the tests.
+
+- **The session is a chain in the graph.** Labels are unique per session; every soak hands its memory id back (the engine's *ledger*, lock-free from the soak worker); edges chain the nodes as they are written — turn → next turn (`session_next`), reasoning → the turn it served (`reasoned_in`), via `connections_import`. The dream cycles and later traversals see a session's shape, not loose rows.
+- **One recall per turn, the graph around it.** Measured on the pod: a recall is ~7 s and the pod serialises them; `think` 0.9 s, `get` 0.08 s, `afe_facts` 0.08 s, `classify_intent` 0.04 s. So a turn spends exactly one recall and enriches it in parallel: spreading activation from the best hit read back by id, the facts extracted from the top hits, and — for a temporal question — this session's own out-of-window turns by id. Nothing already on the tape comes back (the ledger knows which ids were written this epoch), and the block fits a budget.
+- **A rebase names ids.** Turn 0 of a new epoch lists this session's turn ids: `mazemaker_get(memory_ids=[…])` reads them back in ~0.1 s instead of a search.
+- **Skills from the catalogue.** The 503 skills in the maze are indexed once in the background (3.2 s) and matched locally with BM25 — a fitting skill costs the turn no recall (cutoff measured: fitting skills score 14.5–35, unrelated text ≤ 7.8; paths are ignored). `skill_load(name)` reassembles the full SKILL.md from its `skillsrc` parts (0.2 s).
+- **Resume from the maze.** `/resume` lists sessions, `/resume <id>` or `/resume last` rebuilds one from its `auto:turn` chain — the maze is the session store; a resumed session continues its chain. Any session soaked under `auto:turn:<id>` resumes, the Python harness's included.
+- **The model knows the contract.** The system prompt says what the harness already does (recall first, soak every turn, ids after a rebase, skills by name), so the model recalls only for what is missing and saves only distilled facts.
+
 What it wires in, all **real**:
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
 - `run_terminal` — everything is allowed except a denylist (`sudo`, `su`, recursive `rm` on `/`·`~`·`*`, `mkfs`, `dd`, shutdown/reboot, curl-pipe-shell, force-push, …); extra words via config `command_denylist`. It is a guard, **not** a jail — do not treat it as sandboxing.

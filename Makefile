@@ -39,7 +39,7 @@ ANSI := src/tools/ansi_strip.cpp
 UI := src/ui.cpp src/ui_simd.cpp
 NET := src/net/http.cpp
 HTTPLLM := src/agent/http_llm.cpp
-CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp
+CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp
 MCP := src/tools/mcp_client.cpp
 DELEG := src/tools/delegation_output_schema.cpp
@@ -67,6 +67,9 @@ build/dd_agent: $(CORE) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.
 
 build/dd_tui: $(CORE) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(CORE) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) src/dd_tui.cpp -pthread -lcurl -o build/dd_tui
+
+build/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(wildcard include/dd/context/*.hpp) tests/maze_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) tests/maze_test.cpp -pthread -lcurl -o build/dd_maze_tests
 
 build/dd_context_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(wildcard include/dd/context/*.hpp) tests/context_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) tests/context_test.cpp -pthread -lcurl -o build/dd_context_tests
@@ -295,6 +298,7 @@ test: build/dd_cc_tests
 test: build/dd_ui_tests
 test: build/dd_chat_stream_tests
 test: build/dd_context_tests
+test: build/dd_maze_tests
 
 test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_tests build/dd_gateway_tests build/dd_agent_retry_tests build/dd_agent_misc_tests build/dd_agent_boundary_tests build/dd_agent_tape_tests build/dd_cron_tests build/dd_cron_jobs_tests build/dd_sticker_tests build/dd_pairing_tests build/dd_tools_security_tests build/dd_tools_interrupt_tests build/dd_debug_tests build/dd_budget_tests build/dd_tool_limits_tests build/dd_env_passthrough_tests build/dd_backend_helpers_tests build/dd_audio_container_tests build/dd_sha1_tests build/dd_sha256_tests build/dd_camofox_tests build/dd_terminal_hints_tests build/dd_threat_patterns_tests build/dd_schema_sanitizer_tests build/dd_url_safety_tests build/dd_osv_parse_tests build/dd_ansi_strip_tests build/dd_mcp_schema_cache_tests build/dd_delegation_schema_tests build/dd_patch_parser_tests build/dd_fuzzy_match_tests build/dd_todo_tests build/dd_tool_search_tests build/dd_website_policy_tests build/dd_gateway_authz_tests build/dd_channel_directory_tests build/dd_hooks_tests build/dd_mirror_tests build/dd_backend_kind_tests build/dd_errors_tests build/dd_ssl_guard_tests build/dd_retry_tests
 	./build/dd_tests
@@ -364,6 +368,7 @@ test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_t
 	./build/dd_ui_tests
 	./build/dd_chat_stream_tests
 	./build/dd_context_tests
+	./build/dd_maze_tests
 
 clean:
 	-rm -rf build

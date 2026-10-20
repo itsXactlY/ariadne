@@ -22,6 +22,7 @@
 #include "dd/context/endpoint.hpp"
 #include "dd/context/engine.hpp"
 #include "dd/context/maze.hpp"
+#include "dd/context/recall.hpp"
 #include "dd/core/config.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
@@ -543,7 +544,7 @@ struct Editor {
 };
 
 static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/context", "/rebase",
-                                        "/clear", "/new", "/interrupt", "/quit"};
+                                        "/resume", "/clear", "/new", "/interrupt", "/quit"};
 
 static std::string trim_ws(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
@@ -775,11 +776,38 @@ int main(int argc, char** argv) {
     const Json* ts_raw = cfg.get_map("tool_search");
     dd::context::ToolDeck deck(reg, dd::tools::ToolSearchConfig::from_raw(ts_raw ? *ts_raw : Json{}));
     deck.registrar = [&](const ToolEntry& e) { add_tool(e); };
-    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal"});
 
     // ---- the maze: what ages out of the window comes back from here ----
     auto maze = std::make_shared<dd::context::Maze>(maze_url);
     if (maze->configured()) maze->probe();
+    // the skill catalogue lives in the maze: indexed once, matched locally, read back by id
+    dd::context::SkillIndex skills(maze);
+    if (maze->up()) skills.load_async();
+    {
+        ToolEntry e;
+        e.name = "skill_load";
+        e.schema = json_obj({{"description", jsp(json_str(
+                                 "Read a skill's full instructions (SKILL.md) from mazemaker by name. The turn's memory "
+                                 "context names a fitting skill when there is one; any skill name works."))},
+                             {"parameters", jsp(json_obj({{"type", jsp(json_str("object"))},
+                                                          {"properties", jsp(json_obj({{"name", jsp(json_obj({{"type", jsp(json_str("string"))}}))}}))},
+                                                          {"required", jsp(json_arr({jsp(json_str("name"))}))}}))}});
+        e.handler = [&skills](const Json& a) {
+            const Json* n = json_get(a, "name");
+            if (!n || n->type != Json::Str || n->str.empty()) return jerr("name required");
+            if (!skills.ready()) return jerr("the skill index is still loading; try again in a moment");
+            std::string resolved;
+            const std::string text = skills.load(n->str, &resolved);
+            if (text.empty()) {
+                std::string near;
+                for (const auto& [sk, score] : skills.search(n->str, 3)) near += (near.empty() ? "" : ", ") + sk.name;
+                return jerr("no skill '" + n->str + "'" + (near.empty() ? "" : "; close: " + near));
+            }
+            return json_dump(json_obj({{"name", jsp(json_str(resolved))}, {"text", jsp(json_str(text))}}));
+        };
+        add_tool(e);
+    }
+    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "skill_load"});
     std::error_code cwd_ec;
     const std::string work = std::filesystem::current_path(cwd_ec).string() + "/.daedalus";
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
@@ -819,8 +847,23 @@ int main(int argc, char** argv) {
     ec.turn_recall = !cfg.has("memory.turn_recall") || cfg.get_bool("memory.turn_recall");
     ec.prewarm = !cfg.has("compression.prewarm") || cfg.get_bool("compression.prewarm");
     if (const char* v = std::getenv("DD_FAST_LAYER")) ec.fast_layer_tokens = std::atol(v);   // tests force a rebase
+    if (maze->configured())
+        system_prompt +=
+            "\n\n## This harness and mazemaker are one memory\n"
+            "- Every turn the harness recalls once for your question and attaches the result to it as "
+            "<memory-context>: recalled memories, what the graph connects to them, extracted facts, earlier turns "
+            "of this session when you ask about them, and a fitting skill. That is step [1] RECALL FIRST of the "
+            "memory protocol, already done: when it answers, answer from it. Call mazemaker_recall only for what "
+            "the block lacks.\n"
+            "- The harness writes every finished turn (auto:turn:<session>) and your reasoning "
+            "(auto:reasoning:<session>) into mazemaker itself and chains them in the graph. Never save turn "
+            "transcripts; use mazemaker_remember only for distilled facts with curated labels (decision:, bug:, "
+            "fact:, invariant:, ops:, status:).\n"
+            "- When the window is rebuilt, the earlier turns are named by memory id: mazemaker_get(memory_ids=[…]) "
+            "reads them back at once, no search needed.\n"
+            "- Skills live in mazemaker: skill_load(name) reads a skill's full instructions.";
     dd::context::TapeEngine engine(ec, system_prompt, ep, maze, maze->configured() ? &soaker : nullptr, deck, llm,
-                                   work + "/spill");
+                                   work + "/spill", &skills);
     engine.on_note = [&scene](const std::string& n) { scene.note(n); };
     engine.on_recall = [&scene](bool on) { scene.recall(on); };
     engine.on_stats = [&scene](const dd::context::TapeStats& t) {
@@ -843,6 +886,8 @@ int main(int argc, char** argv) {
         v.soaked = t.soaked;
         v.soak_queue = t.soak_queue;
         v.spooled = t.spooled;
+        v.ledger = static_cast<long>(t.ledger);
+        v.edges = static_cast<long>(t.edges);
         scene.set_tape(v);
     };
     llm.on_stats = [&scene, &engine](const dd::agent::CallStats& st) {
@@ -1045,6 +1090,7 @@ int main(int argc, char** argv) {
                     scene.note("new session " + engine.session().id() + " · the maze still has the last one");
                 }
             } else if (cmd == "/context") {
+                if (!running.load()) engine.sync();
                 const auto t = engine.stats();
                 const int reuse = t.prompt > 0 ? static_cast<int>(100.0 * static_cast<double>(t.reused) / static_cast<double>(t.prompt) + 0.5) : -1;
                 scene.note("session " + t.session + " · epoch " + std::to_string(t.epoch) + " · history " +
@@ -1055,7 +1101,30 @@ int main(int argc, char** argv) {
                            " · tools " + std::to_string(t.visible) + " in window, " + std::to_string(t.deferred) +
                            " deferred · server " + t.server + ", main slot " + std::to_string(t.main_slot) +
                            "\nmaze " + (t.maze ? "up" : "down") + " · " + std::to_string(t.soaked) + " soaked, " +
-                           std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled");
+                           std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled · ledger " +
+                           std::to_string(t.ledger) + " nodes, " + std::to_string(t.edges) + " edges · " +
+                           std::to_string(t.skills) + " skills indexed" + (t.recall.empty() ? "" : "\nlast recall: " + t.recall));
+            } else if (cmd == "/resume") {
+                const std::string arg = trim_ws(p.substr(cmd.size()));
+                if (running.load()) {
+                    scene.note("/resume applies between turns");
+                } else if (arg.empty()) {
+                    std::string list;
+                    for (const auto& r : engine.recent_sessions("dd-", 8))
+                        list += "\n  " + r.id + " · " + std::to_string(r.turns) + " turns · " + r.last;
+                    scene.note(list.empty() ? std::string("no dd sessions in the maze yet")
+                                            : "sessions in the maze (/resume <id>, any auto:turn session works):" + list);
+                } else {
+                    std::string why, sid = arg;
+                    if (arg == "last")   // the newest session that is not this one
+                        for (const auto& r : engine.recent_sessions("dd-", 3))
+                            if (r.id != engine.session().id()) {
+                                sid = r.id;
+                                break;
+                            }
+                    scene.clear();
+                    if (!engine.resume(sid, &why)) scene.error("resume " + sid + ": " + why);
+                }
             } else if (cmd == "/rebase") {
                 if (running.load()) scene.note("/rebase applies between turns");
                 else engine.rebase_now();

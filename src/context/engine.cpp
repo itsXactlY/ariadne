@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 
 namespace dd {
 namespace context {
@@ -125,12 +127,14 @@ std::string turn_so_far(const std::vector<ItemPtr>& dropped) {
 
 // ---------------- TapeEngine ----------------
 
-TapeEngine::TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Maze> maze,
-                       Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root)
-    : cfg_(cfg), system_(std::move(system_prompt)), ep_(ep), maze_(std::move(maze)), soaker_(soaker), deck_(deck),
+TapeEngine::TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Memory> memory,
+                       Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root,
+                       const SkillIndex* skills)
+    : cfg_(cfg), system_(std::move(system_prompt)), ep_(ep), mem_(std::move(memory)), soaker_(soaker), skills_(skills),
+      recaller_(mem_, skills), deck_(deck),
       llm_(llm), spill_root_(std::move(spill_root)), session_(std::make_unique<Session>(Session::new_id())),
       spill_(std::make_unique<Spill>(spill_root_ + "/" + session_->id())),
-      render_(cfg.render, [m = maze_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get()) {}
+      render_(cfg.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get()) {}
 
 TapeEngine::~TapeEngine() {
     join_prep(true);
@@ -169,7 +173,7 @@ void TapeEngine::note(const std::string& s) const {
 void TapeEngine::soak(Item& item) {
     if (item.soaked || item.msg.role != "assistant" || item.msg.reasoning.empty()) return;
     item.soaked = true;
-    if (soaker_) soaker_->reasoning(session_->id(), item.msg.reasoning);
+    if (soaker_) soaker_->reasoning(session_->id(), item.msg.reasoning, session_->generation());
 }
 
 TapeStats TapeEngine::stats() const {
@@ -191,12 +195,16 @@ TapeStats TapeEngine::stats() const {
     s.visible = deck_.visible() + (deck_.active() ? 3 : 0);
     s.deferred = deck_.deferred();
     s.main_slot = ep_.main_slot();
-    s.maze = maze_ && maze_->up();
+    s.maze = mem_ && mem_->up();
+    s.ledger = ledger_.size();
+    s.skills = skills_ ? skills_->size() : 0;
+    s.recall = last_recall_;
     if (soaker_) {
         const auto st = soaker_->stats();
         s.soaked = st.written;
         s.soak_queue = st.queued - st.written - st.spooled;
         s.spooled = st.spooled;
+        s.edges = st.edges;
     }
     s.session = session_->id();
     return s;
@@ -204,6 +212,29 @@ TapeStats TapeEngine::stats() const {
 
 void TapeEngine::emit() const {
     if (on_stats) on_stats(stats());
+}
+
+// ---- the session in the graph ----
+
+void TapeEngine::drain_ledger() {
+    if (!soaker_) return;
+    LedgerEntry e;
+    while (soaker_->take(e))
+        if (e.session == session_->id()) ledger_.push_back(std::move(e));
+}
+
+std::set<long> TapeEngine::in_window() const {
+    std::set<long> ids;
+    for (const auto& e : ledger_)
+        if (e.epoch == session_->generation()) ids.insert(e.id);
+    return ids;
+}
+
+std::vector<long> TapeEngine::turn_ids(bool earlier_only) const {
+    std::vector<long> ids;
+    for (const auto& e : ledger_)
+        if (e.kind == "turn" && (!earlier_only || e.epoch != session_->generation())) ids.push_back(e.id);
+    return ids;
 }
 
 // ---- turn start ----
@@ -214,6 +245,7 @@ void TapeEngine::begin_turn(const std::string& user_message) {
     if (prep_running_.load() && ep_.single_sequence()) join_prep(true);
     else if (!prep_running_.load() && prep_thread_.joinable()) prep_thread_.join();
 
+    drain_ledger();
     question_ = user_message;
     Message um;
     um.role = "user";
@@ -228,14 +260,22 @@ void TapeEngine::begin_turn(const std::string& user_message) {
     // One recall for the turn, rendered onto the question once (it rides the
     // tape from there). A rebase that just recalled for this question
     // already carries it in turn 0.
-    if (cfg_.turn_recall && maze_ && maze_->configured() && !trivial_prompt(user_message) && !rebased) {
-        if (!maze_->up()) maze_->probe();
-        if (maze_->up()) {
+    if (cfg_.turn_recall && mem_ && mem_->configured() && !trivial_prompt(user_message) && !rebased) {
+        if (!mem_->up()) mem_->probe();
+        if (mem_->up()) {
             if (on_recall) on_recall(true);
-            const auto hits = maze_->recall(anchored_query(session_->items(), session_->current_user()),
-                                            cfg_.recall_limit, false, cfg_.recall_timeout_ms);
+            const Prefetch p = recaller_.run(anchored_query(session_->items(), session_->current_user()), in_window(),
+                                             turn_ids(true));
             if (on_recall) on_recall(false);
-            injection_ = Maze::context_block(hits);
+            injection_ = p.block;
+            char ms[16];
+            std::snprintf(ms, sizeof ms, "%.1fs", p.ms / 1000.0);
+            last_recall_ = std::to_string(p.hits) + " recalled · " + std::to_string(p.linked) + " linked · " +
+                           std::to_string(p.facts) + " facts" + (p.earlier ? " · " + std::to_string(p.earlier) + " earlier" : "") +
+                           (p.skill.empty() ? "" : " · skill " + p.skill) +
+                           (p.dropped ? " · " + std::to_string(p.dropped) + " already in the window" : "") + " · " +
+                           (p.intent.empty() ? "" : p.intent + " · ") + ms;
+            note("◈ " + last_recall_);
         }
     }
     emit();
@@ -298,7 +338,8 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
 void TapeEngine::rebase(const char* why) {
     if (std::unique_ptr<Prep> stale(ready_.exchange(nullptr)); stale && stale->slot >= 0) ep_.erase(stale->slot);
     bool recalled = false;
-    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio());
+    drain_ledger();
+    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio(), turn_ids(false));
     const size_t before = session_->items().size();
     const long tokens = tokens_;
     // A rebase that cannot make room would rebase again on the next call,
@@ -331,7 +372,7 @@ long TapeEngine::prefix_tokens(double ratio) const {
 }
 
 std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                                bool* recalled, double ratio) const {
+                                                bool* recalled, double ratio, const std::vector<long>& turn_ids) const {
     long cur = -1;
     for (size_t i = items.size(); i-- > 0;)
         if (items[i]->msg.role == "user" && !items[i]->hidden) {
@@ -368,24 +409,31 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
         }
     }
 
-    std::vector<std::string> blocks = {
-        "[rebased] This conversation was rebuilt to keep the working context inside the GPU's fast layer. "
-        "Everything before this point is in mazemaker under auto:turn:" + session_id +
-        ":* -- recall it before redoing any of it."};
+    std::string pointer = "[rebased] This conversation was rebuilt to keep the working context inside the GPU's fast "
+                         "layer. Everything before this point is in mazemaker under auto:turn:" + session_id + ":*";
+    if (!turn_ids.empty()) {   // by id: read back at once, no search
+        std::string ids;
+        for (size_t i = turn_ids.size() > 12 ? turn_ids.size() - 12 : 0; i < turn_ids.size(); ++i)
+            ids += (ids.empty() ? "" : ",") + std::to_string(turn_ids[i]);
+        pointer += "; its turns are memory ids [" + ids + "] — mazemaker_get(memory_ids=[" + ids +
+                  "]) reads any of them back at once";
+    }
+    pointer += ". Read it back before redoing any of it.";
+    std::vector<std::string> blocks = {pointer};
     if (cur >= 0) {
         const std::vector<ItemPtr> dropped(items.begin() + cur + 1, items.begin() + std::max(cur + 1, cut));
         if (std::string t = turn_so_far(dropped); !t.empty()) blocks.push_back(t);
     }
     std::string block;
-    if (maze_ && maze_->up() && cur >= 0) {
+    if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
         for (int attempt = 0; attempt < 2 && block.empty(); ++attempt)
-            block = Maze::context_block(maze_->recall(query, 8, false, cfg_.recall_timeout_ms));
+            block = recaller_.run(query, {}, turn_ids).block;   // the whole epoch leaves the window: nothing is in it
     }
     if (recalled) *recalled = !block.empty();
     if (!block.empty()) {
         blocks.push_back(block);
-    } else if (maze_ && maze_->up()) {
+    } else if (mem_ && mem_->up()) {
         blocks.push_back("[recall required] The rebase returned no prefetched memories. Do NOT assume this "
                          "conversation started here. Call mazemaker_recall on the question above BEFORE answering, "
                          "re-reading files, or redoing any prior work.");
@@ -488,7 +536,8 @@ void TapeEngine::after_tools() {
 // ---- turn end ----
 
 void TapeEngine::end_turn(const std::string& final_response, bool interrupted) {
-    if (!interrupted && !final_response.empty() && soaker_) soaker_->turn(session_->id(), question_, final_response);
+    if (!interrupted && !final_response.empty() && soaker_)
+        soaker_->turn(session_->id(), question_, final_response, session_->generation());
     // the final answer's thinking is never sent again this turn: soak it now
     const auto& items = session_->items();
     if (!items.empty() && items.back()->msg.role == "assistant") soak(*items.back());
@@ -497,7 +546,7 @@ void TapeEngine::end_turn(const std::string& final_response, bool interrupted) {
 }
 
 void TapeEngine::start_prep() {
-    if (!cfg_.prewarm || prep_running_.load() || ready_.load() || !maze_ || !maze_->up()) return;
+    if (!cfg_.prewarm || prep_running_.load() || ready_.load() || !mem_ || !mem_->up()) return;
     const ServerInfo& si = ep_.info();
     // a single-slot llama-server would evict main to warm it; a remote API has nothing to warm
     if (!si.local || (si.slots < 2 && !ep_.single_sequence())) return;
@@ -511,14 +560,16 @@ void TapeEngine::start_prep() {
     const int slot = ep_.multi_slot() ? ep_.sidekick_slot() : -1;
     Renderer quiet = render_.quiet();
     const double ratio = render_.ratio();
+    drain_ledger();
+    const std::vector<long> ids = turn_ids(false);   // the thread gets a copy, never the ledger
     prep_cancel_.store(false);
     prep_running_.store(true);
     note("⟲ prewarming the next epoch: " + thousands(pool) + " tokens ≥ high watermark " + thousands(high_at()) +
          (slot >= 0 ? " · sidekick slot " + std::to_string(slot) : " · parked (one-conversation engine)"));
-    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio]() mutable {
+    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio, ids]() mutable {
         auto p = std::make_unique<Prep>();
         bool recalled = false;
-        p->base = retrieval_base(snapshot, sid, &recalled, ratio);
+        p->base = retrieval_base(snapshot, sid, &recalled, ratio, ids);
         if (high_at() > 0 && epoch_tokens(p->base, ratio) >= high_at()) {   // no room to make: nothing to warm
             note("⟲ prewarm dropped: the next epoch would not land under the high watermark");
             prep_running_.store(false);
@@ -563,13 +614,104 @@ void TapeEngine::reset() {
     delete ready_.exchange(nullptr);
     session_ = std::make_unique<Session>(Session::new_id());
     spill_ = std::make_unique<Spill>(spill_root_ + "/" + session_->id());
-    render_ = Renderer(cfg_.render, [m = maze_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get());
+    render_ = Renderer(cfg_.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get());
+    ledger_.clear();
+    last_recall_.clear();
     tape_.reset();
     injection_.clear();
     question_.clear();
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
     emit();
+}
+
+std::vector<TapeEngine::SessionRef> TapeEngine::recent_sessions(const std::string& prefix, int limit) const {
+    std::vector<SessionRef> out;
+    if (!mem_ || !mem_->configured()) return out;
+    std::vector<Hit> rows;
+    for (int off = 0; off < 5000; off += 500) {
+        auto page = mem_->labels("auto:turn:" + prefix, off, 500);
+        rows.insert(rows.end(), page.begin(), page.end());
+        if (page.size() < 500) break;
+    }
+    for (const auto& r : rows) {   // auto:turn:<session>:<hex ts>
+        const std::string rest = r.label.substr(10);
+        const size_t c = rest.rfind(':');
+        if (c == std::string::npos) continue;
+        const std::string sid = rest.substr(0, c), ts = rest.substr(c + 1);
+        auto it = std::find_if(out.begin(), out.end(), [&](const SessionRef& s) { return s.id == sid; });
+        if (it == out.end()) out.push_back(SessionRef{sid, ts, 1});
+        else {
+            ++it->turns;
+            if (ts > it->last) it->last = ts;
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const SessionRef& a, const SessionRef& b) {
+        return a.last.size() != b.last.size() ? a.last.size() > b.last.size() : a.last > b.last;
+    });
+    if (static_cast<int>(out.size()) > limit) out.resize(static_cast<size_t>(limit));
+    for (auto& s : out) {   // hex unix seconds -> UTC
+        const std::time_t t = static_cast<std::time_t>(std::strtoll(s.last.c_str(), nullptr, 16));
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char b[32];
+        std::strftime(b, sizeof b, "%Y-%m-%d %H:%M UTC", &tm);
+        s.last = b;
+    }
+    return out;
+}
+
+bool TapeEngine::resume(const std::string& session_id, std::string* why) {
+    if (!mem_ || !mem_->configured()) {
+        if (why) *why = "no mazemaker";
+        return false;
+    }
+    std::vector<Hit> rows;
+    for (int off = 0; off < 5000; off += 500) {
+        auto page = mem_->labels("auto:turn:" + session_id + ":", off, 500);
+        rows.insert(rows.end(), page.begin(), page.end());
+        if (page.size() < 500) break;
+    }
+    if (rows.empty()) {
+        if (why) *why = "no auto:turn:" + session_id + ":* in the maze";
+        return false;
+    }
+    std::vector<long> ids;
+    for (const auto& r : rows) ids.push_back(r.id);
+    auto bodies = mem_->get(ids);
+    std::sort(bodies.begin(), bodies.end(), [](const Hit& a, const Hit& b) {
+        return a.label.size() != b.label.size() ? a.label.size() < b.label.size() : a.label < b.label;
+    });
+    join_prep(true);
+    delete ready_.exchange(nullptr);
+    session_ = std::make_unique<Session>(session_id);
+    spill_ = std::make_unique<Spill>(spill_root_ + "/" + session_->id());
+    render_ = Renderer(cfg_.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get());
+    tape_.reset();
+    ledger_.clear();
+    injection_.clear();
+    question_.clear();
+    tokens_ = prompt_ = reused_ = 0;
+    tool_chars_ = 0;
+    std::string last;
+    for (const auto& b : bodies) {   // "session:… @ …\n\n=== USER ===\n<u>\n\n=== ASSISTANT ===\n<a>"
+        static const std::string kUser = "=== USER ===\n", kAsst = "\n\n=== ASSISTANT ===\n";
+        const size_t u = b.content.find(kUser), a = b.content.find(kAsst);
+        if (u == std::string::npos || a == std::string::npos || a < u) continue;
+        Message um, am;
+        um.role = "user";
+        um.content = b.content.substr(u + kUser.size(), a - u - kUser.size());
+        am.role = "assistant";
+        am.content = b.content.substr(a + kAsst.size());
+        session_->append(std::move(um));
+        session_->append(std::move(am));
+        ledger_.push_back(LedgerEntry{"turn", b.label, session_id, b.id, session_->generation()});
+        last = b.label;
+    }
+    if (soaker_ && !last.empty()) soaker_->continue_chain(last);
+    note("⟲ resumed " + session_id + " from the maze: " + std::to_string(ledger_.size()) + " turns");
+    emit();
+    return true;
 }
 
 void TapeEngine::rebase_now() {

@@ -1257,9 +1257,9 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         }
         row(py + 3, "history", std::to_string(tape_.history) + " msgs · tape " + std::to_string(tape_.tape), val);
         row(py + 4, "tools", std::to_string(tape_.visible) + " in · " + std::to_string(tape_.deferred) + " deferred", val);
-        std::string mz = tape_.maze ? "● up" : "○ down";
-        mz += " · " + std::to_string(tape_.soaked) + " soaked";
-        if (tape_.soak_queue) mz += " · " + std::to_string(tape_.soak_queue) + " queued";
+        std::string mz = tape_.maze ? "● " : "○ down · ";
+        mz += std::to_string(tape_.ledger) + " nodes · " + std::to_string(tape_.edges) + " edges";
+        if (tape_.soak_queue) mz += " · " + std::to_string(tape_.soak_queue) + " writing";
         if (tape_.spooled) mz += " · " + std::to_string(tape_.spooled) + " spooled";
         row(py + 5, "maze", mz, tape_.maze ? Style{th_.ok} : Style{th_.error});
     }
