@@ -1,5 +1,8 @@
 # daedalus-cpp
 
+
+<p align="center"><img src="Daedalus-CPP.png" alt="Daedalus-CPP" width="90%"/></p>
+
 **TL;DR:** C++20 port of the Daedalus agent. Plain `g++` + `Makefile` (CMake 4.4.3 is broken for this tree — don't use it). One real agent binary (`build/dd_agent`) that drives the ported run loop over a live llama.cpp OpenAI endpoint via libcurl, with working `read_file`/`write_file`/`list_dir` tools doing real I/O.
 
 ```
