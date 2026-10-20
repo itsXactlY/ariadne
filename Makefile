@@ -258,6 +258,9 @@ build/dd_constants_tests: src/core/json.cpp tests/constants_test.cpp
 build/dd_task_intensity_tests: src/core/json.cpp tests/task_intensity_test.cpp
 	$(CXX) $(CXXFLAGS) src/core/json.cpp tests/task_intensity_test.cpp -o build/dd_task_intensity_tests
 
+build/dd_json_tests: src/core/json.cpp include/dd/core/json.hpp tests/json_test.cpp
+	$(CXX) $(CXXFLAGS) src/core/json.cpp tests/json_test.cpp -o build/dd_json_tests
+
 build/dd_harness_config_tests: src/core/json.cpp tests/harness_config_test.cpp
 	$(CXX) $(CXXFLAGS) src/core/json.cpp tests/harness_config_test.cpp -o build/dd_harness_config_tests
 
@@ -299,6 +302,7 @@ test: build/dd_ui_tests
 test: build/dd_chat_stream_tests
 test: build/dd_context_tests
 test: build/dd_maze_tests
+test: build/dd_json_tests
 
 test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_tests build/dd_gateway_tests build/dd_agent_retry_tests build/dd_agent_misc_tests build/dd_agent_boundary_tests build/dd_agent_tape_tests build/dd_cron_tests build/dd_cron_jobs_tests build/dd_sticker_tests build/dd_pairing_tests build/dd_tools_security_tests build/dd_tools_interrupt_tests build/dd_debug_tests build/dd_budget_tests build/dd_tool_limits_tests build/dd_env_passthrough_tests build/dd_backend_helpers_tests build/dd_audio_container_tests build/dd_sha1_tests build/dd_sha256_tests build/dd_camofox_tests build/dd_terminal_hints_tests build/dd_threat_patterns_tests build/dd_schema_sanitizer_tests build/dd_url_safety_tests build/dd_osv_parse_tests build/dd_ansi_strip_tests build/dd_mcp_schema_cache_tests build/dd_delegation_schema_tests build/dd_patch_parser_tests build/dd_fuzzy_match_tests build/dd_todo_tests build/dd_tool_search_tests build/dd_website_policy_tests build/dd_gateway_authz_tests build/dd_channel_directory_tests build/dd_hooks_tests build/dd_mirror_tests build/dd_backend_kind_tests build/dd_errors_tests build/dd_ssl_guard_tests build/dd_retry_tests
 	./build/dd_tests
@@ -369,6 +373,7 @@ test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_t
 	./build/dd_chat_stream_tests
 	./build/dd_context_tests
 	./build/dd_maze_tests
+	./build/dd_json_tests
 
 clean:
 	-rm -rf build

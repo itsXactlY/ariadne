@@ -13,6 +13,59 @@ static void skip_ws(const std::string& s, size_t& i) {
         ++i;
 }
 
+static unsigned hex4(const std::string& s, size_t& i) {
+    if (i + 4 > s.size()) throw std::runtime_error("json: bad \\u");
+    unsigned v = 0;
+    for (size_t k = 0; k < 4; ++k) {
+        const char c = s[i + k];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= static_cast<unsigned>(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= static_cast<unsigned>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= static_cast<unsigned>(c - 'A' + 10);
+        else throw std::runtime_error("json: bad \\u");
+    }
+    i += 4;
+    return v;
+}
+
+static void put_utf8(std::string& out, unsigned cp) {
+    if (cp < 0x80) out.push_back(static_cast<char>(cp));
+    else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Length of the well-formed UTF-8 sequence at p (RFC 3629: no overlongs,
+// no surrogates, nothing past U+10FFFF), 0 if it is not one.
+static size_t utf8_len(const unsigned char* p, size_t left) {
+    const unsigned char c = p[0];
+    auto cont = [&](size_t k) { return k < left && (p[k] & 0xC0) == 0x80; };
+    if (c >= 0xC2 && c <= 0xDF) return cont(1) ? 2 : 0;
+    if (c >= 0xE0 && c <= 0xEF) {
+        if (!cont(1) || !cont(2)) return 0;
+        if (c == 0xE0 && p[1] < 0xA0) return 0;
+        if (c == 0xED && p[1] >= 0xA0) return 0;
+        return 3;
+    }
+    if (c >= 0xF0 && c <= 0xF4) {
+        if (!cont(1) || !cont(2) || !cont(3)) return 0;
+        if (c == 0xF0 && p[1] < 0x90) return 0;
+        if (c == 0xF4 && p[1] >= 0x90) return 0;
+        return 4;
+    }
+    return 0;
+}
+
 static Json parse_value(const std::string& s, size_t& i);
 
 static std::string parse_string_raw(const std::string& s, size_t& i) {
@@ -36,19 +89,18 @@ static std::string parse_string_raw(const std::string& s, size_t& i) {
             case 'r': out.push_back('\r'); break;
             case 't': out.push_back('\t'); break;
             case 'u': {
-                if (i + 4 > s.size()) throw std::runtime_error("json: bad \\u");
-                unsigned cp = std::stoul(s.substr(i, 4), nullptr, 16);
-                i += 4;
-                // Encode code point as UTF-8 (BMP only; no surrogate pairing).
-                if (cp < 0x80) out.push_back((char)cp);
-                else if (cp < 0x800) {
-                    out.push_back((char)(0xC0 | (cp >> 6)));
-                    out.push_back((char)(0x80 | (cp & 0x3F)));
-                } else {
-                    out.push_back((char)(0xE0 | (cp >> 12)));
-                    out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
-                    out.push_back((char)(0x80 | (cp & 0x3F)));
+                // \uD83D\uDE00 pairs to one code point; a lone surrogate is U+FFFD
+                unsigned cp = hex4(s, i);
+                if (cp >= 0xD800 && cp < 0xDC00 && i + 6 <= s.size() && s[i] == '\\' && s[i + 1] == 'u') {
+                    size_t j = i + 2;
+                    const unsigned lo = hex4(s, j);
+                    if (lo >= 0xDC00 && lo < 0xE000) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        i = j;
+                    }
                 }
+                if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD;
+                put_utf8(out, cp);
             } break;
             default: out.push_back('\\'); out.push_back(e); break;
         }
@@ -135,7 +187,20 @@ static void dump_str(const Json& v, std::string& out) {
         } break;
         case Json::Str: {
             out.push_back('"');
-            for (unsigned char c : v.str) {
+            // servers parse strictly: an ill-formed byte (a cut tool output,
+            // a binary file) goes out as U+FFFD, never as itself
+            const auto* p = reinterpret_cast<const unsigned char*>(v.str.data());
+            const size_t n = v.str.size();
+            for (size_t k = 0; k < n;) {
+                const unsigned char c = p[k];
+                if (c >= 0x80) {
+                    const size_t len = utf8_len(p + k, n - k);
+                    if (len) out.append(v.str, k, len);
+                    else out += "\xEF\xBF\xBD";
+                    k += len ? len : 1;
+                    continue;
+                }
+                ++k;
                 switch (c) {
                     case '"': out += "\\\""; break;
                     case '\\': out += "\\\\"; break;
@@ -148,7 +213,7 @@ static void dump_str(const Json& v, std::string& out) {
                         if (c < 0x20) {
                             char buf[8]; std::snprintf(buf, sizeof buf, "\\u%04x", c);
                             out += buf;
-                        } else out.push_back((char)c);  // UTF-8 pass-through
+                        } else out.push_back(static_cast<char>(c));
                 }
             }
             out.push_back('"');

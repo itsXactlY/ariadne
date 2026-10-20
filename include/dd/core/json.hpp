@@ -24,7 +24,8 @@ using JsonSP = std::shared_ptr<Json>;
 
 // Parse a JSON document; throws std::runtime_error on malformed input.
 Json json_parse(const std::string& text);
-// Serialize to compact JSON (UTF-8 bytes pass through, ensure_ascii=false).
+// Serialize to compact JSON (UTF-8 passes through, ensure_ascii=false; an
+// ill-formed byte goes out as U+FFFD, so a strict server always parses it).
 std::string json_dump(const Json& v);
 
 // Builders.
