@@ -19,6 +19,7 @@
 #include <memory>
 #include <dd/core/message.hpp>
 #include <dd/core/json.hpp>
+#include <atomic>
 #include <functional>
 #include <dd/tools/registry.hpp>
 #include <dd/agent/iteration_budget.hpp>
@@ -61,7 +62,8 @@ public:
     // ---- owned state ----
     std::unique_ptr<IterationBudget> budget;
     int api_call_count = 0;
-    bool interrupt_requested = false;
+    // Set from another thread (a TUI's Esc); the loop polls it between steps.
+    std::atomic<bool> interrupt_requested{false};
 
     // ---- run loop ----
     std::string run(const std::string& user_message);

@@ -1,0 +1,1267 @@
+// src/ui.cpp — impl of dd/ui.hpp: cell grid, minimal-diff truecolor blit,
+// skin theme, transcript cards, fixed panel layout.
+#include "dd/ui.hpp"
+#include "dd/core/config.hpp"
+#include "dd/core/json.hpp"
+#include "dd/tools/ansi_strip.hpp"
+#include "dd/ui_simd.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace dd {
+namespace ui {
+
+namespace {
+
+constexpr char32_t kSentinel = 0x110000;   // never a glyph: forces a repaint
+// Below these a parallel region costs more than it saves (and wakes threads
+// on a box whose cores belong to the model).
+constexpr size_t kParCells = 1u << 15;
+constexpr int kParDirty = 4096, kParBlocks = 8;
+
+int par_threads() {
+#ifdef _OPENMP
+    return std::min(8, omp_get_max_threads());
+#else
+    return 1;
+#endif
+}
+constexpr char32_t kSpin[] = {U'⠋', U'⠙', U'⠹', U'⠸', U'⠼', U'⠴', U'⠦', U'⠧', U'⠇', U'⠏'};
+
+char32_t decode(const std::string& s, size_t& i) {
+    const unsigned char b0 = static_cast<unsigned char>(s[i]);
+    if (b0 < 0x80) { ++i; return b0; }
+    const int len = (b0 & 0xE0) == 0xC0 ? 2 : (b0 & 0xF0) == 0xE0 ? 3 : (b0 & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 0 || i + static_cast<size_t>(len) > s.size()) { ++i; return 0xFFFD; }
+    char32_t v = b0 & (0x7Fu >> len);
+    for (int k = 1; k < len; ++k) {
+        const unsigned char b = static_cast<unsigned char>(s[i + static_cast<size_t>(k)]);
+        if ((b & 0xC0) != 0x80) { ++i; return 0xFFFD; }
+        v = (v << 6) | (b & 0x3Fu);
+    }
+    i += static_cast<size_t>(len);
+    return v;
+}
+
+void encode(std::string& o, char32_t c) {
+    if (c < 0x80) {
+        o.push_back(static_cast<char>(c));
+    } else if (c < 0x800) {
+        o.push_back(static_cast<char>(0xC0 | (c >> 6)));
+        o.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    } else if (c < 0x10000) {
+        o.push_back(static_cast<char>(0xE0 | (c >> 12)));
+        o.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+        o.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    } else {
+        o.push_back(static_cast<char>(0xF0 | (c >> 18)));
+        o.push_back(static_cast<char>(0x80 | ((c >> 12) & 0x3F)));
+        o.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+        o.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    }
+}
+
+// Escapes and control bytes out, tabs to spaces.
+std::string clean(const std::string& s) {
+    std::string t = dd::tools::sanitize_display_text(s);
+    std::string o;
+    o.reserve(t.size());
+    for (char c : t) {
+        if (c == '\t') o += "    ";
+        else o.push_back(c);
+    }
+    return o;
+}
+
+// Longest prefix of s that fits in w columns.
+std::string cut(const std::string& s, int w) {
+    int used = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = i;
+        const int cw = cp_width(decode(s, j));
+        if (used + cw > w) break;
+        used += cw;
+        i = j;
+    }
+    return s.substr(0, i);
+}
+
+std::string trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(' ');
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(' ') - b + 1);
+}
+
+std::string hhmmss() {
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char b[16];
+    std::strftime(b, sizeof b, "%H:%M:%S", &tm);
+    return b;
+}
+
+std::string fmt_ms(double ms) {
+    char b[32];
+    if (ms < 1) return "<1ms";
+    if (ms < 10) std::snprintf(b, sizeof b, "%.1fms", ms);
+    else if (ms < 1000) std::snprintf(b, sizeof b, "%.0fms", ms);
+    else if (ms < 60000) std::snprintf(b, sizeof b, "%.1fs", ms / 1000);
+    else std::snprintf(b, sizeof b, "%dm%02ds", static_cast<int>(ms / 60000), static_cast<int>(std::fmod(ms / 1000, 60)));
+    return b;
+}
+
+std::string fmt_tok(long n) {
+    if (n < 1000) return std::to_string(n);
+    char b[32];
+    std::snprintf(b, sizeof b, "%.1fk", static_cast<double>(n) / 1000);
+    return b;
+}
+
+std::string fmt1(double v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.1f", v);
+    return b;
+}
+
+int to256(unsigned r, unsigned g, unsigned b) {
+    auto q = [](unsigned v) { return v < 48 ? 0 : v < 115 ? 1 : static_cast<int>((v - 35) / 40); };
+    return 16 + 36 * q(r) + 6 * q(g) + q(b);
+}
+
+uint32_t tri(uint32_t a, uint32_t b, uint32_t c, double t) {
+    return t < 0.5 ? mix(a, b, t * 2) : mix(b, c, (t - 0.5) * 2);
+}
+
+// `key="v"  n=3` from a JSON object; anything else as given.
+std::string flat_args(const std::string& raw) {
+    try {
+        const core::Json j = core::json_parse(raw);
+        if (j.type != core::Json::Obj) return raw;
+        std::string o;
+        for (const auto& [k, v] : j.obj) {
+            if (!o.empty()) o += "  ";
+            o += k + "=";
+            if (v && v->type == core::Json::Str) o += "\"" + clip(v->str, 60) + "\"";
+            else if (v) o += clip(core::json_dump(*v), 60);
+        }
+        return o.empty() ? "{}" : o;
+    } catch (...) {
+        return raw;
+    }
+}
+
+// The part of a tool result worth a glance; .first = it is an error.
+std::pair<bool, std::string> preview(const std::string& raw) {
+    std::string s = raw;
+    bool err = false;
+    try {
+        const core::Json j = core::json_parse(raw);
+        if (j.type == core::Json::Obj) {
+            const core::Json* e = core::json_get(j, "error");
+            const core::Json* out = core::json_get(j, "stdout");
+            const core::Json* content = core::json_get(j, "content");
+            const core::Json* entries = core::json_get(j, "entries");
+            const core::Json* is_err = core::json_get(j, "isError");
+            if (e && e->type == core::Json::Str) {
+                err = true;
+                s = "error: " + e->str;
+            } else if (out && out->type == core::Json::Str) {
+                const core::Json* ex = core::json_get(j, "exit");
+                s = "exit " + std::to_string(ex ? static_cast<long>(ex->num) : 0) + " · " + out->str;
+                err = ex && ex->num != 0;
+            } else if (content && content->type == core::Json::Str) {
+                s = content->str;
+            } else if (content && content->type == core::Json::Arr) {
+                s.clear();
+                for (const auto& part : content->arr)
+                    if (part)
+                        if (const core::Json* t = core::json_get(*part, "text"); t && t->type == core::Json::Str)
+                            s += (s.empty() ? "" : "\n") + t->str;
+                err = is_err && is_err->type == core::Json::Bool && is_err->b;
+            } else if (entries && entries->type == core::Json::Arr) {
+                s = std::to_string(entries->arr.size()) + " entries:";
+                for (const auto& p : entries->arr)
+                    if (p && p->type == core::Json::Str) {
+                        const size_t sl = p->str.find_last_of('/');
+                        s += " " + (sl == std::string::npos ? p->str : p->str.substr(sl + 1));
+                    }
+            } else {
+                s = core::json_dump(j);
+            }
+        }
+    } catch (...) {
+    }
+    std::string o;   // blank lines carry nothing in two rows
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t nl = s.find('\n', i);
+        if (nl == std::string::npos) nl = s.size();
+        std::string line = s.substr(i, nl - i);
+        if (line.find_first_not_of(" \t\r") != std::string::npos) o += (o.empty() ? "" : "\n") + line;
+        i = nl + 1;
+    }
+    return {err, o};
+}
+
+bool failed_result(const std::string& raw) {
+    return preview(raw).first;
+}
+
+// The three-row DAEDALUS mark, one column of space between letters.
+const char* const kLogo[3] = {
+    "╔╦╗ ╔═╗ ╔═╗ ╔╦╗ ╔═╗ ╦   ╦ ╦ ╔═╗",
+    " ║║ ╠═╣ ║╣   ║║ ╠═╣ ║   ║ ║ ╚═╗",
+    "═╩╝ ╩ ╩ ╚═╝ ═╩╝ ╩ ╩ ╩═╝ ╚═╝ ╚═╝",
+};
+
+}  // namespace
+
+// ---------------- text ----------------
+
+uint32_t mix(uint32_t a, uint32_t b, double t) {
+    if (a == kNone) return b;
+    if (b == kNone) return a;
+    t = std::clamp(t, 0.0, 1.0);
+    auto ch = [&](int sh) {
+        const double x = static_cast<double>((a >> sh) & 0xFF), y = static_cast<double>((b >> sh) & 0xFF);
+        return static_cast<uint32_t>(std::lround(x + (y - x) * t)) << sh;
+    };
+    return rgb(ch(16) | ch(8) | ch(0));
+}
+
+int cp_width(char32_t c) {
+    if (c < 0x20 || (c >= 0x7F && c < 0xA0)) return 0;
+    if ((c >= 0x300 && c <= 0x36F) || (c >= 0x1AB0 && c <= 0x1AFF) || (c >= 0x1DC0 && c <= 0x1DFF) ||
+        (c >= 0x200B && c <= 0x200F) || (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE00 && c <= 0xFE0F) ||
+        c == 0xFEFF || (c >= 0xE0100 && c <= 0xE01EF))
+        return 0;
+    if ((c >= 0x1100 && c <= 0x115F) || c == 0x2329 || c == 0x232A || (c >= 0x2E80 && c <= 0x303E) ||
+        (c >= 0x3041 && c <= 0x33FF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) ||
+        (c >= 0xA000 && c <= 0xA4CF) || (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) ||
+        (c >= 0xFE30 && c <= 0xFE4F) || (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6) ||
+        (c >= 0x1F300 && c <= 0x1F64F) || (c >= 0x1F680 && c <= 0x1F6FF) || (c >= 0x1F900 && c <= 0x1F9FF) ||
+        (c >= 0x1FA70 && c <= 0x1FAFF) || (c >= 0x20000 && c <= 0x3FFFD))
+        return 2;
+    return 1;
+}
+
+int text_width(const std::string& s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size();) {
+        if (const size_t run = simd::ascii_run(s.data() + i, s.size() - i)) {
+            n += simd::ascii_printable(s.data() + i, run);
+            i += run;
+            continue;
+        }
+        n += static_cast<size_t>(cp_width(decode(s, i)));
+    }
+    return static_cast<int>(n);
+}
+
+std::u32string from_utf8(const std::string& s) {
+    std::u32string o(s.size(), U'\0');   // never more codepoints than bytes
+    size_t n = 0;
+    for (size_t i = 0; i < s.size();) {
+        if (const size_t run = simd::ascii_run(s.data() + i, s.size() - i)) {
+            simd::widen_ascii(s.data() + i, run, o.data() + n);
+            i += run;
+            n += run;
+            continue;
+        }
+        o[n++] = decode(s, i);
+    }
+    o.resize(n);
+    return o;
+}
+
+std::string to_utf8(const std::u32string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char32_t c : s) encode(o, c);
+    return o;
+}
+
+std::vector<std::string> wrap(const std::string& s, int width, int max_rows) {
+    width = std::max(1, width);
+    std::vector<std::string> out;
+    std::u32string line;
+    int lw = 0, brk = -1;   // brk: index of the last space in line
+    auto emit = [&] {
+        std::u32string l = line;
+        while (!l.empty() && l.back() == U' ') l.pop_back();
+        out.push_back(to_utf8(l));
+        line.clear();
+        lw = 0;
+        brk = -1;
+    };
+    for (char32_t c : from_utf8(clean(s))) {
+        if (c == U'\n') { emit(); continue; }
+        const int cw = cp_width(c);
+        if (cw == 0) continue;
+        if (lw + cw > width) {
+            if (c == U' ') { emit(); continue; }
+            if (brk > 0) {
+                std::u32string rest = line.substr(static_cast<size_t>(brk) + 1);
+                line.resize(static_cast<size_t>(brk));
+                emit();
+                line = rest;
+                for (char32_t r : line) lw += cp_width(r);
+            } else {
+                emit();
+            }
+            if (lw + cw > width) emit();
+        }
+        line.push_back(c);
+        lw += cw;
+        if (c == U' ') brk = static_cast<int>(line.size()) - 1;
+    }
+    emit();
+    while (out.size() > 1 && out.back().empty()) out.pop_back();
+    if (max_rows > 0 && static_cast<int>(out.size()) > max_rows) {
+        out.resize(static_cast<size_t>(max_rows));
+        out.back() = cut(out.back(), width - 1) + "…";
+    }
+    return out;
+}
+
+std::string clip(const std::string& s, int width) {
+    std::string one = clean(s);
+    std::replace(one.begin(), one.end(), '\n', ' ');
+    if (text_width(one) <= width) return one;
+    if (width <= 0) return "";
+    return cut(one, width - 1) + "…";
+}
+
+std::string sgr(const Style& st, bool truecolor) {
+    std::string s = "\x1b[0";
+    if (st.at & kBold) s += ";1";
+    if (st.at & kDim) s += ";2";
+    if (st.at & kItalic) s += ";3";
+    if (st.at & kUnder) s += ";4";
+    auto col = [&](uint32_t c, bool fg) {
+        if (c == kNone) return;
+        const unsigned r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+        if (truecolor)
+            s += std::string(fg ? ";38;2;" : ";48;2;") + std::to_string(r) + ";" + std::to_string(g) + ";" + std::to_string(b);
+        else
+            s += std::string(fg ? ";38;5;" : ";48;5;") + std::to_string(to256(r, g, b));
+    };
+    col(st.fg, true);
+    col(st.bg, false);
+    s += 'm';
+    return s;
+}
+
+// ---------------- Canvas ----------------
+
+Canvas::Canvas(int w, int h)
+    : w_(std::max(0, w)), h_(std::max(0, h)),
+      cells_(static_cast<size_t>(std::max(0, w)) * static_cast<size_t>(std::max(0, h))) {}
+
+void Canvas::put(int x, int y, char32_t ch, Style st) {
+    if (x < 0 || y < 0 || x >= w_ || y >= h_) return;
+    int cw = cp_width(ch);
+    if (cw == 0) return;
+    if (cw == 2 && x + 1 >= w_) { ch = U' '; cw = 1; }
+    Cell& c = ref(x, y);
+    if (c.ch == 0 && x > 0) ref(x - 1, y).ch = U' ';                 // split a wide glyph's right half
+    if (cp_width(c.ch) == 2 && x + 1 < w_) ref(x + 1, y).ch = U' ';  // overwrote its left half
+    c = Cell{ch, st};
+    if (cw == 2) {
+        Cell& r = ref(x + 1, y);
+        if (cp_width(r.ch) == 2 && x + 2 < w_) ref(x + 2, y).ch = U' ';
+        r = Cell{0, st};
+    }
+}
+
+int Canvas::text(int x, int y, const std::string& s, Style st, int max_w) {
+    const int limit = max_w < 0 ? w_ : std::min(w_, x + max_w);
+    int cx = x;
+    for (size_t i = 0; i < s.size();) {
+        char32_t c = decode(s, i);
+        if (c == U'\t') c = U' ';
+        const int cw = cp_width(c);
+        if (cw == 0) continue;
+        if (cx + cw > limit) break;
+        put(cx, y, c, st);
+        cx += cw;
+    }
+    return cx - x;
+}
+
+int Canvas::gradient(int x, int y, const std::string& s, uint32_t a, uint32_t b, uint32_t c, uint32_t at) {
+    const int total = std::max(1, text_width(s) - 1);
+    int cx = x;
+    for (size_t i = 0; i < s.size();) {
+        const char32_t ch = decode(s, i);
+        const int cw = cp_width(ch);
+        if (cw == 0) continue;
+        if (cx + cw > w_) break;
+        put(cx, y, ch, Style{tri(a, b, c, static_cast<double>(cx - x) / total), kNone, at});
+        cx += cw;
+    }
+    return cx - x;
+}
+
+void Canvas::fill(int x, int y, int w, int h, Style st, char32_t ch) {
+    const int x0 = std::max(0, x), x1 = std::min(w_, x + w);
+    const int y0 = std::max(0, y), y1 = std::min(h_, y + h);
+    if (x0 >= x1) return;
+    const Cell c{ch, st};
+    for (int j = y0; j < y1; ++j) {
+        if (ref(x0, j).ch == 0 && x0 > 0) ref(x0 - 1, j).ch = U' ';
+        if (cp_width(ref(x1 - 1, j).ch) == 2 && x1 < w_) ref(x1, j).ch = U' ';
+        Cell* row = &ref(x0, j);
+#pragma omp simd
+        for (int i = 0; i < x1 - x0; ++i) row[i] = c;
+    }
+}
+
+void Canvas::box(int x, int y, int w, int h, Style b, bool rounded) {
+    if (w < 2 || h < 2) return;
+    for (int i = 1; i < w - 1; ++i) {
+        put(x + i, y, U'─', b);
+        put(x + i, y + h - 1, U'─', b);
+    }
+    for (int j = 1; j < h - 1; ++j) {
+        put(x, y + j, U'│', b);
+        put(x + w - 1, y + j, U'│', b);
+    }
+    put(x, y, rounded ? U'╭' : U'┌', b);
+    put(x + w - 1, y, rounded ? U'╮' : U'┐', b);
+    put(x, y + h - 1, rounded ? U'╰' : U'└', b);
+    put(x + w - 1, y + h - 1, rounded ? U'╯' : U'┘', b);
+}
+
+int Canvas::title(int x, int y, const std::string& label, Style label_st, Style border) {
+    put(x, y, U'┤', border);
+    put(x + 1, y, U' ', label_st);
+    const int n = text(x + 2, y, label, label_st);
+    put(x + 2 + n, y, U' ', label_st);
+    put(x + 3 + n, y, U'├', border);
+    return n + 4;
+}
+
+int Canvas::title_right(int right, int y, const std::string& label, Style label_st, Style border) {
+    return title(right - (text_width(label) + 4), y, label, label_st, border);
+}
+
+void Canvas::blit(const Canvas& src, int sy, int dx, int dy, int rows) {
+    const int cols = std::min(src.w(), w_ - dx);
+    if (cols <= 0) return;
+    for (int r = 0; r < rows; ++r) {
+        const int ty = dy + r, fy = sy + r;
+        if (ty < 0 || ty >= h_ || fy < 0 || fy >= src.h()) continue;
+        for (int i = 0; i < cols; ++i) ref(dx + i, ty) = src.at(i, fy);
+        if (cp_width(ref(dx + cols - 1, ty).ch) == 2 && (dx + cols >= w_ || cols < src.w()))
+            ref(dx + cols - 1, ty).ch = U' ';
+    }
+}
+
+std::string Canvas::row_text(int y) const {
+    std::string o;
+    if (y < 0 || y >= h_) return o;
+    for (int x = 0; x < w_; ++x)
+        if (at(x, y).ch != 0) encode(o, at(x, y).ch);
+    while (!o.empty() && o.back() == ' ') o.pop_back();
+    return o;
+}
+
+std::string Canvas::to_ansi(bool color, bool truecolor) const {
+    std::string o;
+    for (int y = 0; y < h_; ++y) {
+        int end = w_;
+        while (end > 0 && at(end - 1, y).ch == U' ' && at(end - 1, y).st.bg == kNone) --end;
+        Style cur;
+        bool styled = false;
+        for (int x = 0; x < end; ++x) {
+            const Cell& c = at(x, y);
+            if (c.ch == 0) continue;
+            if (color && (!styled || !(c.st == cur))) {
+                o += sgr(c.st, truecolor);
+                cur = c.st;
+                styled = true;
+            }
+            encode(o, c.ch);
+        }
+        if (styled) o += "\x1b[0m";
+        o += '\n';
+    }
+    return o;
+}
+
+// ---------------- Frame ----------------
+
+Frame::Frame(int w, int h) : Canvas(w, h) {}
+
+// Pass 1 diffs the grid with the widest SIMD unit; pass 2 encodes the dirty
+// rows, each self-contained (own cursor move + SGR), so rows go to OpenMP
+// threads when a frame is big and are joined in order.
+std::string Frame::present(bool truecolor) {
+    std::string head;
+    if (full_ || prev_.size() != cells_.size()) {
+        prev_.assign(cells_.size(), Cell{kSentinel, Style{}});
+        head = "\x1b[0m\x1b[2J";
+        full_ = false;
+    }
+    const size_t n = cells_.size();
+    std::vector<char> dirty(n);
+    std::vector<int> per_row(static_cast<size_t>(h_));
+    int total = 0;
+#pragma omp parallel for schedule(static) reduction(+ : total) if (n >= kParCells) num_threads(par_threads())
+    for (int y = 0; y < h_; ++y) {
+        per_row[static_cast<size_t>(y)] = simd::diff_cells(&cells_[idx(0, y)], &prev_[idx(0, y)], w_, &dirty[idx(0, y)]);
+        total += per_row[static_cast<size_t>(y)];
+    }
+
+    std::vector<std::string> rows(static_cast<size_t>(h_));
+#pragma omp parallel for schedule(dynamic, 2) if (total >= kParDirty) num_threads(par_threads())
+    for (int y = 0; y < h_; ++y) {
+        if (per_row[static_cast<size_t>(y)] == 0) continue;
+        char* d = &dirty[idx(0, y)];
+        for (int x = 1; x < w_; ++x)
+            if (d[x] && at(x, y).ch == 0) d[x - 1] = 1;   // a wide glyph repaints from its left half
+        std::string& out = rows[static_cast<size_t>(y)];
+        out.reserve(static_cast<size_t>(per_row[static_cast<size_t>(y)]) * 24);
+        int cx = -1;
+        Style cur;
+        bool styled = false;
+        for (int x = 0; x < w_; ++x) {
+            if (!d[x]) continue;
+            const Cell& c = at(x, y);
+            if (c.ch == 0) continue;
+            if (cx != x) out += "\x1b[" + std::to_string(y + 1) + ";" + std::to_string(x + 1) + "H";
+            if (!styled || !(c.st == cur)) {
+                out += sgr(c.st, truecolor);
+                cur = c.st;
+                styled = true;
+            }
+            encode(out, c.ch);
+            cx = x + cp_width(c.ch);
+            if (cx >= w_) cx = -1;   // pending wrap: position explicitly next time
+        }
+        if (styled) out += "\x1b[0m";
+    }
+    std::memcpy(prev_.data(), cells_.data(), n * sizeof(Cell));
+
+    size_t bytes = head.size();
+    for (const auto& r : rows) bytes += r.size();
+    std::string out;
+    out.reserve(bytes);
+    out += head;
+    for (const auto& r : rows) out += r;
+    return out;
+}
+
+// ---------------- Theme ----------------
+
+Theme Theme::load(const std::string& path) {
+    Theme t;
+    core::Config c{core::Json{}};
+    try {
+        c = core::load_config(path);
+    } catch (...) {
+        return t;
+    }
+    auto col = [&](const char* key, uint32_t& dst) {
+        const std::string v = c.get_string(std::string("colors.") + key);
+        if (v.size() != 7 || v[0] != '#') return;
+        char* end = nullptr;
+        const unsigned long hex = std::strtoul(v.c_str() + 1, &end, 16);
+        if (end && *end == '\0') dst = rgb(static_cast<uint32_t>(hex));
+    };
+    col("banner_border", t.border);
+    col("banner_title", t.title);
+    col("banner_accent", t.accent);
+    col("banner_dim", t.dim);
+    col("banner_text", t.text);
+    col("ui_accent", t.hot);
+    col("ui_label", t.label);
+    col("ui_ok", t.ok);
+    col("ui_error", t.error);
+    col("ui_warn", t.warn);
+    col("ui_gold", t.gold);
+    col("prompt", t.prompt);
+    col("input_rule", t.input_rule);
+    col("response_border", t.response);
+    col("session_label", t.session_label);
+    col("session_border", t.session_border);
+    col("status_bar_bg", t.status_bg);
+    col("completion_menu_current_bg", t.select_bg);
+    t.muted = mix(t.text, t.dim, 0.55);
+
+    if (const core::Json* w = c.get_list("spinner.wings"); w && w->type == core::Json::Arr) {
+        std::vector<std::pair<std::string, std::string>> wings;
+        for (const auto& p : w->arr)
+            if (p && p->type == core::Json::Arr && p->arr.size() == 2 && p->arr[0] && p->arr[1])
+                wings.emplace_back(p->arr[0]->str, p->arr[1]->str);
+        if (!wings.empty()) t.wings = std::move(wings);
+    }
+    if (const core::Json* v = c.get_list("spinner.thinking_verbs"); v && v->type == core::Json::Arr) {
+        std::vector<std::string> verbs;
+        for (const auto& p : v->arr)
+            if (p && p->type == core::Json::Str && !p->str.empty()) verbs.push_back(p->str);
+        if (!verbs.empty()) t.verbs = std::move(verbs);
+    }
+    auto str = [&](const char* key, std::string& dst) {
+        const std::string v = trim(c.get_string(std::string("branding.") + key));
+        if (!v.empty()) dst = v;
+    };
+    str("agent_name", t.agent_name);
+    str("response_label", t.response_label);
+    str("welcome", t.welcome);
+    str("goodbye", t.goodbye);
+    if (const std::string sym = c.get_string("branding.prompt_symbol"); !sym.empty()) t.prompt_symbol = sym;
+    return t;
+}
+
+// ---------------- Scene: feed side (any thread) ----------------
+
+Scene::Scene(Theme th) : th_(std::move(th)) {}
+
+void Scene::post(Event e) {
+    e.at = clock::now();
+    q_.push(std::move(e));
+}
+
+void Scene::set_info(const Info& info) {
+    Event e;
+    e.ev = Ev::Info;
+    e.info = std::make_shared<const Info>(info);
+    post(std::move(e));
+}
+
+void Scene::set_max_turns(int n) {
+    Event e;
+    e.ev = Ev::MaxTurns;
+    e.token = static_cast<uint64_t>(std::max(0, n));
+    post(std::move(e));
+}
+
+void Scene::user(const std::string& text) { Event e; e.ev = Ev::User; e.a = text; post(std::move(e)); }
+void Scene::say(const std::string& text) { Event e; e.ev = Ev::Say; e.a = text; post(std::move(e)); }
+void Scene::note(const std::string& text) { Event e; e.ev = Ev::Note; e.a = text; post(std::move(e)); }
+void Scene::error(const std::string& text) { Event e; e.ev = Ev::Error; e.a = text; post(std::move(e)); }
+void Scene::clear() { Event e; e.ev = Ev::Clear; post(std::move(e)); }
+void Scene::llm_begin() { Event e; e.ev = Ev::LlmBegin; post(std::move(e)); }
+void Scene::turn_begin() { Event e; e.ev = Ev::TurnBegin; post(std::move(e)); }
+void Scene::turn_end() { Event e; e.ev = Ev::TurnEnd; post(std::move(e)); }
+
+void Scene::llm_end(const LlmStats& s) {
+    Event e;
+    e.ev = Ev::LlmEnd;
+    e.llm = s;
+    post(std::move(e));
+}
+
+void Scene::tool_call(const std::string& id, const std::string& name, const std::string& args) {
+    Event e;
+    e.ev = Ev::ToolCall;
+    e.a = args;
+    e.b = name;
+    e.c = id;
+    post(std::move(e));
+}
+
+uint64_t Scene::tool_begin(const std::string& name) {
+    Event e;
+    e.ev = Ev::ToolBegin;
+    e.b = name;
+    e.token = next_token_.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t tok = e.token;
+    post(std::move(e));
+    return tok;
+}
+
+void Scene::tool_end(uint64_t token, double ms, bool ok) {
+    Event e;
+    e.ev = Ev::ToolEnd;
+    e.token = token;
+    e.ms = ms;
+    e.ok = ok;
+    post(std::move(e));
+}
+
+void Scene::tool_result(const std::string& id, const std::string& text) {
+    Event e;
+    e.ev = Ev::ToolResult;
+    e.a = text;
+    e.c = id;
+    post(std::move(e));
+}
+
+// ---------------- Scene: render side ----------------
+
+Entry& Scene::push(Kind k, const std::string& text) {
+    if (entries_.size() >= 400) {
+        entries_.pop_front();
+        cache_.pop_front();
+        if (printed_ > 0) --printed_;
+    }
+    Entry e;
+    e.kind = k;
+    e.text = text.size() > 64000 ? text.substr(0, 64000) : text;
+    e.clock = hhmmss();
+    entries_.push_back(std::move(e));
+    cache_.emplace_back();
+    return entries_.back();
+}
+
+void Scene::apply() {
+    Event e;
+    while (q_.pop(e)) apply(e);
+}
+
+void Scene::apply(Event& e) {
+    auto tools_back = [&](auto pred) -> Entry* {
+        for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
+            if (it->kind == Kind::Tool && pred(*it)) return &*it;
+        return nullptr;
+    };
+    switch (e.ev) {
+    case Ev::Info:
+        if (e.info) info_ = *e.info;
+        break;
+    case Ev::MaxTurns:
+        info_.max_turns = static_cast<int>(e.token);
+        break;
+    case Ev::User:
+        push(Kind::User, e.a);
+        break;
+    case Ev::Say:
+        push(Kind::Say, e.a).ms = last_.latency_ms;
+        break;
+    case Ev::Note:
+        push(Kind::Note, e.a);
+        break;
+    case Ev::Error:
+        push(Kind::Error, e.a);
+        break;
+    case Ev::Clear:
+        entries_.clear();
+        cache_.clear();
+        printed_ = 0;
+        scroll_ = 0;
+        break;
+    case Ev::ToolCall: {
+        Entry& t = push(Kind::Tool, e.a);
+        t.name = e.b;
+        t.call_id = e.c;
+        break;
+    }
+    case Ev::ToolBegin: {
+        // earliest pending call of that name in this turn
+        Entry* hit = nullptr;
+        for (auto it = entries_.rbegin(); it != entries_.rend() && it->kind != Kind::User; ++it)
+            if (it->kind == Kind::Tool && it->name == e.b && it->run == Run::Pending && it->token == 0) hit = &*it;
+        if (hit) {
+            hit->run = Run::Running;
+            hit->token = e.token;
+            ++hit->ver;
+        }
+        phase_ = Phase::Tools;
+        phase_t0_ = e.at;
+        running_tool_ = e.b;
+        break;
+    }
+    case Ev::ToolEnd:
+        if (Entry* t = tools_back([&](const Entry& x) { return x.token == e.token; })) {
+            t->run = e.ok ? Run::Ok : Run::Failed;
+            t->ms = e.ms;
+            ++t->ver;
+        }
+        ++tools_turn_;
+        break;
+    case Ev::ToolResult:
+        if (Entry* t = tools_back([&](const Entry& x) { return x.call_id == e.c && !x.resolved; })) {
+            t->result = e.a.size() > 16000 ? e.a.substr(0, 16000) : e.a;
+            t->resolved = true;
+            if (t->run == Run::Pending || t->run == Run::Running)
+                t->run = failed_result(t->result) ? Run::Failed : Run::Ok;
+            ++t->ver;
+        }
+        break;
+    case Ev::LlmBegin:
+        phase_ = Phase::Thinking;
+        phase_t0_ = e.at;
+        running_tool_.clear();
+        break;
+    case Ev::LlmEnd:
+        last_ = e.llm;
+        ++calls_total_;
+        ++turn_calls_;
+        if (e.llm.gen_tps > 0) {
+            tps_hist_.push_back(e.llm.gen_tps);
+            if (tps_hist_.size() > 24) tps_hist_.pop_front();
+        }
+        break;
+    case Ev::TurnBegin:
+        busy_ = true;
+        ++turns_;
+        turn_calls_ = tools_turn_ = 0;
+        turn_t0_ = phase_t0_ = e.at;
+        phase_ = Phase::Thinking;
+        scroll_ = 0;
+        break;
+    case Ev::TurnEnd: {
+        if (!busy_) break;
+        busy_ = false;
+        // calls the loop skipped (interrupt) never get a result message
+        for (auto it = entries_.rbegin(); it != entries_.rend() && it->kind != Kind::User; ++it)
+            if (it->kind == Kind::Tool && !it->resolved) {
+                it->resolved = true;
+                it->run = Run::Failed;
+                it->result = "{\"error\":\"cancelled\"}";
+                ++it->ver;
+            }
+        phase_ = Phase::Idle;
+        last_turn_ms_ = std::chrono::duration<double, std::milli>(e.at - turn_t0_).count();
+        std::string r = "turn " + std::to_string(turns_) + " · " + std::to_string(turn_calls_) +
+                        (turn_calls_ == 1 ? " call" : " calls");
+        if (tools_turn_) r += " · " + std::to_string(tools_turn_) + (tools_turn_ == 1 ? " tool" : " tools");
+        push(Kind::Rule, r + " · " + fmt_ms(last_turn_ms_));
+        break;
+    }
+    }
+}
+
+void Scene::set_input(const std::u32string& line, size_t cursor, const std::string& hint) {
+    input_ = line;
+    cursor_ = std::min(cursor, line.size());
+    hint_ = hint;
+}
+
+void Scene::scroll(int rows) { scroll_ = std::max(0, scroll_ + rows); }
+
+double Scene::work_ms() const {
+    if (!busy_) return last_turn_ms_;
+    return std::chrono::duration<double, std::milli>(clock::now() - turn_t0_).count();
+}
+
+const Canvas& Scene::block(size_t i, int w) {
+    Cache& c = cache_[i];
+    const Entry& e = entries_[i];
+    const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
+    if (c.w != w || c.ver != e.ver || c.spin != spin) {
+        c.block = render(e, w);
+        c.w = w;
+        c.ver = e.ver;
+        c.spin = spin;
+    }
+    return c.block;
+}
+
+Canvas Scene::render(const Entry& e, int w) const {
+    switch (e.kind) {
+    case Kind::User: {
+        const auto lines = wrap(e.text, w - 3, 10);
+        Canvas c(w, static_cast<int>(lines.size()) + 2);
+        const Style bar{th_.gold};
+        c.put(0, 0, U'▍', bar);
+        const int n = c.text(2, 0, "you", Style{th_.gold, kNone, kBold});
+        c.text(3 + n, 0, "· " + e.clock, Style{th_.muted});
+        for (size_t k = 0; k < lines.size(); ++k) {
+            c.put(0, static_cast<int>(k) + 1, U'▍', bar);
+            c.text(2, static_cast<int>(k) + 1, lines[k], Style{th_.text});
+        }
+        return c;
+    }
+    case Kind::Say: {
+        const auto lines = wrap(e.text, w - 4);
+        const int h = static_cast<int>(lines.size()) + 3;
+        Canvas c(w, h);
+        const Style b{th_.response};
+        c.box(0, 0, w, h - 1, b, true);
+        c.put(2, 0, U'┤', b);
+        c.put(3, 0, U' ', b);
+        const int n = c.gradient(4, 0, th_.response_label, th_.title, th_.hot, th_.gold, kBold);
+        c.put(4 + n, 0, U' ', b);
+        c.put(5 + n, 0, U'├', b);
+        if (e.ms > 0) c.title_right(w - 2, 0, fmt_ms(e.ms), Style{th_.muted}, b);
+        for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k) + 1, lines[k], Style{th_.text});
+        return c;
+    }
+    case Kind::Tool: {
+        Canvas c(w, 6);
+        const uint32_t bc = e.run == Run::Failed ? th_.error : e.run == Run::Running ? th_.accent : th_.dim;
+        const Style b{bc};
+        c.box(0, 0, w, 5, b, false);
+        c.put(1, 0, U' ', b);
+        c.put(2, 0, U'▸', Style{th_.gold, kNone, kBold});
+        c.put(3, 0, U' ', b);
+        const int n = c.text(4, 0, e.name, Style{th_.accent, kNone, kBold}, w - 26);
+        c.put(4 + n, 0, U' ', b);
+        std::string st;
+        Style ss{th_.muted};
+        switch (e.run) {
+        case Run::Pending: st = "queued"; break;
+        case Run::Running: {
+            std::string g;
+            encode(g, kSpin[tick_ % 10]);
+            st = g + " running";
+            ss = Style{th_.hot};
+            break;
+        }
+        case Run::Ok: st = "✓ " + (e.ms > 0 ? fmt_ms(e.ms) : std::string("done")); ss = Style{th_.ok}; break;
+        case Run::Failed: st = "✗ " + (e.ms > 0 ? fmt_ms(e.ms) : std::string("failed")); ss = Style{th_.error}; break;
+        }
+        const int sw = text_width(st);   // "─ ✓ 1.2s ┐"
+        c.put(w - sw - 3, 0, U' ', b);
+        c.text(w - sw - 2, 0, st, ss);
+        c.put(w - 2, 0, U' ', b);
+        c.text(2, 1, clip(flat_args(e.text), w - 4), Style{th_.muted});
+        if (e.resolved) {
+            const auto [err, body] = preview(e.result);
+            const auto lines = wrap(body.empty() ? "(empty)" : body, w - 6, 2);
+            c.text(2, 2, "◂", Style{err ? th_.error : th_.ok, kNone, kBold});
+            for (size_t k = 0; k < lines.size(); ++k)
+                c.text(4, 2 + static_cast<int>(k), lines[k], Style{err ? th_.error : th_.text});
+        } else if (e.run == Run::Running) {
+            c.text(2, 2, "◂ …", Style{th_.muted});
+        }
+        return c;
+    }
+    case Kind::Note: {
+        const auto lines = wrap(e.text, w - 2, 16);
+        Canvas c(w, static_cast<int>(lines.size()));
+        c.put(0, 0, U'·', Style{th_.accent});
+        for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k), lines[k], Style{th_.muted});
+        return c;
+    }
+    case Kind::Error: {
+        const auto lines = wrap(e.text, w - 4, 8);
+        const int h = static_cast<int>(lines.size()) + 3;
+        Canvas c(w, h);
+        const Style b{th_.error};
+        c.box(0, 0, w, h - 1, b, true);
+        c.title(2, 0, "✗ error", Style{th_.error, kNone, kBold}, b);
+        for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k) + 1, lines[k], Style{th_.error});
+        return c;
+    }
+    case Kind::Rule: {
+        Canvas c(w, 2);
+        const std::string label = " " + e.text + " ";
+        c.fill(0, 0, w, 1, Style{th_.session_border}, U'─');
+        c.text(std::max(0, (w - text_width(label)) / 2), 0, label, Style{th_.muted});
+        return c;
+    }
+    }
+    return Canvas(w, 1);
+}
+
+void Scene::paint_splash(Frame& f, int x, int y, int w, int h) const {
+    const int logo_w = text_width(kLogo[0]);
+    auto center = [&](int row, const std::string& s, Style st) {
+        const std::string t = clip(s, w);
+        f.text(x + std::max(0, (w - text_width(t)) / 2), row, t, st);
+    };
+    if (h < 10 || w < logo_w + 2) {
+        center(y + h / 2, th_.welcome, Style{th_.accent, kNone, kItalic});
+        return;
+    }
+    const int ly = y + std::max(0, (h - 10) / 2), lx = x + (w - logo_w) / 2;
+    for (int r = 0; r < 3; ++r) {
+        int cx = lx;
+        for (size_t i = 0; kLogo[r][i];) {
+            const char32_t ch = decode(kLogo[r], i);
+            const double t = static_cast<double>(cx - lx) / std::max(1, logo_w - 1);
+            f.put(cx++, ly + r, ch, Style{tri(th_.border, th_.title, th_.gold, t), kNone, kBold});
+        }
+    }
+    center(ly + 4, "c++ agent harness  ·  " + (info_.model.empty() ? std::string("no model") : info_.model), Style{th_.muted});
+    center(ly + 6, th_.welcome, Style{th_.accent, kNone, kItalic});
+    center(ly + 8, "enter send  ·  esc interrupt  ·  ↑↓ history  ·  pgup/pgdn scroll  ·  /help", Style{th_.muted});
+}
+
+void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
+    const Style b{th_.border};
+    f.box(x, y, w, h, b, true);
+    f.put(x + 2, y, U'┤', b);
+    f.put(x + 3, y, U' ', b);
+    const int n = f.gradient(x + 4, y, "⟁ DAEDALUS", th_.border, th_.title, th_.gold, kBold);
+    f.put(x + 4 + n, y, U' ', b);
+    f.put(x + 5 + n, y, U'├', b);
+    f.title(x + 6 + n, y, "c++", Style{th_.muted}, b);
+
+    const int ix = x + 2, iy = y + 1, iw = w - 4, ih = h - 2;
+    if (ih <= 0 || iw <= 4) return;
+    if (entries_.empty()) {
+        paint_splash(f, ix, iy, iw, ih);
+        return;
+    }
+    const int cw = std::min(iw, kCardMaxW);
+    {   // a resize invalidates every card: wrap them on all cores
+        std::vector<size_t> stale;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            const Entry& e = entries_[i];
+            const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
+            if (cache_[i].w != cw || cache_[i].ver != e.ver || cache_[i].spin != spin) stale.push_back(i);
+        }
+        if (static_cast<int>(stale.size()) >= kParBlocks) {
+            const long m = static_cast<long>(stale.size());
+#pragma omp parallel for schedule(dynamic, 1) num_threads(par_threads())
+            for (long k = 0; k < m; ++k) {
+                const size_t i = stale[static_cast<size_t>(k)];
+                Cache& c = cache_[i];
+                c.block = render(entries_[i], cw);
+                c.w = cw;
+                c.ver = entries_[i].ver;
+                c.spin = entries_[i].kind == Kind::Tool && entries_[i].run == Run::Running ? tick_ % 10 : -1;
+            }
+        }
+    }
+    std::vector<int> hs(entries_.size());
+    int total = 0;
+    for (size_t i = 0; i < entries_.size(); ++i) total += hs[i] = block(i, cw).h();
+    scroll_ = std::min(scroll_, std::max(0, total - ih));
+    const int top = std::max(0, total - ih - scroll_);
+    int acc = 0;
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        const int bh = hs[i];
+        const int a = std::max(acc, top), z = std::min(acc + bh, top + ih);
+        if (z > a) f.blit(block(i, cw), a - acc, ix, iy + (a - top), z - a);
+        acc += bh;
+        if (acc >= top + ih) break;
+    }
+    if (total > ih) {
+        const int thumb = std::max(1, ih * ih / total);
+        const int pos = (ih - thumb) * top / std::max(1, total - ih);
+        for (int r = 0; r < thumb; ++r) f.put(x + w - 1, iy + pos + r, U'┃', Style{th_.hot});
+    }
+    if (scroll_ > 0)
+        f.title_right(x + w - 2, y, "↑ " + std::to_string(scroll_) + " rows · pgdn", Style{th_.warn}, b);
+    else if (busy_)
+        f.title_right(x + w - 2, y, "● live", Style{th_.ok}, b);
+}
+
+void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
+    const Style b{th_.session_border}, lab{th_.label}, val{th_.text}, mut{th_.muted};
+    const Style head{th_.session_label, kNone, kBold};
+    const int vx = x + 10, vw = w - 12;
+    auto row = [&](int ry, const std::string& l, const std::string& v, Style vs) {
+        f.text(x + 2, ry, l, lab);
+        f.text(vx, ry, clip(v, vw), vs);
+    };
+
+    const bool engine = h >= 19;
+    const int sh = 7, eh = engine ? 7 : 0, th = h - sh - eh;
+
+    f.box(x, y, w, sh, b, true);
+    f.title(x + 2, y, "session", head, b);
+    std::string server = info_.endpoint;
+    if (const size_t p = server.find("://"); p != std::string::npos) server = server.substr(p + 3);
+    if (server.size() > 3 && server.compare(server.size() - 3, 3, "/v1") == 0) server.resize(server.size() - 3);
+    row(y + 1, "model", info_.model, val);
+    row(y + 2, "server", server, val);
+    row(y + 3, "turn", std::to_string(turn_calls_) + " / " + std::to_string(info_.max_turns) + " calls", val);
+    row(y + 4, "session", std::to_string(turns_) + " turns · " + std::to_string(calls_total_) + " calls", val);
+    row(y + 5, "work", fmt_ms(work_ms()), busy_ ? Style{th_.hot, kNone, kBold} : val);
+
+    if (engine) {
+        const int ey = y + sh;
+        f.box(x, ey, w, eh, b, true);
+        f.title(x + 2, ey, "engine", head, b);
+        if (calls_total_ == 0) {
+            f.text(x + 2, ey + 1, clip("waiting for the first call", w - 4), mut);
+        } else {
+            row(ey + 1, "gen", last_.gen_tps > 0 ? fmt1(last_.gen_tps) + " t/s" : "—", val);
+            if (!tps_hist_.empty()) {   // sparkline, right-aligned
+                static const char32_t bars[] = {U'▁', U'▂', U'▃', U'▄', U'▅', U'▆', U'▇', U'█'};
+                const double mx = *std::max_element(tps_hist_.begin(), tps_hist_.end());
+                const int n = std::min<int>(10, static_cast<int>(tps_hist_.size()));
+                for (int i = 0; i < n; ++i) {
+                    const double v = tps_hist_[tps_hist_.size() - static_cast<size_t>(n) + static_cast<size_t>(i)];
+                    const int lvl = mx > 0 ? std::clamp(static_cast<int>(v / mx * 7.0 + 0.5), 0, 7) : 0;
+                    f.put(x + w - 2 - n + i, ey + 1, bars[lvl], Style{tri(th_.dim, th_.title, th_.gold, lvl / 7.0)});
+                }
+            }
+            row(ey + 2, "prefill", last_.pp_tps > 0 ? fmt1(last_.pp_tps) + " t/s" : "—", val);
+            if (info_.n_ctx > 0) {
+                const double frac = std::clamp(static_cast<double>(last_.prompt_tokens) / static_cast<double>(info_.n_ctx), 0.0, 1.0);
+                const std::string pct = " " + std::to_string(static_cast<int>(frac * 100 + 0.5)) + "%";
+                const int bw = vw - text_width(pct);
+                f.text(x + 2, ey + 3, "ctx", lab);
+                const int filled = static_cast<int>(frac * bw + 0.5);
+                for (int i = 0; i < bw; ++i) {
+                    const double t = static_cast<double>(i) / std::max(1, bw - 1);
+                    if (i < filled) f.put(vx + i, ey + 3, U'▰', Style{tri(th_.ok, th_.warn, th_.error, t)});
+                    else f.put(vx + i, ey + 3, U'▱', Style{th_.dim});
+                }
+                f.text(vx + bw, ey + 3, pct, val);
+                f.text(vx, ey + 4, clip(fmt_tok(last_.prompt_tokens) + " / " + fmt_tok(info_.n_ctx), vw), mut);
+            } else {
+                row(ey + 3, "ctx", fmt_tok(last_.prompt_tokens) + " tok", val);
+            }
+            std::string out = fmt_tok(last_.completion_tokens) + " tok · " + fmt_ms(last_.latency_ms);
+            if (last_.cached_tokens > 0) out += " · " + fmt_tok(last_.cached_tokens) + " cached";
+            row(ey + 5, "last", out, val);
+        }
+    }
+
+    if (th < 3) return;
+    const int ty = y + sh + eh;
+    f.box(x, ty, w, th, b, true);
+    f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
+    int ry = ty + 1;
+    for (auto it = entries_.rbegin(); it != entries_.rend() && ry < ty + th - 1; ++it) {
+        if (it->kind != Kind::Tool) continue;
+        char32_t g = U'·';
+        Style gs = mut;
+        if (it->run == Run::Running) { g = kSpin[tick_ % 10]; gs = Style{th_.hot}; }
+        else if (it->run == Run::Ok) { g = U'✓'; gs = Style{th_.ok}; }
+        else if (it->run == Run::Failed) { g = U'✗'; gs = Style{th_.error}; }
+        f.put(x + 2, ry, g, gs);
+        const std::string ms = it->ms > 0 ? fmt_ms(it->ms) : "";
+        f.text(x + 4, ry, clip(it->name, w - 7 - text_width(ms)), val);
+        f.text(x + w - 2 - text_width(ms), ry, ms, mut);
+        ++ry;
+    }
+    if (ry == ty + 1) {
+        for (const auto& s : info_.sources) {
+            if (ry >= ty + th - 1) break;
+            f.put(x + 2, ry, U'◇', Style{th_.accent});
+            f.text(x + 4, ry++, clip(s, w - 6), val);
+        }
+        if (ry < ty + th - 1) f.text(x + 2, ry, "no calls yet", mut);
+    }
+}
+
+void Scene::paint_prompt(Frame& f, int x, int y, int w, int& cur_x) const {
+    const Style b{busy_ ? th_.dim : th_.input_rule};
+    f.box(x, y, w, 3, b, true);
+    f.title(x + 2, y, "you", Style{th_.gold, kNone, kBold}, b);
+    if (busy_) f.title_right(x + w - 2, y, "esc interrupts", Style{th_.warn}, b);
+    if (!hint_.empty()) f.title_right(x + w - 2, y + 2, clip(hint_, w - 8), Style{th_.accent}, b);
+    else f.title_right(x + w - 2, y + 2, "enter send · ↑↓ history · pgup/pgdn scroll · /help", Style{th_.muted}, b);
+
+    const int sx = x + 2;
+    const int sym = f.text(sx, y + 1, th_.prompt_symbol, Style{th_.hot, kNone, kBold});
+    const int vx = sx + sym, vw = x + w - 2 - vx;
+    cur_x = vx;
+    if (input_.empty()) {
+        f.text(vx, y + 1, busy_ ? "type ahead — it sends when the turn ends" : "ask the maze…",
+               Style{th_.muted, kNone, kItalic}, vw);
+        return;
+    }
+    auto wid = [](char32_t c) { return c == U'\n' ? 1 : cp_width(c); };
+    size_t start = 0;   // scroll so the cursor stays inside the row
+    int before = 0;
+    for (size_t i = 0; i < cursor_; ++i) before += wid(input_[i]);
+    while (start < cursor_ && before > vw - 1) before -= wid(input_[start++]);
+    int cx = vx;
+    for (size_t i = start; i < input_.size(); ++i) {
+        const char32_t c = input_[i];
+        if (cx + wid(c) > vx + vw) break;
+        if (c == U'\n') f.put(cx, y + 1, U'↵', Style{th_.muted});
+        else f.put(cx, y + 1, c, Style{th_.prompt});
+        if (i < cursor_) cur_x = cx + wid(c);
+        cx += wid(c);
+    }
+    if (start > 0) f.put(vx, y + 1, U'…', Style{th_.muted});
+}
+
+void Scene::paint_status(Frame& f, int y, int w) const {
+    const uint32_t bg = th_.status_bg;
+    f.fill(0, y, w, 1, Style{th_.text, bg});
+    std::string left;
+    Style ls{th_.ok, bg, kBold};
+    if (busy_ && phase_ == Phase::Tools) {
+        left = "⚙ " + running_tool_;
+        ls = Style{th_.gold, bg, kBold};
+    } else if (busy_) {
+        const long secs = static_cast<long>(std::chrono::duration<double>(clock::now() - phase_t0_).count());
+        const auto& wing = th_.wings[static_cast<size_t>(tick_ / 4) % th_.wings.size()];
+        const std::string& verb = th_.verbs[static_cast<size_t>(turns_ * 7 + secs / 4) % th_.verbs.size()];
+        left = wing.first + " " + verb + " " + wing.second;
+        ls = Style{th_.title, bg, kItalic};
+    } else {
+        left = "● ready";
+    }
+
+    struct Seg { std::string label, value; };
+    std::vector<Seg> segs = {{"work ", fmt_ms(work_ms())},
+                             {"turn ", std::to_string(turn_calls_) + "/" + std::to_string(info_.max_turns)}};
+    if (last_.gen_tps > 0) segs.push_back({"", fmt1(last_.gen_tps) + " t/s"});
+    if (info_.n_ctx > 0 && last_.prompt_tokens > 0)
+        segs.push_back({"ctx ", std::to_string(static_cast<int>(100.0 * static_cast<double>(last_.prompt_tokens) /
+                                                                 static_cast<double>(info_.n_ctx) + 0.5)) + "%"});
+    segs.push_back({"", std::to_string(info_.tools) + " tools"});
+    const std::string brand = "⟁ daedalus-cpp";
+
+    auto width_of = [&](size_t n, bool with_brand) {
+        int t = 1 + text_width(left);
+        for (size_t i = 0; i < n; ++i) t += 3 + text_width(segs[i].label + segs[i].value);
+        return t + (with_brand ? 2 + text_width(brand) : 0) + 1;
+    };
+    bool show_brand = true;
+    size_t n = segs.size();
+    while (width_of(n, show_brand) > w && (show_brand || n > 0)) {
+        if (show_brand) show_brand = false;
+        else --n;
+    }
+    int cx = 1 + f.text(1, y, clip(left, w - 2), ls);
+    for (size_t i = 0; i < n; ++i) {
+        cx += f.text(cx, y, " │ ", Style{th_.dim, bg});
+        cx += f.text(cx, y, segs[i].label, Style{th_.muted, bg});
+        cx += f.text(cx, y, segs[i].value, Style{th_.text, bg, kBold});
+    }
+    if (show_brand) f.text(w - 1 - text_width(brand), y, brand, Style{th_.muted, bg});
+}
+
+std::string Scene::present(int cols, int rows, bool truecolor) {
+    apply();
+    ++tick_;
+    if (!frame_ || frame_->w() != cols || frame_->h() != rows) frame_ = std::make_unique<Frame>(cols, rows);
+    Frame& f = *frame_;
+    f.fill(0, 0, cols, rows, Style{});
+    std::string tail = "\x1b[?25l";
+    if (cols < kMinCols || rows < kMinRows) {
+        const std::string msg = "⟁ " + std::to_string(cols) + "×" + std::to_string(rows) + " — dd_tui needs " +
+                                std::to_string(kMinCols) + "×" + std::to_string(kMinRows);
+        f.text(std::max(0, (cols - text_width(msg)) / 2), rows / 2, clip(msg, cols), Style{th_.warn});
+    } else {
+        const int body_h = rows - 4;
+        const int side = cols >= 100 ? kSidebarW : 0;
+        paint_transcript(f, 0, 0, cols - side, body_h);
+        if (side) paint_sidebar(f, cols - side, 0, side, body_h);
+        int cur_x = 0;
+        paint_prompt(f, 0, body_h, cols, cur_x);
+        paint_status(f, rows - 1, cols);
+        tail = "\x1b[" + std::to_string(body_h + 2) + ";" + std::to_string(cur_x + 1) + "H\x1b[?25h";
+    }
+    std::string body = f.present(truecolor);
+    if (body.empty() && tail == last_tail_) return {};
+    last_tail_ = tail;
+    return "\x1b[?2026h\x1b[?25l" + body + tail + "\x1b[?2026l";
+}
+
+std::string Scene::drain_inline(int width, bool color, bool truecolor) {
+    apply();
+    const int w = std::clamp(width, 40, kCardMaxW);
+    std::string out;
+    while (printed_ < entries_.size()) {
+        const Entry& e = entries_[printed_];
+        if (e.kind == Kind::Tool && !e.resolved) break;   // the card prints whole
+        out += render(e, w).to_ansi(color, truecolor);
+        ++printed_;
+    }
+    return out;
+}
+
+std::string Scene::row_text(int y) const {
+    return frame_ ? frame_->row_text(y) : std::string();
+}
+
+}  // namespace ui
+}  // namespace dd

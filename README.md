@@ -38,13 +38,26 @@ Output: `[base=... model=... turns=...]` header, then `=== final (N LLM calls) =
 
 ## Full harness kit (`build/dd_tui`)
 
-`build/dd_tui` is the real agentic harness: an ANSI terminal REPL that drives the **same** run loop (`Agent::run`) — no fork of the loop, one `step_hook` added to `agent.hpp`/`agent.cpp` for per-step streaming.
+`build/dd_tui` is the real agentic harness: a next-gen OOP TUI (`dd::ui`: double-buffered cell-diff `Frame` + `Widget` subclasses + `Scene` row layout) that drives the **same** run loop (`Agent::run`) — no fork of the loop, one `step_hook` added to `agent.hpp`/`agent.cpp` for per-step streaming.
 
 ```
 make build/dd_tui
 build/dd_tui                                   # interactive REPL (you> ), config from ~/.daedalus
 build/dd_tui path/to/config.yaml -- "msg"      # single-shot
 ```
+
+### TUI internals (`dd::ui`)
+
+- **Layout, fixed geometry:** transcript panel | 34-col sidebar (`session`, `engine`, `tools`) over a 3-row prompt box and a status row. Panels are rounded boxes with their titles set into the border. The sidebar drops under 100 cols; under 60×14 the screen says so. Cards are at most 112 cols wide.
+- **Cards:** user = gold bar; answer = rounded `⟁ DAEDALUS ⟁` box with the call latency; tool = square card of **fixed height** (name, status `queued`/spinner/`✓ 1.2s`/`✗`, flattened args, two-line result preview); notes; errors; a rule closing each turn (`turn 3 · 4 calls · 2 tools · 41.2s`).
+- **Skin:** colours, spinner wings, thinking verbs and branding come from `~/.daedalus/skins/<display.skin>.yaml` (neural defaults built in). Truecolor when `COLORTERM=truecolor|24bit`, else xterm-256.
+- **Engine stats are real:** each call reports llama-server `timings` (gen/prefill t/s, `cache_n`) and `usage`; `n_ctx` comes from `/props` once at start (the ctx meter).
+- **Render:** `Canvas` (16-byte padding-free `Cell`, wide-glyph aware) → `Frame::present()` diffs against the last frame and emits only changed cells, inside synchronized output (`?2026`), on the alternate screen. An unchanged frame writes nothing.
+- **Threads, no locks:** worker and tool threads only `push` events into a Vyukov MPSC queue (one atomic exchange); the render thread owns every bit of scene state and drains the queue each frame. `Agent::interrupt_requested` is `std::atomic<bool>`, and doubles as the libcurl abort flag, so Esc cancels an LLM call in flight (measured: 0.86 s from Esc to ready during a live generation).
+- **SIMD + OpenMP (`dd/ui_simd.hpp`):** cell diff, ASCII scan/width/widen as AVX-512 (F+BW+VL) / AVX2 / scalar kernels, picked once by CPUID — one binary for every box. Rows encode in parallel (OpenMP) on big frames, cards re-wrap in parallel after a resize; small frames stay serial so the TUI never wakes threads on cores the model uses. `tests/ui_test.cpp` checks each kernel set the CPU has against scalar, and 1-thread vs 8-thread frames byte for byte. The AVX-512 set has not run on hardware yet (Zen 2 here; QEMU TCG has no AVX-512).
+- **Input:** raw `termios` (restored on exit and on fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse wheel (`DD_TUI_MOUSE=0` leaves the mouse to the terminal), UTF-8 line editing, history. Enter sends (while busy: queued for the end of the turn), Esc/Ctrl-C interrupt, PgUp/PgDn or wheel scroll, Tab completes `/help /tools /turns N /clear /interrupt /quit`, Ctrl-L redraws. stderr goes to `~/.daedalus/logs/dd_tui.log` while the screen is up.
+- **No tty** (`-- msg` or piped stdin): the same cards print inline, in order.
+- `run_terminal` runs `{ cmd; } </dev/null 2>&1`: a child never reads the raw-mode tty.
 
 What it wires in, all **real**:
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
