@@ -121,6 +121,17 @@ static std::string jerr(const std::string& m) {
     return json_dump(json_obj({{"error", jsp(json_str(m))}}));
 }
 
+// a mazemaker tool that changes the maze; unknown ones count as writes
+static bool maze_write(const std::string& t) {
+    static const std::set<std::string> reads = {
+        "mazemaker_recall", "mazemaker_recall_advanced", "mazemaker_recall_multi", "mazemaker_get",
+        "mazemaker_think", "mazemaker_stats", "mazemaker_graph", "mazemaker_browse", "mazemaker_health",
+        "mazemaker_list_by_label_prefix", "mazemaker_count_by_label_prefix", "mazemaker_afe_facts",
+        "mazemaker_classify_intent", "mazemaker_quota", "mazemaker_diagnose", "mazemaker_dream_stats",
+        "mazemaker_supersedes_log", "mazemaker_synth_lineage"};
+    return t.rfind("mazemaker_", 0) == 0 && !reads.count(t);
+}
+
 static double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -768,8 +779,9 @@ int main(int argc, char** argv) {
                         e.name = tname;
                         e.toolset = srvname;
                         e.schema = std::move(entry_schema);
-                        e.handler = [m = mcp.get(), tname](const Json& a) {
-                            return m->call(tname, a);
+                        // DD_NO_SOAK: the model's own writes are off too; the schema stays, so the prompt is the real one
+                        e.handler = [m = mcp.get(), tname, ro = std::getenv("DD_NO_SOAK") && maze_write(tname)](const Json& a) {
+                            return ro ? jerr("DD_NO_SOAK: this run writes nothing to the maze") : m->call(tname, a);
                         };
                         add_tool(e);
                         ++registered;
