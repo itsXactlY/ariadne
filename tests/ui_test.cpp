@@ -191,6 +191,49 @@ int main() {
         chk(rest.find("cancelled") != std::string::npos && rest.find("turn 1") != std::string::npos, "turn end resolves");
     }
 
+    // ---- streamed reasoning + answer ----
+    {
+        Scene s{Theme{}};
+        s.turn_begin();
+        s.llm_begin();
+        for (int i = 0; i < 40; ++i) s.llm_reasoning("step " + std::to_string(i) + " of the plan\n");
+        chk(s.drain_inline(80, false, false).empty(), "live reasoning waits (inline)");
+        s.present(120, 40, true);
+        bool live = false;
+        for (int y = 0; y < 40; ++y) live = live || s.row_text(y).find("◈ thinking") != std::string::npos;
+        chk(live, "live reasoning card on screen");
+        s.llm_content("The ");
+        s.llm_content("answer.");
+        LlmStats st;
+        st.latency_ms = 1234;
+        s.llm_end(st);
+        const auto out = lines_of(s.drain_inline(80, false, false));
+        const size_t R = Scene::kReasonRows;
+        chk(out.size() == R + 3 + 4, "reason tail + answer heights");
+        if (out.size() == R + 3 + 4) {
+            chk(out[0].find("◈ thought") != std::string::npos && out[0].find("40 tok") != std::string::npos, "reason header");
+            chk(out[R].find("step 39") != std::string::npos && out[1].find("step 34") != std::string::npos, "tail = newest lines");
+            chk(out[R + 1].find("↑ 34 lines") != std::string::npos, "hidden-lines marker");
+            chk(out[R + 3].find("DAEDALUS") != std::string::npos && out[R + 3].find("1.2s") != std::string::npos &&
+                    out[R + 4].find("The answer.") != std::string::npos, "streamed answer card");
+        }
+    }
+    {   // the tail is fixed height even for one line; hide = one row; full = every line
+        auto run = [](ReasonView v, int lines) {
+            Scene s{Theme{}};
+            s.set_reason_view(v);
+            s.turn_begin();
+            s.llm_begin();
+            for (int i = 0; i < lines; ++i) s.llm_reasoning("line " + std::to_string(i) + "\n");
+            s.llm_end(LlmStats{});
+            return lines_of(s.drain_inline(80, false, false));
+        };
+        chk(run(ReasonView::Tail, 1).size() == Scene::kReasonRows + 3, "tail fixed height");
+        const auto hide = run(ReasonView::Hide, 30);
+        chk(hide.size() == 2 && hide[0].find("◈ thought") != std::string::npos && hide[1].empty(), "hide = one row");
+        chk(run(ReasonView::Full, 30).size() == 30 + 3, "full = every line");
+    }
+
     // ---- 1 thread vs 8: same frames, byte for byte ----
     {
         auto build = [] {

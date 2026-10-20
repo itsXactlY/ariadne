@@ -14,9 +14,10 @@
 //   build/dd_tui path/to/config.yaml -- "msg"    # explicit config, single-shot msg
 //   env: DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
-//   commands: /help /tools /turns N /clear /interrupt /quit
+//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /clear /interrupt /quit
 
 #include "dd/agent/agent.hpp"
+#include "dd/agent/chat_stream.hpp"
 #include "dd/core/config.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
@@ -79,6 +80,37 @@ static int curl_cancel(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
     return flag && flag->load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// The effort ladder /effort and /reasoning offer; "off" goes out as "none",
+// which llama-server and Strata both read as thinking disabled.
+static const char* const kEfforts[] = {"off", "low", "medium", "high", "xhigh", "max", "ultra"};
+constexpr int kEffortCount = 7;
+
+static int effort_index(std::string s) {
+    for (auto& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (s == "none" || s == "false" || s == "disabled") s = "off";
+    for (int i = 0; i < kEffortCount; ++i)
+        if (s == kEfforts[i]) return i;
+    return -1;
+}
+
+static std::string effort_label(int i) { return i < 0 ? "default" : kEfforts[i]; }
+
+// Stream sink: stop the moment Esc sets the flag; keep the raw bytes until
+// the first SSE chunk in case the server answers with plain JSON.
+struct StreamSink {
+    dd::agent::ChatStream cs;
+    std::string raw;
+    const std::atomic<bool>* cancel = nullptr;
+};
+
+static std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
+    auto* s = static_cast<StreamSink*>(ud);
+    if (s->cancel && s->cancel->load(std::memory_order_relaxed)) return 0;
+    if (!s->cs.saw_data() && s->raw.size() < (1u << 24)) s->raw.append(p, n);
+    s->cs.feed(p, n);
+    return n;
+}
+
 static std::string jerr(const std::string& m) {
     return json_dump(json_obj({{"error", jsp(json_str(m))}}));
 }
@@ -97,7 +129,9 @@ static double ms_since(std::chrono::steady_clock::time_point t0) {
 struct HttpLLMClient : dd::agent::LLMClient {
     std::string base_url, model, api_key;
     const std::atomic<bool>* cancel = nullptr;
+    const std::atomic<int>* effort = nullptr;   // kEfforts index, -1 = endpoint default
     dd::ui::Scene* scene = nullptr;
+    bool streamed = false;   // the last call's answer already reached the scene
 
     dd::core::Message chat(const std::vector<dd::core::Message>& messages,
                            const dd::core::Json& tools) override {
@@ -107,14 +141,23 @@ struct HttpLLMClient : dd::agent::LLMClient {
         for (const auto& m : messages) arr_push(msgs, ddcore::message_to_json(m));
         obj_set(body, "messages", msgs);
         if (tools.type == Json::Arr && !tools.arr.empty()) obj_set(body, "tools", tools);
-        obj_set(body, "stream", json_bool(false));
+        obj_set(body, "stream", json_bool(true));
+        obj_set(body, "stream_options", json_obj({{"include_usage", jsp(json_bool(true))}}));
+        if (effort)
+            if (const int e = effort->load(std::memory_order_relaxed); e >= 0)
+                obj_set(body, "reasoning_effort", json_str(e == 0 ? "none" : kEfforts[e]));
 
         std::string url = base_url;
         if (!url.empty() && url.back() != '/') url += "/";
         url += "chat/completions";
 
         std::string payload = json_dump(body);
-        std::string out;
+        StreamSink sink;
+        sink.cancel = cancel;
+        if (scene) {
+            sink.cs.on_reasoning = [this](const std::string& d) { scene->llm_reasoning(d); };
+            sink.cs.on_content = [this](const std::string& d) { scene->llm_content(d); };
+        }
 
         CURL* c = curl_easy_init();
         if (!c) throw std::runtime_error("curl: out of memory for handle");
@@ -133,8 +176,8 @@ struct HttpLLMClient : dd::agent::LLMClient {
         curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (curl_off_t)payload.size());
         curl_easy_setopt(c, CURLOPT_URL, url.c_str());
         curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
-        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_sink);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, stream_sink);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
         // Esc aborts a call, so the timeout only guards a dead server.
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
@@ -142,20 +185,44 @@ struct HttpLLMClient : dd::agent::LLMClient {
         curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, curl_cancel);
         curl_easy_setopt(c, CURLOPT_XFERINFODATA, cancel);
 
+        streamed = false;
         if (scene) scene->llm_begin();
         const auto t0 = std::chrono::steady_clock::now();
         CURLcode rc = curl_easy_perform(c);
-        if (rc == CURLE_ABORTED_BY_CALLBACK) throw std::runtime_error("interrupted");
+        const bool cancelled = cancel && cancel->load(std::memory_order_relaxed);
+        if (rc == CURLE_ABORTED_BY_CALLBACK || (rc == CURLE_WRITE_ERROR && cancelled))
+            throw std::runtime_error("interrupted");
         if (rc != CURLE_OK)
             throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
+        sink.cs.finish();
+        long status = 0;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
 
-        Json resp = json_parse(out);
+        Json resp;   // a non-streamed reply: errors, or a server that ignores "stream"
+        if (!sink.cs.saw_data()) {
+            try { resp = json_parse(sink.raw); } catch (...) {}
+        }
+        auto fail = [&](std::string why) {
+            if (const Json* e = json_get(resp, "error"))
+                why = e->type == Json::Obj && json_get(*e, "message") ? json_get(*e, "message")->str : json_dump(*e);
+            throw std::runtime_error("HTTP " + std::to_string(status) + ": " + why);
+        };
+        if (status >= 400) fail(sink.raw.empty() ? std::string("no body") : sink.raw.substr(0, 400));
+        if (!sink.cs.error().empty()) fail(sink.cs.error());
+
         dd::core::Message assistant;
-        if (const Json* choices = json_get(resp, "choices");
-            choices && choices->type == Json::Arr && !choices->arr.empty()) {
+        if (sink.cs.saw_data()) {
+            assistant = sink.cs.message();
+            streamed = scene && !assistant.content.empty();
+            resp = json_obj({{"usage", jsp(sink.cs.usage())}, {"timings", jsp(sink.cs.timings())}});
+        } else if (const Json* choices = json_get(resp, "choices");
+                   choices && choices->type == Json::Arr && !choices->arr.empty()) {
             const Json& ch0 = *choices->arr[0];
-            if (const Json* msg = json_get(ch0, "message"))
+            if (const Json* msg = json_get(ch0, "message")) {
                 assistant = ddcore::message_from_json(*msg);
+                if (const Json* r = json_get(*msg, "reasoning_content"); r && r->type == Json::Str && scene && !r->str.empty())
+                    scene->llm_reasoning(r->str);
+            }
             if (assistant.finish_reason.empty())
                 if (const Json* fr = json_get(ch0, "finish_reason"))
                     assistant.finish_reason = fr->type == Json::Str ? fr->str : "";
@@ -178,12 +245,19 @@ struct HttpLLMClient : dd::agent::LLMClient {
     }
 };
 
-// The server's context size (llama-server /props); 0 when it has none.
-static long fetch_n_ctx(std::string base_url) {
+struct Props {
+    bool ok = false;
+    long n_ctx = 0;
+    std::string chat_template;
+};
+
+// llama-server / Strata /props: context size and the chat template.
+static Props fetch_props(std::string base_url) {
+    Props p;
     while (!base_url.empty() && base_url.back() == '/') base_url.pop_back();
     if (base_url.size() >= 3 && base_url.compare(base_url.size() - 3, 3, "/v1") == 0) base_url.resize(base_url.size() - 3);
     CURL* c = curl_easy_init();
-    if (!c) return 0;
+    if (!c) return p;
     std::string out, url = base_url + "/props";
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_sink);
@@ -192,14 +266,37 @@ static long fetch_n_ctx(std::string base_url) {
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 2L);
     const CURLcode rc = curl_easy_perform(c);
     curl_easy_cleanup(c);
-    if (rc != CURLE_OK) return 0;
+    if (rc != CURLE_OK) return p;
     try {
         Json j = json_parse(out);
-        if (double n = num_at(j, "default_generation_settings", "n_ctx"); n > 0) return static_cast<long>(n);
-        return static_cast<long>(num_at(j, "n_ctx"));
+        double n = num_at(j, "default_generation_settings", "n_ctx");
+        p.n_ctx = static_cast<long>(n > 0 ? n : num_at(j, "n_ctx"));
+        if (const Json* t = json_get(j, "chat_template"); t && t->type == Json::Str) p.chat_template = t->str;
+        p.ok = true;
     } catch (...) {
-        return 0;
     }
+    return p;
+}
+
+// The efforts this model's chat template implements: any other level makes
+// the template raise (HTTP 500), so xhigh/max/ultra appear only when the
+// template names them. No template to read: offer the whole ladder.
+static std::vector<std::string> template_efforts(const Props& p) {
+    std::vector<std::string> out;
+    if (!p.ok || p.chat_template.empty()) {
+        for (const char* e : kEfforts) out.emplace_back(e);
+        return out;
+    }
+    const std::string& t = p.chat_template;
+    const bool levels = t.find("reasoning_effort") != std::string::npos;
+    if (!levels && t.find("enable_thinking") == std::string::npos) return out;   // no switch at all
+    out.emplace_back("off");
+    for (int i = 1; i < kEffortCount; ++i) {
+        const std::string e = kEfforts[i];
+        if (!levels ? i <= 3 : t.find("'" + e + "'") != std::string::npos || t.find("\"" + e + "\"") != std::string::npos)
+            out.push_back(e);
+    }
+    return out;
 }
 
 static bool result_failed(const std::string& r) {
@@ -633,7 +730,7 @@ struct Editor {
     }
 };
 
-static const char* const kCommands[] = {"/help", "/tools", "/turns", "/clear", "/interrupt", "/quit"};
+static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/clear", "/interrupt", "/quit"};
 
 static std::string trim_ws(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
@@ -652,6 +749,20 @@ static std::vector<std::string> command_matches(const std::string& typed) {
     std::vector<std::string> m;
     for (const char* c : kCommands)
         if (std::string(c).rfind(typed, 0) == 0) m.emplace_back(c);
+    return m;
+}
+
+// "/effort x" / "/reasoning x": the arguments that fit the prefix x.
+static std::vector<std::string> arg_matches(const std::string& typed, const std::vector<std::string>& efforts) {
+    std::vector<std::string> m;
+    const size_t sp = typed.find(' ');
+    if (sp == std::string::npos || typed.find(' ', sp + 1) != std::string::npos) return m;
+    const std::string cmd = typed.substr(0, sp), pre = typed.substr(sp + 1);
+    if (cmd != "/effort" && cmd != "/reasoning") return m;
+    std::vector<std::string> all = efforts;
+    if (cmd == "/reasoning") all.insert(all.end(), {"show", "full", "hide"});
+    for (const auto& a : all)
+        if (a.rfind(pre, 0) == 0) m.push_back(a);
     return m;
 }
 
@@ -827,14 +938,33 @@ int main(int argc, char** argv) {
     agent.registry = &reg;
     agent.llm = &llm;
 
+    // ---- reasoning: effort from config, levels from the model's template ----
+    const Props props = fetch_props(base_url);
+    const std::vector<std::string> efforts = template_efforts(props);
+    auto offered = [&](int i) {
+        return i >= 0 && std::find(efforts.begin(), efforts.end(), kEfforts[i]) != efforts.end();
+    };
+    std::atomic<int> effort{-1};
+    if (const std::string want = cfg.get_string("agent.reasoning_effort"); !want.empty()) {
+        int i = effort_index(want);
+        while (i > 0 && !offered(i)) --i;   // round down to the template's ceiling
+        if (offered(i)) effort = i;
+        if (i != effort_index(want))
+            boot_errors.push_back("agent.reasoning_effort '" + want + "' is not in this model's template; using " +
+                                  effort_label(effort.load()));
+    }
+    llm.effort = &effort;
+    if (cfg.get_string("display.show_reasoning") == "false") scene.set_reason_view(dd::ui::ReasonView::Hide);
+
     const int tool_count = static_cast<int>(reg.get_all_tool_names().size());
     {
         dd::ui::Info info;
         info.model = model;
         info.endpoint = base_url;
+        info.effort = effort_label(effort.load());
         info.tools = tool_count;
         info.max_turns = max_iterations;
-        info.n_ctx = fetch_n_ctx(base_url);
+        info.n_ctx = props.n_ctx;
         info.sources = sources;
         scene.set_info(info);
     }
@@ -845,7 +975,7 @@ int main(int argc, char** argv) {
         if (m.role == "tool") {
             scene.tool_result(m.tool_call_id, m.content);
         } else if (m.role == "assistant") {
-            if (!m.content.empty()) scene.say(m.content);
+            if (!m.content.empty() && !llm.streamed) scene.say(m.content);
             for (const auto& tc : m.tool_calls) scene.tool_call(tc.id, tc.name, tc.arguments);
         }
         if (flush_inline) flush_inline();
@@ -936,6 +1066,27 @@ int main(int argc, char** argv) {
         });
     };
 
+    auto effort_cmd = [&](const std::string& arg) {
+        std::string levels;
+        for (const auto& e : efforts) levels += (levels.empty() ? "" : " ") + e;
+        if (arg.empty()) {
+            scene.note("effort " + effort_label(effort.load()) + " · this model: " +
+                       (levels.empty() ? std::string("no reasoning switch in its template") : levels));
+            return;
+        }
+        const int i = effort_index(arg);
+        if (i < 0) {
+            scene.note("unknown effort '" + arg + "' · off low medium high xhigh max ultra");
+        } else if (!offered(i)) {
+            scene.note("this model's template has no '" + std::string(kEfforts[i]) + "' (the server would answer 500) · it offers: " +
+                       (levels.empty() ? std::string("nothing") : levels));
+        } else {
+            effort = i;
+            scene.set_effort(kEfforts[i]);
+            scene.note(std::string("effort → ") + kEfforts[i] + (running.load() ? " (from the next call)" : ""));
+        }
+    };
+
     auto submit = [&](std::string p) {
         p = trim_ws(p);
         if (p.empty()) return;
@@ -945,11 +1096,22 @@ int main(int argc, char** argv) {
                 quit = true;
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
-                           "ctrl-l redraw · tab completes a command\n/tools  /turns N  /clear  /interrupt  /quit");
+                           "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /tools  /turns N  "
+                           "/clear  /interrupt  /quit");
             } else if (cmd == "/tools") {
                 std::string all;
                 for (const auto& n : reg.get_all_tool_names()) all += (all.empty() ? "" : "  ") + n;
                 scene.note(std::to_string(tool_count) + " tools: " + all);
+            } else if (cmd == "/effort" || cmd == "/reasoning") {
+                const std::string arg = trim_ws(p.substr(cmd.size()));
+                using dd::ui::ReasonView;
+                if (cmd == "/reasoning" && (arg == "show" || arg == "tail" || arg == "full" || arg == "hide")) {
+                    const ReasonView v = arg == "full" ? ReasonView::Full : arg == "hide" ? ReasonView::Hide : ReasonView::Tail;
+                    scene.set_reason_view(v);
+                    scene.note(std::string("reasoning ") + (v == ReasonView::Full ? "shown in full" : v == ReasonView::Hide ? "hidden" : "shown as a live tail"));
+                } else {
+                    effort_cmd(arg);
+                }
             } else if (cmd == "/clear") {
                 scene.clear();
             } else if (cmd == "/interrupt") {
@@ -998,9 +1160,13 @@ int main(int argc, char** argv) {
             if (is_command(typed) && typed.find(' ') == std::string::npos) {
                 const auto m = command_matches(typed);
                 if (m.size() == 1) {
-                    ed.buf = dd::ui::from_utf8(m[0] + (m[0] == "/turns" ? " " : ""));
+                    const bool takes_arg = m[0] == "/turns" || m[0] == "/effort" || m[0] == "/reasoning";
+                    ed.buf = dd::ui::from_utf8(m[0] + (takes_arg ? " " : ""));
                     ed.cur = ed.buf.size();
                 }
+            } else if (const auto m = arg_matches(typed, efforts); m.size() == 1) {
+                ed.buf = dd::ui::from_utf8(typed.substr(0, typed.find(' ') + 1) + m[0]);
+                ed.cur = ed.buf.size();
             }
             break;
         }
@@ -1045,6 +1211,9 @@ int main(int argc, char** argv) {
         if (const std::string typed = dd::ui::to_utf8(ed.buf); is_command(typed) && typed.find(' ') == std::string::npos) {
             for (const auto& m : command_matches(typed)) hint += (hint.empty() ? "" : "  ") + m;
             if (hint.empty()) hint = "no such command";
+        } else if (typed.rfind("/effort ", 0) == 0 || typed.rfind("/reasoning ", 0) == 0) {
+            for (const auto& m : arg_matches(typed, efforts)) hint += (hint.empty() ? "" : "  ") + m;
+            if (hint.empty()) hint = efforts.empty() ? "this model has no reasoning switch" : "not offered by this model";
         }
         scene.set_input(ed.buf, ed.cur, hint);
         term::put(scene.present(cols, rows, truecolor));

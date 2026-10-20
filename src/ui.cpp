@@ -658,6 +658,10 @@ void Scene::llm_begin() { Event e; e.ev = Ev::LlmBegin; post(std::move(e)); }
 void Scene::turn_begin() { Event e; e.ev = Ev::TurnBegin; post(std::move(e)); }
 void Scene::turn_end() { Event e; e.ev = Ev::TurnEnd; post(std::move(e)); }
 
+void Scene::llm_reasoning(const std::string& delta) { Event e; e.ev = Ev::Reason; e.a = delta; post(std::move(e)); }
+void Scene::llm_content(const std::string& delta) { Event e; e.ev = Ev::Content; e.a = delta; post(std::move(e)); }
+void Scene::set_effort(const std::string& label) { Event e; e.ev = Ev::Effort; e.a = label; post(std::move(e)); }
+
 void Scene::llm_end(const LlmStats& s) {
     Event e;
     e.ev = Ev::LlmEnd;
@@ -739,8 +743,36 @@ void Scene::apply(Event& e) {
     case Ev::User:
         push(Kind::User, e.a);
         break;
-    case Ev::Say:
-        push(Kind::Say, e.a).ms = last_.latency_ms;
+    case Ev::Say: {
+        Entry& t = push(Kind::Say, e.a);
+        t.ms = last_.latency_ms;
+        t.resolved = true;
+        break;
+    }
+    case Ev::Reason:
+        if (!live_reason_) {
+            live_reason_ = &push(Kind::Reason, "");
+            reason_t0_ = e.at;
+        }
+        live_reason_->text += e.a;
+        ++live_reason_->n;
+        ++live_reason_->ver;
+        phase_ = Phase::Reasoning;
+        break;
+    case Ev::Content:
+        if (live_reason_ && !live_reason_->resolved) {   // thinking is over once the answer starts
+            live_reason_->ms = std::chrono::duration<double, std::milli>(e.at - reason_t0_).count();
+            live_reason_->resolved = true;
+            ++live_reason_->ver;
+        }
+        if (!live_say_) live_say_ = &push(Kind::Say, "");
+        live_say_->text += e.a;
+        ++live_say_->n;
+        ++live_say_->ver;
+        phase_ = Phase::Writing;
+        break;
+    case Ev::Effort:
+        info_.effort = e.a;
         break;
     case Ev::Note:
         push(Kind::Note, e.a);
@@ -751,6 +783,7 @@ void Scene::apply(Event& e) {
     case Ev::Clear:
         entries_.clear();
         cache_.clear();
+        live_reason_ = live_say_ = nullptr;
         printed_ = 0;
         scroll_ = 0;
         break;
@@ -793,11 +826,13 @@ void Scene::apply(Event& e) {
         }
         break;
     case Ev::LlmBegin:
+        close_live(e.at, 0);
         phase_ = Phase::Thinking;
         phase_t0_ = e.at;
         running_tool_.clear();
         break;
     case Ev::LlmEnd:
+        close_live(e.at, e.llm.latency_ms);
         last_ = e.llm;
         ++calls_total_;
         ++turn_calls_;
@@ -817,6 +852,7 @@ void Scene::apply(Event& e) {
     case Ev::TurnEnd: {
         if (!busy_) break;
         busy_ = false;
+        close_live(e.at, 0);   // a stream cut by an interrupt
         // calls the loop skipped (interrupt) never get a result message
         for (auto it = entries_.rbegin(); it != entries_.rend() && it->kind != Kind::User; ++it)
             if (it->kind == Kind::Tool && !it->resolved) {
@@ -836,6 +872,20 @@ void Scene::apply(Event& e) {
     }
 }
 
+void Scene::close_live(clock::time_point at, double latency_ms) {
+    if (live_reason_ && !live_reason_->resolved) {
+        live_reason_->ms = std::chrono::duration<double, std::milli>(at - reason_t0_).count();
+        live_reason_->resolved = true;
+        ++live_reason_->ver;
+    }
+    if (live_say_) {
+        live_say_->resolved = true;
+        if (latency_ms > 0) live_say_->ms = latency_ms;
+        ++live_say_->ver;
+    }
+    live_reason_ = live_say_ = nullptr;
+}
+
 void Scene::set_input(const std::u32string& line, size_t cursor, const std::string& hint) {
     input_ = line;
     cursor_ = std::min(cursor, line.size());
@@ -849,15 +899,23 @@ double Scene::work_ms() const {
     return std::chrono::duration<double, std::milli>(clock::now() - turn_t0_).count();
 }
 
-const Canvas& Scene::block(size_t i, int w) {
-    Cache& c = cache_[i];
+bool Scene::stale(size_t i, int w) const {
+    const Cache& c = cache_[i];
     const Entry& e = entries_[i];
     const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
-    if (c.w != w || c.ver != e.ver || c.spin != spin) {
+    const int view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
+    return c.w != w || c.ver != e.ver || c.spin != spin || c.view != view;
+}
+
+const Canvas& Scene::block(size_t i, int w) {
+    Cache& c = cache_[i];
+    if (stale(i, w)) {
+        const Entry& e = entries_[i];
         c.block = render(e, w);
         c.w = w;
         c.ver = e.ver;
-        c.spin = spin;
+        c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
+        c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
     }
     return c.block;
 }
@@ -949,6 +1007,44 @@ Canvas Scene::render(const Entry& e, int w) const {
         for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k) + 1, lines[k], Style{th_.error});
         return c;
     }
+    case Kind::Reason: {
+        // dashed, dim: thought, not output. Tail = fixed height, so a live
+        // stream never moves the cards below it.
+        const std::string head = e.resolved ? "◈ thought" : "◈ thinking";
+        std::string meta = std::to_string(e.n) + " tok";
+        if (e.ms > 0) meta += " · " + fmt_ms(e.ms);
+        const Style dim{th_.dim}, txt{th_.muted, kNone, kItalic};
+        if (view_ == ReasonView::Hide) {
+            Canvas c(w, 2);
+            const int n = c.text(0, 0, head, Style{th_.accent, kNone, kItalic});
+            c.text(n + 1, 0, "· " + meta + " · /reasoning show", txt);
+            return c;
+        }
+        auto lines = wrap(e.text.empty() ? std::string("…") : e.text, w - 4);
+        while (lines.size() > 1 && lines.front().empty()) lines.erase(lines.begin());
+        while (lines.size() > 1 && lines.back().empty()) lines.pop_back();
+        const int rows = view_ == ReasonView::Full ? static_cast<int>(lines.size()) : kReasonRows;
+        const size_t first = lines.size() > static_cast<size_t>(rows) ? lines.size() - static_cast<size_t>(rows) : 0;
+        Canvas c(w, rows + 3);
+        for (int i = 1; i < w - 1; ++i) {
+            c.put(i, 0, U'╌', dim);
+            c.put(i, rows + 1, U'╌', dim);
+        }
+        for (int j = 1; j <= rows; ++j) {
+            c.put(0, j, U'┆', dim);
+            c.put(w - 1, j, U'┆', dim);
+        }
+        c.put(0, 0, U'╭', dim);
+        c.put(w - 1, 0, U'╮', dim);
+        c.put(0, rows + 1, U'╰', dim);
+        c.put(w - 1, rows + 1, U'╯', dim);
+        c.title(2, 0, head, Style{th_.accent, kNone, kItalic | kBold}, dim);
+        c.title_right(w - 2, 0, meta, Style{th_.muted}, dim);
+        if (first > 0) c.title(2, rows + 1, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
+        for (size_t k = first; k < lines.size(); ++k)
+            c.text(2, 1 + static_cast<int>(k - first), lines[k], txt);
+        return c;
+    }
     case Kind::Rule: {
         Canvas c(w, 2);
         const std::string label = " " + e.text + " ";
@@ -1002,22 +1098,21 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
     }
     const int cw = std::min(iw, kCardMaxW);
     {   // a resize invalidates every card: wrap them on all cores
-        std::vector<size_t> stale;
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            const Entry& e = entries_[i];
-            const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
-            if (cache_[i].w != cw || cache_[i].ver != e.ver || cache_[i].spin != spin) stale.push_back(i);
-        }
-        if (static_cast<int>(stale.size()) >= kParBlocks) {
-            const long m = static_cast<long>(stale.size());
+        std::vector<size_t> todo;
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (stale(i, cw)) todo.push_back(i);
+        if (static_cast<int>(todo.size()) >= kParBlocks) {
+            const long m = static_cast<long>(todo.size());
 #pragma omp parallel for schedule(dynamic, 1) num_threads(par_threads())
             for (long k = 0; k < m; ++k) {
-                const size_t i = stale[static_cast<size_t>(k)];
+                const size_t i = todo[static_cast<size_t>(k)];
+                const Entry& e = entries_[i];
                 Cache& c = cache_[i];
-                c.block = render(entries_[i], cw);
+                c.block = render(e, cw);
                 c.w = cw;
-                c.ver = entries_[i].ver;
-                c.spin = entries_[i].kind == Kind::Tool && entries_[i].run == Run::Running ? tick_ % 10 : -1;
+                c.ver = e.ver;
+                c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
+                c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
             }
         }
     }
@@ -1054,8 +1149,8 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         f.text(vx, ry, clip(v, vw), vs);
     };
 
-    const bool engine = h >= 19;
-    const int sh = 7, eh = engine ? 7 : 0, th = h - sh - eh;
+    const bool engine = h >= 20;
+    const int sh = 8, eh = engine ? 7 : 0, th = h - sh - eh;
 
     f.box(x, y, w, sh, b, true);
     f.title(x + 2, y, "session", head, b);
@@ -1064,9 +1159,11 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     if (server.size() > 3 && server.compare(server.size() - 3, 3, "/v1") == 0) server.resize(server.size() - 3);
     row(y + 1, "model", info_.model, val);
     row(y + 2, "server", server, val);
-    row(y + 3, "turn", std::to_string(turn_calls_) + " / " + std::to_string(info_.max_turns) + " calls", val);
-    row(y + 4, "session", std::to_string(turns_) + " turns · " + std::to_string(calls_total_) + " calls", val);
-    row(y + 5, "work", fmt_ms(work_ms()), busy_ ? Style{th_.hot, kNone, kBold} : val);
+    row(y + 3, "effort", info_.effort + (view_ == ReasonView::Hide ? " · hidden" : view_ == ReasonView::Full ? " · full" : ""),
+        info_.effort == "off" ? mut : Style{th_.accent, kNone, kBold});
+    row(y + 4, "turn", std::to_string(turn_calls_) + " / " + std::to_string(info_.max_turns) + " calls", val);
+    row(y + 5, "session", std::to_string(turns_) + " turns · " + std::to_string(calls_total_) + " calls", val);
+    row(y + 6, "work", fmt_ms(work_ms()), busy_ ? Style{th_.hot, kNone, kBold} : val);
 
     if (engine) {
         const int ey = y + sh;
@@ -1179,6 +1276,13 @@ void Scene::paint_status(Frame& f, int y, int w) const {
     if (busy_ && phase_ == Phase::Tools) {
         left = "⚙ " + running_tool_;
         ls = Style{th_.gold, bg, kBold};
+    } else if (busy_ && phase_ == Phase::Reasoning) {
+        const auto& wing = th_.wings[static_cast<size_t>(tick_ / 4) % th_.wings.size()];
+        left = wing.first + " reasoning · " + std::to_string(live_reason_ ? live_reason_->n : 0) + " tok " + wing.second;
+        ls = Style{th_.accent, bg, kItalic};
+    } else if (busy_ && phase_ == Phase::Writing) {
+        left = "✎ answering · " + std::to_string(live_say_ ? live_say_->n : 0) + " tok";
+        ls = Style{th_.hot, bg, kBold};
     } else if (busy_) {
         const long secs = static_cast<long>(std::chrono::duration<double>(clock::now() - phase_t0_).count());
         const auto& wing = th_.wings[static_cast<size_t>(tick_ / 4) % th_.wings.size()];
@@ -1191,7 +1295,8 @@ void Scene::paint_status(Frame& f, int y, int w) const {
 
     struct Seg { std::string label, value; };
     std::vector<Seg> segs = {{"work ", fmt_ms(work_ms())},
-                             {"turn ", std::to_string(turn_calls_) + "/" + std::to_string(info_.max_turns)}};
+                             {"turn ", std::to_string(turn_calls_) + "/" + std::to_string(info_.max_turns)},
+                             {"effort ", info_.effort}};
     if (last_.gen_tps > 0) segs.push_back({"", fmt1(last_.gen_tps) + " t/s"});
     if (info_.n_ctx > 0 && last_.prompt_tokens > 0)
         segs.push_back({"ctx ", std::to_string(static_cast<int>(100.0 * static_cast<double>(last_.prompt_tokens) /
@@ -1252,7 +1357,7 @@ std::string Scene::drain_inline(int width, bool color, bool truecolor) {
     std::string out;
     while (printed_ < entries_.size()) {
         const Entry& e = entries_[printed_];
-        if (e.kind == Kind::Tool && !e.resolved) break;   // the card prints whole
+        if ((e.kind == Kind::Tool || e.kind == Kind::Say || e.kind == Kind::Reason) && !e.resolved) break;   // cards print whole
         out += render(e, w).to_ansi(color, truecolor);
         ++printed_;
     }

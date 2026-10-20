@@ -175,7 +175,9 @@ struct Theme {
     static Theme load(const std::string& skin_yaml);
 };
 
-enum class Kind { User, Say, Tool, Note, Error, Rule };
+enum class Kind { User, Say, Tool, Note, Error, Rule, Reason };
+// How reasoning cards show: a fixed-height live tail, every line, or one line.
+enum class ReasonView { Tail, Full, Hide };
 enum class Run { Pending, Running, Ok, Failed };
 
 struct Entry {
@@ -185,10 +187,11 @@ struct Entry {
     std::string call_id;     // tool_call id
     std::string result;      // tool result
     Run run = Run::Pending;
-    bool resolved = false;   // tool: result attached
+    bool resolved = false;   // tool: result attached; streamed say/reason: call ended
     double ms = 0;           // tool runtime / llm latency
     std::string clock;       // HH:MM:SS
     uint64_t token = 0;      // tool_begin token
+    long n = 0;              // streamed deltas (≈ tokens)
     unsigned ver = 0;
 };
 
@@ -198,7 +201,7 @@ struct LlmStats {
 };
 
 struct Info {
-    std::string model, endpoint;
+    std::string model, endpoint, effort = "default";
     int tools = 0, max_turns = 0;
     long n_ctx = 0;
     std::vector<std::string> sources;  // "mazemaker 34", "local 4"
@@ -221,7 +224,10 @@ public:
     void error(const std::string& text);
     void clear();
     void llm_begin();
+    void llm_reasoning(const std::string& delta);   // streamed thinking
+    void llm_content(const std::string& delta);     // streamed answer
     void llm_end(const LlmStats& s);
+    void set_effort(const std::string& label);
     void turn_begin();
     void turn_end();
 
@@ -229,6 +235,8 @@ public:
     void set_input(const std::u32string& line, size_t cursor, const std::string& hint);
     void scroll(int rows);              // + = older
     void scroll_end() { scroll_ = 0; }
+    void set_reason_view(ReasonView v) { view_ = v; }
+    ReasonView reason_view() const { return view_; }
     void redraw() { if (frame_) frame_->invalidate(); }
     // One synchronized frame: changed cells + cursor at the prompt; empty
     // when nothing changed.
@@ -238,12 +246,13 @@ public:
     std::string row_text(int y) const;  // last presented frame, plain text
     const Theme& theme() const { return th_; }
 
-    static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14;
+    static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14, kReasonRows = 6;
 
 private:
     using clock = std::chrono::steady_clock;
     enum class Ev : uint8_t { Info, MaxTurns, User, Say, ToolCall, ToolBegin, ToolEnd, ToolResult,
-                              Note, Error, Clear, LlmBegin, LlmEnd, TurnBegin, TurnEnd };
+                              Note, Error, Clear, LlmBegin, Reason, Content, LlmEnd, Effort,
+                              TurnBegin, TurnEnd };
     struct Event {
         Ev ev = Ev::Note;
         std::string a, b, c;
@@ -254,7 +263,7 @@ private:
         std::shared_ptr<const Info> info;
         clock::time_point at{};
     };
-    enum class Phase { Idle, Thinking, Tools };
+    enum class Phase { Idle, Thinking, Reasoning, Writing, Tools };
 
     const Theme th_;
     MpscQueue<Event> q_;
@@ -262,7 +271,7 @@ private:
 
     // everything below: render thread only
     std::deque<Entry> entries_;
-    struct Cache { int w = -1; unsigned ver = 0; int spin = -1; Canvas block; };
+    struct Cache { int w = -1; unsigned ver = 0; int spin = -1, view = -1; Canvas block; };
     std::deque<Cache> cache_;
     size_t printed_ = 0;     // drain_inline cursor (index into entries_)
     Info info_;
@@ -273,13 +282,16 @@ private:
     Phase phase_ = Phase::Idle;
     bool busy_ = false;
     std::string running_tool_;
-    clock::time_point turn_t0_{}, phase_t0_{};
+    Entry* live_reason_ = nullptr;   // this call's streaming cards (newest entries)
+    Entry* live_say_ = nullptr;
+    clock::time_point turn_t0_{}, phase_t0_{}, reason_t0_{};
     double last_turn_ms_ = 0;
 
     std::u32string input_;
     size_t cursor_ = 0;
     std::string hint_;
     int scroll_ = 0, tick_ = 0;
+    ReasonView view_ = ReasonView::Tail;
     std::unique_ptr<Frame> frame_;
     std::string last_tail_;
 
@@ -287,6 +299,8 @@ private:
     void apply();
     void apply(Event& e);
     Entry& push(Kind k, const std::string& text);
+    void close_live(clock::time_point at, double latency_ms);
+    bool stale(size_t i, int w) const;
     const Canvas& block(size_t i, int w);
     Canvas render(const Entry& e, int w) const;
     double work_ms() const;
