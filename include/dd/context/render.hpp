@@ -76,6 +76,7 @@ public:
     std::string capped(const core::Message& tool, const std::vector<ItemPtr>& view) const;
     // Server tokens per chars/4 token, learned from the last call.
     void note_ratio(long real_tokens, long estimated_tokens);
+    double ratio() const { return ratio_; }
     long budget_chars(int siblings) const;
 
     static constexpr const char* kResultCut = "[[RESULT CUT";

@@ -276,6 +276,69 @@ int main() {
         chk(!notes.empty() && notes.back().find("rebase (inside the turn)") != std::string::npos, "rebase announced");
     }
 
+    {   // a tail of big results gives way: the new epoch lands under half the rebase point
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.fast_layer_tokens = 20000;   // hard 18000, target 9000
+        cfg.protect_last_n = 10;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                       std::filesystem::temp_directory_path().string());
+        eng.begin_turn("read every big file and summarise the lot, one line per file please");
+        eng.payload();
+        for (int i = 1; i <= 5; ++i) {   // 5 results of ~3.75k tokens each
+            eng.on_assistant(assistant_calls(i, "read_file", "/big" + std::to_string(i), ""));
+            eng.on_tool_results({tool_result(i, std::string(15000, 'b'))});
+        }
+        agent::CallStats st;
+        st.prompt_tokens = 19000;
+        eng.on_call(st);
+        eng.after_tools();
+        const auto& items = eng.session().items();
+        long chars = 0;
+        for (const auto& it : items) chars += static_cast<long>(it->msg.content.size());
+        chk(eng.session().generation() == 1 && chars / 4 < 9000, "rebased under half the rebase point (" +
+                                                                    std::to_string(chars / 4) + " est. tokens)");
+        chk(items[1]->msg.content.find("read_file(/big1)") != std::string::npos, "dropped calls are named");
+        chk(items.back()->msg.content.size() == 15000, "the newest result stays");
+    }
+
+    {   // a rebase that cannot make room is skipped, not repeated every call
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.fast_layer_tokens = 4000;   // high 3200: the question alone is bigger
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                       std::filesystem::temp_directory_path().string());
+        std::vector<std::string> notes;
+        eng.on_note = [&](const std::string& s) { notes.push_back(s); };
+        eng.begin_turn(std::string(16000, 'q'));
+        eng.payload();
+        for (int i = 1; i <= 3; ++i) {
+            eng.on_assistant(assistant_calls(i, "read_file", "/s" + std::to_string(i), ""));
+            eng.on_tool_results({tool_result(i, "small")});
+            agent::CallStats st;
+            st.prompt_tokens = 4500;
+            eng.on_call(st);
+            eng.after_tools();
+        }
+        int skipped = 0;
+        for (const auto& n : notes) skipped += n.find("rebase skipped") != std::string::npos;
+        chk(eng.session().generation() == 0 && skipped == 1, "no room: skipped once, no rebase loop");
+    }
+
     // ---- tool deck ----
     {
         tools::ToolRegistry reg;

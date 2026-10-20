@@ -7,8 +7,7 @@
 // decode batch in slot order, so the small sidekick prompts go first and the
 // big main prefills never starve them. Strata holds one conversation at a
 // time and parks the other. Main calls carry their slot, n_cache_reuse (a
-// spliced middle is relocated, not re-read), cache_prompt and the thinking
-// budget. Port of run_agent.py's slot pinning + agent/kv_watermarks.py's
+// spliced middle is relocated, not re-read) and the thinking budget. Port of run_agent.py's slot pinning + agent/kv_watermarks.py's
 // server half + agent/backend_kind.py.
 
 #include <atomic>
@@ -38,6 +37,9 @@ public:
     const ServerInfo& probe();                   // /props + /slots
     const ServerInfo& info() const { return info_; }
     bool multi_slot() const { return info_.local && info_.slots >= 2; }
+    // One conversation at a time (a one-slot Strata): a second one parks the
+    // first, so a prewarm is parked and cancellable, never beside main.
+    bool single_sequence() const { return info_.local && info_.strata && info_.slots < 2; }
 
     int main_slot() const;
     int sidekick_slot() const;

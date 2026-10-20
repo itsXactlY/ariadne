@@ -103,9 +103,8 @@ bool Endpoint::erase(int slot) const {
 
 void Endpoint::shape(Json& body, int slot, bool thinking) const {
     if (root_.empty()) return;   // a remote API gets the OpenAI fields only
-    core::obj_set(body, "cache_prompt", core::json_bool(true));
-    core::obj_set(body, "n_cache_reuse", core::json_num(256));
-    if (!info_.strata && slot >= 0) core::obj_set(body, "id_slot", core::json_num(slot));
+    core::obj_set(body, "n_cache_reuse", core::json_num(256));   // a spliced middle is relocated, not re-read
+    if (!single_sequence() && slot >= 0) core::obj_set(body, "id_slot", core::json_num(slot));
     if (thinking && thinking_budget > 0) {
         // llama-server reads it as thinking_budget_tokens; Strata knows only this name
         core::obj_set(body, "reasoning_budget_tokens", core::json_num(thinking_budget));

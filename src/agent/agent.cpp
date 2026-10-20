@@ -188,7 +188,13 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
     if (!llm) return "I reached the iteration limit and couldn't generate a summary.";
     try {
         core::Json tools = core::json_arr();  // no tools on the summary call
-        core::Message summary = llm->chat(messages, tools);
+        std::vector<core::Message> sent = messages;
+        if (context) {   // the tape plus the request: everything before it is already cached
+            sent = context->payload();
+            sent.push_back(req);
+            tools = context->tools();
+        }
+        core::Message summary = llm->chat(sent, tools);
         std::string text = summary.content;
         if (!text.empty()) {
             core::Message am;

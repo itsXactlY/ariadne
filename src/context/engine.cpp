@@ -42,6 +42,13 @@ std::string thousands(long v) {
     return v < 0 ? "-" + o : o;
 }
 
+// chars/4 of what a message puts on the wire
+long est_tokens(const Item& it) {
+    size_t c = it.msg.content.size() + it.msg.reasoning.size() + 16;
+    for (const auto& tc : it.msg.tool_calls) c += tc.name.size() + tc.arguments.size() + 24;
+    return static_cast<long>(c / 4);
+}
+
 long index_of(const std::vector<ItemPtr>& v, const ItemPtr& p) {
     for (size_t i = 0; i < v.size(); ++i)
         if (v[i] == p) return static_cast<long>(i);
@@ -179,7 +186,8 @@ TapeStats TapeEngine::stats() const {
     s.reused = reused_;
     s.level = level(tokens_);
     s.prep = prep_running_.load() ? "warming" : ready_.load() ? "ready" : "";
-    s.server = !ep_.info().local ? "remote" : ep_.info().strata ? "strata" : "llama ×" + std::to_string(ep_.info().slots);
+    s.server = !ep_.info().local ? "remote"
+               : (ep_.info().strata ? "strata ×" : "llama ×") + std::to_string(ep_.info().slots);
     s.visible = deck_.visible() + (deck_.active() ? 3 : 0);
     s.deferred = deck_.deferred();
     s.main_slot = ep_.main_slot();
@@ -203,7 +211,7 @@ void TapeEngine::emit() const {
 void TapeEngine::begin_turn(const std::string& user_message) {
     // Strata holds one conversation: main wants it back, a prewarm still reading is closed
     // (its progress survives as checkpoints). A slot server lets it finish beside main.
-    if (prep_running_.load() && ep_.info().strata) join_prep(true);
+    if (prep_running_.load() && ep_.single_sequence()) join_prep(true);
     else if (!prep_running_.load() && prep_thread_.joinable()) prep_thread_.join();
 
     question_ = user_message;
@@ -262,7 +270,7 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
     const bool due = rebase_at() > 0 && pool >= rebase_at();
     // On Strata the warm epoch is what the engine holds now; resuming the old
     // one would re-read it, so the swap is due at once.
-    const bool parked = p->warmed && ep_.info().strata && turn_start;
+    const bool parked = p->warmed && ep_.single_sequence() && turn_start;
     if (!due && !parked) {
         ready_.store(p.release());
         return false;
@@ -289,19 +297,39 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
 void TapeEngine::rebase(const char* why) {
     if (std::unique_ptr<Prep> stale(ready_.exchange(nullptr)); stale && stale->slot >= 0) ep_.erase(stale->slot);
     bool recalled = false;
-    auto base = retrieval_base(session_->items(), session_->id(), &recalled);
+    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio());
     const size_t before = session_->items().size();
     const long tokens = tokens_;
+    // A rebase that cannot make room would rebase again on the next call,
+    // dropping the working state each time: the window stays over instead.
+    const long after = epoch_tokens(base, render_.ratio());
+    if (high_at() > 0 && after >= high_at()) {
+        if (skipped_gen_ != session_->generation())
+            note(std::string("⟲ rebase skipped (") + why + "): a new epoch would still be ~" + thousands(after) +
+                 " tokens (high watermark " + thousands(high_at()) + ") — the window stays over the fast layer");
+        skipped_gen_ = session_->generation();
+        return;
+    }
     session_->replace(std::move(base));
     note(std::string("⟲ rebase (") + why + "): epoch " + std::to_string(session_->generation()) + " · " +
-         thousands(tokens) + " tokens · " + std::to_string(before) + " → " + std::to_string(session_->items().size()) +
-         " messages · " + (recalled ? "recall in turn 0" : "no recall"));
+         thousands(tokens) + " → ~" + thousands(after) + " tokens · " + std::to_string(before) + " → " +
+         std::to_string(session_->items().size()) + " messages · " + (recalled ? "recall in turn 0" : "no recall"));
     tokens_ = 0;
     tool_chars_ = 0;
 }
 
+long TapeEngine::epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const {
+    long t = prefix_tokens(ratio);
+    for (const auto& it : base) t += static_cast<long>(static_cast<double>(est_tokens(*it)) * ratio);
+    return t;
+}
+
+long TapeEngine::prefix_tokens(double ratio) const {
+    return static_cast<long>(static_cast<double>(system_.size() + core::json_dump(deck_.definitions()).size()) / 4.0 * ratio);
+}
+
 std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                                bool* recalled) const {
+                                                bool* recalled, double ratio) const {
     long cur = -1;
     for (size_t i = items.size(); i-- > 0;)
         if (items[i]->msg.role == "user" && !items[i]->hidden) {
@@ -312,6 +340,31 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
     long cut = std::max(0L, static_cast<long>(items.size()) - protect);
     while (cut > 0 && cut < static_cast<long>(items.size()) && items[static_cast<size_t>(cut)]->msg.role == "tool") --cut;
     if (cur >= 0 && cur >= cut) cut = cur + 1;   // the question leads the base; the tail starts after it
+    // The new epoch has to land well under the rebase point, or the next call
+    // rebases again: the tail gives way from its front, a whole tool group at a
+    // time, and what it ran is named in [this turn so far].
+    if (const long target = rebase_at() / 2; target > 0) {
+        auto est = [&](long from) {
+            long t = prefix_tokens(ratio) + 1200;   // + the anchor and its recall
+            if (cur >= 0) t += static_cast<long>(static_cast<double>(est_tokens(*items[static_cast<size_t>(cur)])) * ratio);
+            for (long i = from; i < static_cast<long>(items.size()); ++i)
+                if (i != cur) t += static_cast<long>(static_cast<double>(est_tokens(*items[static_cast<size_t>(i)])) * ratio);
+            return t;
+        };
+        // never past the newest tool group: it is the live state the turn continues from
+        long keep = static_cast<long>(items.size());
+        for (long i = keep - 1; i > cur; --i)
+            if (items[static_cast<size_t>(i)]->msg.role == "assistant" && !items[static_cast<size_t>(i)]->msg.tool_calls.empty()) {
+                keep = i;
+                break;
+            }
+        while (cut < keep && est(cut) > target) {
+            const Item& head = *items[static_cast<size_t>(cut)];
+            ++cut;
+            if (head.msg.role == "assistant" && !head.msg.tool_calls.empty())
+                while (cut < static_cast<long>(items.size()) && items[static_cast<size_t>(cut)]->msg.role == "tool") ++cut;
+        }
+    }
 
     std::vector<std::string> blocks = {
         "[rebased] This conversation was rebuilt to keep the working context inside the GPU's fast layer. "
@@ -400,8 +453,12 @@ void TapeEngine::on_call(const agent::CallStats& st) {
         tokens_ = st.prompt_tokens + st.completion_tokens;
         prompt_ = st.prompt_tokens;
         reused_ = st.cached_tokens;
-        size_t chars = system_.size();
-        for (const auto& m : tape_.payload()) chars += m.content.size() + m.reasoning.size();
+        // the server counts the tools array too: so must the estimate it is compared to
+        size_t chars = system_.size() + core::json_dump(deck_.definitions()).size();
+        for (const auto& m : tape_.payload()) {
+            chars += m.content.size() + m.reasoning.size() + 16;
+            for (const auto& tc : m.tool_calls) chars += tc.name.size() + tc.arguments.size() + 24;
+        }
         render_.note_ratio(st.prompt_tokens, static_cast<long>(chars / 4));
     }
     emit();
@@ -436,7 +493,7 @@ void TapeEngine::start_prep() {
     if (!cfg_.prewarm || prep_running_.load() || ready_.load() || !maze_ || !maze_->up()) return;
     const ServerInfo& si = ep_.info();
     // a single-slot llama-server would evict main to warm it; a remote API has nothing to warm
-    if (!si.local || (si.slots < 2 && !si.strata)) return;
+    if (!si.local || (si.slots < 2 && !ep_.single_sequence())) return;
     const long pool = ep_.pool_tokens(tokens_);
     if (high_at() <= 0 || pool < high_at()) return;
     if (prep_thread_.joinable()) prep_thread_.join();
@@ -446,14 +503,20 @@ void TapeEngine::start_prep() {
     const std::string sid = session_->id();
     const int slot = ep_.multi_slot() ? ep_.sidekick_slot() : -1;
     Renderer quiet = render_.quiet();
+    const double ratio = render_.ratio();
     prep_cancel_.store(false);
     prep_running_.store(true);
     note("⟲ prewarming the next epoch: " + thousands(pool) + " tokens ≥ high watermark " + thousands(high_at()) +
-         (slot >= 0 ? " · sidekick slot " + std::to_string(slot) : " · parked on Strata"));
-    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet]() mutable {
+         (slot >= 0 ? " · sidekick slot " + std::to_string(slot) : " · parked (one-conversation engine)"));
+    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio]() mutable {
         auto p = std::make_unique<Prep>();
         bool recalled = false;
-        p->base = retrieval_base(snapshot, sid, &recalled);
+        p->base = retrieval_base(snapshot, sid, &recalled, ratio);
+        if (high_at() > 0 && epoch_tokens(p->base, ratio) >= high_at()) {   // no room to make: nothing to warm
+            note("⟲ prewarm dropped: the next epoch would not land under the high watermark");
+            prep_running_.store(false);
+            return;
+        }
         p->snapshot_len = snapshot.size();
         p->generation = gen;
         p->slot = slot;

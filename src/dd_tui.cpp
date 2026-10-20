@@ -855,6 +855,16 @@ int main(int argc, char** argv) {
         u.cached_tokens = st.cached_tokens;
         scene.llm_end(u);
         engine.on_call(st);
+        if (const char* log = std::getenv("DD_TAPE_LOG")) {   // one line per call: is the prefix reused?
+            const auto t = engine.stats();
+            if (std::FILE* f = std::fopen(log, "a")) {
+                std::fprintf(f, "{\"epoch\":%d,\"tape\":%zu,\"history\":%zu,\"prompt\":%ld,\"cached\":%ld,"
+                                "\"completion\":%ld,\"ms\":%.0f,\"level\":\"%s\"}\n",
+                             t.epoch, t.tape, t.history, st.prompt_tokens, st.cached_tokens, st.completion_tokens,
+                             st.latency_ms, t.level.c_str());
+                std::fclose(f);
+            }
+        }
     };
 
     agent.model = model;
@@ -995,7 +1005,9 @@ int main(int argc, char** argv) {
         } else {
             effort = i;
             scene.set_effort(kEfforts[i]);
-            scene.note(std::string("effort → ") + kEfforts[i] + (running.load() ? " (from the next call)" : ""));
+            // the template writes the effort into the system block: the next call reads the prompt again
+            scene.note(std::string("effort → ") + kEfforts[i] + (running.load() ? " from the next call" : "") +
+                       " · the template puts it in the system block, so that call re-reads the whole prompt once");
         }
     };
 

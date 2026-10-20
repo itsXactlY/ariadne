@@ -127,8 +127,12 @@ private:
     bool adopt(long pool, bool turn_start);
     void start_prep();
     void join_prep(bool cancel);
+    // ratio: server tokens per chars/4, so the new epoch is sized as the server will count it
     std::vector<ItemPtr> retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                        bool* recalled) const;
+                                        bool* recalled, double ratio) const;
+    long prefix_tokens(double ratio) const;   // system prompt + tools array
+    long epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const;   // a new epoch, as the server counts it
+    int skipped_gen_ = -1;   // the epoch whose rebase could not make room (said once)
 };
 
 // What a dropped stretch of this turn already did, one line per call.
