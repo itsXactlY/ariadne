@@ -111,6 +111,7 @@ private:
     std::string injection_, question_;
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
+    bool drop_pending_ = false;   // a rebase left the old epoch parked: drop it after the next answer
 
     std::atomic<Prep*> ready_{nullptr};
     std::atomic<bool> prep_running_{false}, prep_cancel_{false};

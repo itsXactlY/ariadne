@@ -55,6 +55,9 @@ public:
     // cache both share the fast layer.
     long pool_tokens(long main_tokens) const;
     bool erase(int slot) const;                  // needs --slot-save-path on llama-server
+    // A one-conversation Strata keeps the epoch it moved away from parked (~2 GB
+    // at 33k tokens): drop it once the new epoch has answered. Fire-and-forget.
+    void drop_parked() const;
 
     // The fields a request carries. thinking: reasoning is on for this call.
     void shape(core::Json& body, int slot, bool thinking) const;

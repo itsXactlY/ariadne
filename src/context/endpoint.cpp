@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <thread>
 
 namespace dd {
 namespace context {
@@ -99,6 +100,11 @@ long Endpoint::pool_tokens(long main_tokens) const {
 bool Endpoint::erase(int slot) const {
     if (root_.empty()) return false;
     return net::post(root_ + "/slots/" + std::to_string(slot) + "?action=erase", "{}", 5000).ok();
+}
+
+void Endpoint::drop_parked() const {
+    if (!single_sequence()) return;
+    std::thread([url = root_ + "/v1/cache/drop_parked"] { net::post(url, "{}", 35000); }).detach();
 }
 
 void Endpoint::shape(Json& body, int slot, bool thinking) const {

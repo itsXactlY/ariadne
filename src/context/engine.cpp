@@ -286,6 +286,7 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
         const bool erased = ep_.erase(old);
         note("main moved to the prewarmed slot " + std::to_string(p->slot) + (erased ? ", old epoch erased" : ""));
     }
+    drop_pending_ = ep_.single_sequence();
     note("⟲ rebase (prewarmed" + std::string(p->warmed ? "" : ", not warmed") + "): epoch " +
          std::to_string(session_->generation()) + " · " + thousands(pool) + " tokens · " + std::to_string(before) +
          " → " + std::to_string(session_->items().size()) + " messages");
@@ -311,6 +312,7 @@ void TapeEngine::rebase(const char* why) {
         return;
     }
     session_->replace(std::move(base));
+    drop_pending_ = ep_.single_sequence();
     note(std::string("⟲ rebase (") + why + "): epoch " + std::to_string(session_->generation()) + " · " +
          thousands(tokens) + " → ~" + thousands(after) + " tokens · " + std::to_string(before) + " → " +
          std::to_string(session_->items().size()) + " messages · " + (recalled ? "recall in turn 0" : "no recall"));
@@ -449,6 +451,11 @@ std::vector<Message> TapeEngine::payload() {
 }
 
 void TapeEngine::on_call(const agent::CallStats& st) {
+    if (drop_pending_ && st.prompt_tokens > 0) {   // the new epoch answered: the old one is dead weight
+        drop_pending_ = false;
+        ep_.drop_parked();
+        note("⟲ old epoch dropped from the engine's conversation cache");
+    }
     if (st.prompt_tokens > 0) {
         tokens_ = st.prompt_tokens + st.completion_tokens;
         prompt_ = st.prompt_tokens;
