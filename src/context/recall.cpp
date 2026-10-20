@@ -35,8 +35,10 @@ std::string utf8_cut(const std::string& s, size_t n) {
     return s.substr(0, n) + "…";
 }
 
+// "#id": a snippet is cut, mazemaker_get(memory_ids=[id]) reads the rest
 std::string line(const Hit& h, size_t max) {
-    return "- " + (h.label.empty() ? std::string() : "[" + h.label + "] ") + utf8_cut(squash(h.content), max);
+    return "- " + (h.id > 0 ? "#" + std::to_string(h.id) + " " : std::string()) +
+           (h.label.empty() ? std::string() : "[" + h.label + "] ") + utf8_cut(squash(h.content), max);
 }
 
 // The summary row's own description: frontmatter description:, else the
@@ -235,7 +237,7 @@ Prefetch Recaller::run(const std::string& query, const std::set<long>& in_window
     history.join();
 
     std::string body;
-    auto add = [&](const std::string& head, const std::vector<Hit>& rows, size_t max, int& n) {
+    auto add = [&](char kind, const std::string& head, const std::vector<Hit>& rows, size_t max, int& n) {
         bool headed = false;
         for (const auto& h : rows) {
             if (h.content.empty()) continue;
@@ -247,13 +249,16 @@ Prefetch Recaller::run(const std::string& query, const std::set<long>& in_window
             }
             body += l;
             out.ids.push_back(h.id);
+            Hit s = h;
+            s.content = utf8_cut(squash(h.content), 240);
+            out.shown.emplace_back(kind, std::move(s));
             ++n;
         }
     };
-    add("Recalled for this turn:", hits, 420, out.hits);
-    add("Connected in the graph:", linked, 300, out.linked);
-    add("Extracted facts:", facts, 200, out.facts);
-    add("Earlier in this session (out of the window):", before, 420, out.earlier);
+    add('r', "Recalled for this turn:", hits, 420, out.hits);
+    add('l', "Connected in the graph:", linked, 300, out.linked);
+    add('f', "Extracted facts:", facts, 200, out.facts);
+    add('e', "Earlier in this session (out of the window):", before, 420, out.earlier);
     if (skills_)
         if (auto s = skills_->match(query, skill_min)) {
             out.skill = s->name;

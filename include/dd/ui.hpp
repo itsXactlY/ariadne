@@ -123,10 +123,22 @@ struct Theme {
     static Theme load(const std::string& skin_yaml);
 };
 
-enum class Kind { User, Say, Tool, Note, Error, Rule, Reason };
+enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory };
 // How reasoning cards show: a fixed-height live tail, every line, or one line.
 enum class ReasonView { Tail, Full, Hide };
 enum class Run { Pending, Running, Ok, Failed };
+
+// A turn recall as its card shows it: one row per memory the block carries.
+struct MemoryRow {
+    char kind = 'r';   // 'r' recalled, 'l' linked in the graph, 'f' extracted fact, 'e' earlier turn
+    long id = 0;
+    std::string label, text;
+    double score = 0;
+};
+struct RecallView {
+    std::vector<MemoryRow> rows;
+    std::string meta, skill;   // the one-line summary; the skill offered, if any
+};
 
 struct Entry {
     Kind kind = Kind::Note;
@@ -141,6 +153,7 @@ struct Entry {
     uint64_t token = 0;      // tool_begin token
     long n = 0;              // streamed deltas (≈ tokens)
     unsigned ver = 0;
+    std::shared_ptr<const RecallView> recall;   // memory card
 };
 
 struct LlmStats {
@@ -180,6 +193,7 @@ public:
     void tool_end(uint64_t token, double ms, bool ok);
     void tool_result(const std::string& id, const std::string& text);
     void note(const std::string& text);
+    void recalled(const RecallView& v);   // a memory card
     void error(const std::string& text);
     void clear();
     void llm_begin();
@@ -213,7 +227,7 @@ private:
     using clock = std::chrono::steady_clock;
     enum class Ev : uint8_t { Info, MaxTurns, User, Say, ToolCall, ToolBegin, ToolEnd, ToolResult,
                               Note, Error, Clear, LlmBegin, Reason, Content, LlmEnd, Effort,
-                              Tape, Recall, TurnBegin, TurnEnd };
+                              Tape, Recall, Memory, TurnBegin, TurnEnd };
     struct Event {
         Ev ev = Ev::Note;
         std::string a, b, c;
@@ -223,6 +237,7 @@ private:
         LlmStats llm;
         std::shared_ptr<const Info> info;
         std::shared_ptr<const TapeView> tape;
+        std::shared_ptr<const RecallView> recall;
         clock::time_point at{};
     };
     enum class Phase { Idle, Recalling, Thinking, Reasoning, Writing, Tools };

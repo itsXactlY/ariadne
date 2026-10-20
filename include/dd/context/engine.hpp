@@ -100,6 +100,8 @@ public:
     std::function<void(const std::string&)> on_note;      // any thread
     std::function<void(const TapeStats&)> on_stats;
     std::function<void(bool)> on_recall;                  // a turn recall started / ended
+    // what a turn recall brought, and its one-line summary; unset: the summary goes to on_note
+    std::function<void(const Prefetch&, const std::string&)> on_prefetch;
 
 private:
     struct Prep {

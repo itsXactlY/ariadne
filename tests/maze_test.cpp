@@ -142,6 +142,10 @@ int main() {
         chk(p.skill == "context-tape-debugging" && p.block.find("skill_load(\"context-tape-debugging\")") != std::string::npos,
             "a fitting skill, matched locally");
         chk(g->recalls.load() == 1, "one recall per turn");
+        chk(p.block.find("- #1 [decision:tape]") != std::string::npos && p.block.find("#10 [invariant:prefix]") != std::string::npos,
+            "every row names its id for mazemaker_get");
+        chk(p.shown.size() == 4 && p.shown[0].first == 'r' && p.shown[0].second.id == 1 && p.shown[2].first == 'l' && p.shown[3].first == 'f',
+            "the card gets the rows the block carries");
         g->intent_of = "temporal";
         const Prefetch t = r.run("what did we do earlier", {2}, {20});
         chk(t.earlier == 1 && t.block.find("earlier question") != std::string::npos, "temporal: this session's turns by id");

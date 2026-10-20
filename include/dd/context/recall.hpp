@@ -71,6 +71,8 @@ struct Prefetch {
     std::string intent, skill;
     int hits = 0, linked = 0, facts = 0, earlier = 0, dropped = 0;   // dropped: already in the window
     std::vector<long> ids;    // what was injected
+    // the same rows for a recall card: 'r' recalled, 'l' linked, 'f' fact, 'e' earlier; content is a snippet
+    std::vector<std::pair<char, Hit>> shown;
     double ms = 0;
 };
 

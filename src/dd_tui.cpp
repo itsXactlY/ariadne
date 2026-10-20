@@ -85,7 +85,37 @@ static int effort_index(std::string s) {
     return -1;
 }
 
-static std::string effort_label(int i) { return i < 0 ? "default" : kEfforts[i]; }
+static // A soaked turn reads as when and what was asked, not as its label and header.
+dd::ui::MemoryRow memory_row(char kind, const dd::context::Hit& h) {
+    dd::ui::MemoryRow r{kind, h.id, h.label, h.content, h.score};
+    const bool turn = h.label.rfind("auto:turn:", 0) == 0, reasoning = h.label.rfind("auto:reasoning:", 0) == 0;
+    if (!turn && !reasoning) return r;
+    std::tm t{};   // soaked as "@ 2026-10-20T17:29:59Z": shown in local time
+    if (const size_t at = h.content.find(" @ ");
+        at != std::string::npos && std::sscanf(h.content.c_str() + at + 3, "%4d-%2d-%2dT%2d:%2d", &t.tm_year, &t.tm_mon,
+                                                &t.tm_mday, &t.tm_hour, &t.tm_min) == 5) {
+        t.tm_year -= 1900;
+        t.tm_mon -= 1;
+        const std::time_t utc = timegm(&t);
+        std::tm loc{};
+        localtime_r(&utc, &loc);
+        char when[16];
+        std::strftime(when, sizeof when, "%m-%d %H:%M", &loc);
+        r.label = std::string(turn ? "turn " : "thought ") + when;
+    }
+    const size_t u = h.content.find("=== USER === "), a = h.content.find(" === ASSISTANT === ");
+    if (u != std::string::npos) {
+        const size_t q0 = u + 13;
+        r.text = "“" + h.content.substr(q0, (a == std::string::npos ? h.content.size() : a) - q0) + "”";
+        if (a != std::string::npos) r.text += " → " + h.content.substr(a + 19);
+    } else if (const size_t z = h.content.find("Z "); z != std::string::npos && z < 80) {
+        r.text = h.content.substr(z + 2);
+        if (r.text.rfind("=== REASONING === ", 0) == 0) r.text.erase(0, 18);
+    }
+    return r;
+}
+
+std::string effort_label(int i) { return i < 0 ? "default" : kEfforts[i]; }
 
 static std::string jerr(const std::string& m) {
     return json_dump(json_obj({{"error", jsp(json_str(m))}}));
@@ -854,7 +884,8 @@ int main(int argc, char** argv) {
             "<memory-context>: recalled memories, what the graph connects to them, extracted facts, earlier turns "
             "of this session when you ask about them, and a fitting skill. That is step [1] RECALL FIRST of the "
             "memory protocol, already done: when it answers, answer from it. Call mazemaker_recall only for what "
-            "the block lacks.\n"
+            "the block lacks. Each memory there carries its id (#123) and is cut to a snippet: "
+            "mazemaker_get(memory_ids=[123]) reads the full text — never guess ids.\n"
             "- The harness writes every finished turn (auto:turn:<session>) and your reasoning "
             "(auto:reasoning:<session>) into mazemaker itself and chains them in the graph. Never save turn "
             "transcripts; use mazemaker_remember only for distilled facts with curated labels (decision:, bug:, "
@@ -866,6 +897,17 @@ int main(int argc, char** argv) {
                                    work + "/spill", &skills);
     engine.on_note = [&scene](const std::string& n) { scene.note(n); };
     engine.on_recall = [&scene](bool on) { scene.recall(on); };
+    engine.on_prefetch = [&scene](const dd::context::Prefetch& p, const std::string& summary) {
+        if (p.shown.empty()) {
+            scene.note("◈ " + summary);
+            return;
+        }
+        dd::ui::RecallView v;
+        v.meta = summary;
+        v.skill = p.skill;
+        for (const auto& [kind, h] : p.shown) v.rows.push_back(memory_row(kind, h));
+        scene.recalled(v);
+    };
     engine.on_stats = [&scene](const dd::context::TapeStats& t) {
         dd::ui::TapeView v;
         v.on = true;

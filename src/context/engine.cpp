@@ -275,7 +275,8 @@ void TapeEngine::begin_turn(const std::string& user_message) {
                            (p.skill.empty() ? "" : " · skill " + p.skill) +
                            (p.dropped ? " · " + std::to_string(p.dropped) + " already in the window" : "") + " · " +
                            (p.intent.empty() ? "" : p.intent + " · ") + ms;
-            note("◈ " + last_recall_);
+            if (on_prefetch) on_prefetch(p, last_recall_);
+            else note("◈ " + last_recall_);
         }
     }
     emit();

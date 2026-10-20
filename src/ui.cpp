@@ -652,6 +652,12 @@ void Scene::set_max_turns(int n) {
 void Scene::user(const std::string& text) { Event e; e.ev = Ev::User; e.a = text; post(std::move(e)); }
 void Scene::say(const std::string& text) { Event e; e.ev = Ev::Say; e.a = text; post(std::move(e)); }
 void Scene::note(const std::string& text) { Event e; e.ev = Ev::Note; e.a = text; post(std::move(e)); }
+void Scene::recalled(const RecallView& v) {
+    Event e;
+    e.ev = Ev::Memory;
+    e.recall = std::make_shared<const RecallView>(v);
+    post(std::move(e));
+}
 void Scene::error(const std::string& text) { Event e; e.ev = Ev::Error; e.a = text; post(std::move(e)); }
 void Scene::clear() { Event e; e.ev = Ev::Clear; post(std::move(e)); }
 void Scene::llm_begin() { Event e; e.ev = Ev::LlmBegin; post(std::move(e)); }
@@ -797,6 +803,12 @@ void Scene::apply(Event& e) {
     case Ev::Note:
         push(Kind::Note, e.a);
         break;
+    case Ev::Memory: {
+        Entry& t = push(Kind::Memory, "");
+        t.recall = e.recall;
+        t.resolved = true;
+        break;
+    }
     case Ev::Error:
         push(Kind::Error, e.a);
         break;
@@ -1063,6 +1075,51 @@ Canvas Scene::render(const Entry& e, int w) const {
         if (first > 0) c.title(2, rows + 1, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
         for (size_t k = first; k < lines.size(); ++k)
             c.text(2, 1 + static_cast<int>(k - first), lines[k], txt);
+        return c;
+    }
+    case Kind::Memory: {
+        // one row per memory the turn carries: what the model reads, by id
+        static constexpr int kRows = 12;
+        const RecallView empty;
+        const RecallView& v = e.recall ? *e.recall : empty;
+        const int extra = v.skill.empty() ? 0 : 1;
+        const int shown = std::min(static_cast<int>(v.rows.size()), kRows - extra);
+        const int more = static_cast<int>(v.rows.size()) - shown;
+        const int h = shown + extra + (more > 0 ? 1 : 0) + 3;
+        Canvas c(w, h);
+        const Style b{th_.dim};
+        c.box(0, 0, w, h - 1, b, true);
+        const int tw = c.title(2, 0, "◈ mazemaker", Style{th_.gold, kNone, kBold}, b);
+        if (const int room = w - 9 - tw; room >= 6) c.title_right(w - 2, 0, clip(v.meta, room), Style{th_.muted}, b);
+        // fixed columns: glyph · #id · label · score · snippet
+        int idw = 2;
+        for (int k = 0; k < shown; ++k) idw = std::max(idw, 1 + static_cast<int>(std::to_string(v.rows[static_cast<size_t>(k)].id).size()));
+        const int lw = std::clamp((w - 12) / 4, 10, 30);
+        int y = 1;
+        for (int k = 0; k < shown; ++k, ++y) {
+            const MemoryRow& r = v.rows[static_cast<size_t>(k)];
+            const char* glyph = r.kind == 'l' ? "↳" : r.kind == 'f' ? "∴" : r.kind == 'e' ? "⟲" : "◆";
+            c.text(2, y, glyph, Style{r.kind == 'r' ? th_.gold : th_.accent, kNone, kBold});
+            int x = 4;
+            const std::string id = "#" + std::to_string(r.id);
+            c.text(x + idw - text_width(id), y, id, Style{th_.gold});
+            x += idw + 1;
+            c.text(x, y, clip(r.label, lw), Style{th_.accent});
+            x += lw + 1;
+            if (r.score > 0) {
+                char sc[16];
+                std::snprintf(sc, sizeof sc, "%.2f", std::min(r.score, 9.99));
+                c.text(x, y, sc, Style{th_.muted});
+            }
+            x += 5;
+            if (x < w - 3) c.text(x, y, clip(r.text, w - 2 - x), Style{th_.text});
+        }
+        if (more > 0) c.text(4, y++, "+ " + std::to_string(more) + " more · /context", Style{th_.muted});
+        if (extra) {
+            const int n = c.text(2, y, "✦", Style{th_.gold, kNone, kBold});
+            c.text(3 + n, y, clip("skill " + v.skill + " · skill_load(\"" + v.skill + "\")", w - 5 - n),
+                   Style{th_.accent});
+        }
         return c;
     }
     case Kind::Rule: {

@@ -191,6 +191,33 @@ int main() {
         chk(rest.find("cancelled") != std::string::npos && rest.find("turn 1") != std::string::npos, "turn end resolves");
     }
 
+    // ---- memory card: fixed columns, one row per memory, the skill last ----
+    {
+        Scene s{Theme{}};
+        RecallView v;
+        v.meta = "2 recalled · 1 linked · 3.1s";
+        v.skill = "strata-kv-streaming-seam";
+        v.rows = {{'r', 1371279, "decision:dd-context-tape-architecture", "the tape renders once", 0.49},
+                  {'r', 42, "fact:x", "short", 0.51},
+                  {'l', 1371273, "turn 10-20 17:29", "“list_dir include” → three headers", 1.0}};
+        s.recalled(v);
+        const auto out = lines_of(s.drain_inline(100, false, false));
+        chk(out.size() == 7, "memory card: 3 rows + skill + box");
+        chk(out[0].find("◈ mazemaker") != std::string::npos && out[0].find("2 recalled · 1 linked · 3.1s") != std::string::npos,
+            "memory card header");
+        const size_t l1 = out[1].find("decision:"), l2 = out[2].find("fact:x");
+        chk(l1 != std::string::npos && out[1].find("#1371279") != std::string::npos &&
+                out[2].find("     #42") != std::string::npos && out[3].find("↳") != std::string::npos,
+            "ids right-aligned, kinds marked");
+        chk(dd::ui::text_width(out[1].substr(0, l1)) == dd::ui::text_width(out[2].substr(0, l2)), "labels in one column");
+        chk(out[4].find("skill_load(\"strata-kv-streaming-seam\")") != std::string::npos, "skill row");
+        v.meta = std::string(200, 'm');
+        s.recalled(v);
+        const auto narrow = lines_of(s.drain_inline(60, false, false));
+        chk(!narrow.empty() && narrow[0].find("◈ mazemaker") != std::string::npos && narrow[0].find("…") != std::string::npos,
+            "a long summary is clipped, the title stays");
+    }
+
     // ---- streamed reasoning + answer ----
     {
         Scene s{Theme{}};
