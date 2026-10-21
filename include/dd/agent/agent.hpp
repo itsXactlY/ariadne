@@ -48,6 +48,9 @@ struct ContextEngine {
     virtual void on_tool_results(const std::vector<core::Message>& results) = 0;
     virtual void after_tools() = 0;                     // between calls: watermarks
     virtual void end_turn(const std::string& final_response, bool interrupted) = 0;
+    // The server refused a request for the context window (what() of the failed call). true: the history was
+    // rebuilt to fit and the call goes out again, once; false: the error stands.
+    virtual bool on_overflow(const std::string& /*error*/) { return false; }
 };
 
 class Agent {

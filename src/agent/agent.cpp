@@ -283,7 +283,19 @@ std::string Agent::run(const std::string& user_message) {
         }
 
         core::Message assistant;
-        if (llm) assistant = llm->chat(payload, tools);
+        if (llm) {
+            for (bool again = false;;) {   // refused for the window: rebuilt by the engine, sent once more
+                try {
+                    assistant = llm->chat(payload, tools);
+                    break;
+                } catch (const std::exception& e) {
+                    if (again || !context || !context->on_overflow(e.what())) throw;
+                    again = true;
+                    payload = context->payload();
+                    tools = context->tools();
+                }
+            }
+        }
         if (assistant.role.empty()) assistant.role = "assistant";
         if (assistant.finish_reason.empty())
             assistant.finish_reason = assistant.has_tool_calls() ? "tool_calls" : "stop";

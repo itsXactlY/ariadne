@@ -78,6 +78,36 @@ bool trivial_prompt(const std::string& text) {
     return false;
 }
 
+bool parse_overflow(const std::string& what, long* prompt, long* window) {
+    std::string t;
+    for (char c : what) t.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    const auto has = [&](const char* s) { return t.find(s) != std::string::npos; };
+    if (!has("context") || !(has("exceed") || has("too long") || has("too large") || has("maximum context length")))
+        return false;
+    long p = 0, w = 0;
+    // "prompt (61447 tokens)", "request (65547 tokens)": the first count that ends in " tokens)"
+    if (const size_t k = t.find(" tokens)"); k != std::string::npos) {
+        size_t b = k;
+        while (b > 0 && std::isdigit(static_cast<unsigned char>(t[b - 1]))) --b;
+        if (b < k) p = std::atol(t.substr(b, k - b).c_str());
+    }
+    // "in the context (61337)", "exceeds the context (61337)", "context size (65536 tokens)"
+    for (const std::string key : {"context (", "context size ("}) {
+        const size_t k = t.find(key);
+        if (k == std::string::npos) continue;
+        const size_t b = k + key.size();
+        size_t e = b;
+        while (e < t.size() && std::isdigit(static_cast<unsigned char>(t[e]))) ++e;
+        if (e > b) {
+            w = std::atol(t.substr(b, e - b).c_str());
+            break;
+        }
+    }
+    if (prompt) *prompt = p;
+    if (window) *window = w;
+    return true;
+}
+
 std::string anchored_query(const std::vector<ItemPtr>& items, long current) {
     if (current < 0 || current >= static_cast<long>(items.size())) return "";
     const std::string q = squash(items[static_cast<size_t>(current)]->msg.content);
@@ -141,20 +171,34 @@ TapeEngine::~TapeEngine() {
     delete ready_.exchange(nullptr);
 }
 
+long TapeEngine::window() const {
+    if (const long c = ep_.info().n_ctx; c > 0) return c;
+    return cfg_.render.context_length > 0 ? cfg_.render.context_length : window_seen_;
+}
+
+// The fast layer is a budget inside the server's window, never past it: a server window cut below it (Strata's
+// --max-context) would put the hard mark where the server already refuses. A sixteenth stays free for the reply.
+long TapeEngine::fast_layer() const {
+    long f = cfg_.fast_layer_tokens;
+    if (f <= 0) return 0;
+    if (const long w = window(); w > 0) f = std::min(f, w - w / 16);
+    return f;
+}
+
 long TapeEngine::rebase_at() const {
-    if (cfg_.fast_layer_tokens > 0) return static_cast<long>(static_cast<double>(cfg_.fast_layer_tokens) * cfg_.hard);
-    const long ctx = ep_.info().n_ctx;
+    if (const long f = fast_layer(); f > 0) return static_cast<long>(static_cast<double>(f) * cfg_.hard);
+    const long ctx = window();
     return ctx > 0 ? static_cast<long>(static_cast<double>(ctx) * cfg_.ceiling) : 0;
 }
 
 long TapeEngine::high_at() const {
-    if (cfg_.fast_layer_tokens > 0) return static_cast<long>(static_cast<double>(cfg_.fast_layer_tokens) * cfg_.high);
+    if (const long f = fast_layer(); f > 0) return static_cast<long>(static_cast<double>(f) * cfg_.high);
     return cfg_.hard > 0 ? static_cast<long>(static_cast<double>(rebase_at()) * cfg_.high / cfg_.hard) : 0;
 }
 
 std::string TapeEngine::level(long pool) const {
-    if (cfg_.fast_layer_tokens > 0) {
-        const double fill = static_cast<double>(pool) / static_cast<double>(cfg_.fast_layer_tokens);
+    if (const long f = fast_layer(); f > 0) {
+        const double fill = static_cast<double>(pool) / static_cast<double>(f);
         if (fill >= cfg_.hard) return "hard";
         if (fill >= cfg_.high) return "high";
         if (fill >= cfg_.low) return "low";
@@ -185,7 +229,7 @@ TapeStats TapeEngine::stats() const {
     s.pool = tokens_;
     s.rebase_at = rebase_at();
     s.high_at = high_at();
-    s.fast_layer = cfg_.fast_layer_tokens;
+    s.fast_layer = fast_layer();
     s.prompt = prompt_;
     s.reused = reused_;
     s.level = level(tokens_);
@@ -283,8 +327,9 @@ void TapeEngine::begin_turn(const std::string& user_message) {
 }
 
 void TapeEngine::watermark(bool turn_start) {
-    // tokens as the server counted the last call, plus what this round's results add
-    const long pending = static_cast<long>(tool_chars_ / 4);
+    // tokens as the server counted the last call, plus what this round's results add: at the ratio the server
+    // measured on the tape (digits, escapes and code tokenize worse than prose), never under chars/4
+    const long pending = static_cast<long>(static_cast<double>(tool_chars_) / 4.0 * std::max(1.0, render_.ratio()));
     const long pool = ep_.pool_tokens(tokens_ + pending);
     const std::string lvl = level(pool);
 
@@ -336,7 +381,7 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
     return true;
 }
 
-void TapeEngine::rebase(const char* why) {
+bool TapeEngine::rebase(const char* why) {
     if (std::unique_ptr<Prep> stale(ready_.exchange(nullptr)); stale && stale->slot >= 0) ep_.erase(stale->slot);
     bool recalled = false;
     drain_ledger();
@@ -351,7 +396,7 @@ void TapeEngine::rebase(const char* why) {
             note(std::string("⟲ rebase skipped (") + why + "): a new epoch would still be ~" + thousands(after) +
                  " tokens (high watermark " + thousands(high_at()) + ") — the window stays over the fast layer");
         skipped_gen_ = session_->generation();
-        return;
+        return false;
     }
     session_->replace(std::move(base));
     drop_pending_ = ep_.single_sequence();
@@ -360,6 +405,23 @@ void TapeEngine::rebase(const char* why) {
          std::to_string(session_->items().size()) + " messages · " + (recalled ? "recall in turn 0" : "no recall"));
     tokens_ = 0;
     tool_chars_ = 0;
+    return true;
+}
+
+// What the server counted is the truth the estimate missed: take it, rebuild the history around it, and let the loop
+// send the call again. Without it the next turn starts from the old count and sends the same request.
+bool TapeEngine::on_overflow(const std::string& error) {
+    long prompt = 0, win = 0;
+    if (!parse_overflow(error, &prompt, &win)) return false;
+    if (win > 0) window_seen_ = win;
+    if (prompt > 0) tokens_ = prompt;
+    tool_chars_ = 0;
+    join_prep(true);
+    note("the server refused " + (prompt > 0 ? thousands(prompt) + " tokens" : std::string("the request")) +
+         (win > 0 ? " for a window of " + thousands(win) : std::string()) + ": rebasing, then sending again");
+    const bool made = rebase("window refused");
+    emit();
+    return made;
 }
 
 long TapeEngine::epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const {

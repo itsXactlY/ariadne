@@ -418,6 +418,124 @@ int main() {
             "a short follow-up is anchored on the last real question");
     }
 
+    // ---- the server's window is the ceiling ----
+    {   // what the server counted and what it holds, from each wording of its refusal
+        long p = -1, w = -1;
+        chk(parse_overflow("HTTP 400: request exceeds the context window: prompt (61447 tokens) leaves no room to "
+                           "answer in the context (61337); requests are never truncated", &p, &w) &&
+                p == 61447 && w == 61337,
+            "strata: no room to answer");
+        chk(parse_overflow("request exceeds the context window: prompt (1024 tokens) + max tokens (131072) exceeds "
+                           "the context (131072); requests are never truncated", &p, &w) &&
+                p == 1024 && w == 131072,
+            "strata: prompt plus max tokens");
+        chk(parse_overflow("HTTP 400: request (65547 tokens) exceeds the available context size (65536 tokens), try "
+                           "increasing it", &p, &w) &&
+                p == 65547 && w == 65536,
+            "llama-server");
+        chk(parse_overflow("This model's maximum context length is 8192 tokens.", &p, &w) && p == 0 && w == 0,
+            "a wording without the counts is still the context");
+        chk(!parse_overflow("HTTP 400: invalid tool arguments", &p, &w), "another 400 is not the window");
+        chk(!parse_overflow("curl: Timeout was reached", &p, &w), "a transport error is not the window");
+    }
+
+    {   // a fast layer past the server's window is cut to it: the hard mark never sits where the server refuses
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.fast_layer_tokens = 65536;
+        cfg.low = 0.7, cfg.high = 0.88, cfg.hard = 0.95;
+        cfg.render.context_length = 61337;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                       std::filesystem::temp_directory_path().string());
+        const long layer = 61337 - 61337 / 16;
+        const TapeStats st = eng.stats();
+        chk(st.fast_layer == layer, "the fast layer stops a sixteenth under the window (" + std::to_string(st.fast_layer) + ")");
+        chk(st.rebase_at == static_cast<long>(static_cast<double>(layer) * cfg.hard) && st.rebase_at < 61337 - 3000,
+            "the hard mark leaves the reply its room (" + std::to_string(st.rebase_at) + ")");
+        chk(st.high_at < st.rebase_at, "prewarm starts before the rebase");
+
+        EngineConfig big = cfg;   // a window the layer fits in is left alone
+        big.render.context_length = 262144;
+        TapeEngine roomy(big, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                         std::filesystem::temp_directory_path().string());
+        chk(roomy.stats().fast_layer == 65536, "a window above the layer changes nothing");
+    }
+
+    {   // results are counted at the ratio the server measured: a round that fits as chars/4 can still not fit
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.fast_layer_tokens = 10000;   // hard 9000
+        cfg.hard = 0.9;
+        cfg.protect_last_n = 2;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                       std::filesystem::temp_directory_path().string());
+        std::vector<std::string> notes;
+        eng.on_note = [&](const std::string& s) { notes.push_back(s); };
+        eng.begin_turn(std::string(6000, 'q'));   // ~1.6k tokens as chars/4
+        eng.payload();
+        agent::CallStats st;
+        st.prompt_tokens = 3200;   // the server counted twice the estimate
+        eng.on_call(st);
+        eng.on_assistant(assistant_calls(1, "read_file", "/a", ""));
+        eng.on_tool_results({tool_result(1, std::string(14000, 'r'))});   // 3.5k by chars/4: 6.7k < 9k; 10.2k at 2x
+        eng.after_tools();
+        bool tried = false;   // made room or not, the engine saw the hard mark crossed
+        for (const auto& n : notes) tried = tried || n.rfind("⟲ rebase", 0) == 0;
+        chk(tried, "a result counted at the measured ratio crosses the hard mark");
+    }
+
+    {   // the server refused the window: its count replaces the estimate and the history is rebuilt
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.fast_layer_tokens = 65536;   // the config's window, bigger than the server's
+        cfg.hard = 0.95;
+        cfg.protect_last_n = 2;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        cfg.render.context_length = 61337;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
+                       std::filesystem::temp_directory_path().string());
+        std::vector<std::string> notes;
+        eng.on_note = [&](const std::string& s) { notes.push_back(s); };
+        eng.begin_turn("read the files and tell me what is in them, one line each please");
+        eng.payload();
+        for (int i = 1; i <= 6; ++i) {
+            eng.on_assistant(assistant_calls(i, "read_file", "/f" + std::to_string(i), ""));
+            eng.on_tool_results({tool_result(i, std::string(24000, 'f'))});   // 6k tokens each as chars/4
+            eng.after_tools();
+            eng.payload();
+            agent::CallStats st;
+            st.prompt_tokens = 8000 * i;   // 48k after the sixth: under the mark, the engine sees nothing to do
+            eng.on_call(st);
+        }
+        chk(eng.session().generation() == 0, "under the clamped mark nothing rebased yet");
+        const bool again = eng.on_overflow("HTTP 400: request exceeds the context window: prompt (61447 tokens) leaves "
+                                           "no room to answer in the context (61337); requests are never truncated");
+        chk(again && eng.session().generation() == 1, "a refusal rebuilds the history and says to send again");
+        chk(eng.stats().tokens == 0, "the old count is gone with the old epoch");
+        bool said = false;
+        for (const auto& n : notes) said = said || n.find("refused 61,447 tokens for a window of 61,337") != std::string::npos;
+        chk(said, "the refusal is announced with the server's numbers");
+        chk(!eng.on_overflow("HTTP 400: invalid tool arguments"), "another error is left to the caller");
+    }
+
     if (g_fail) std::printf("%d FAILED\n", g_fail);
     else std::printf("all context tests passed\n");
     return g_fail ? 1 : 0;

@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include "dd/agent/agent.hpp"
 #include "dd/agent/iteration_budget.hpp"
@@ -162,10 +163,104 @@ static int test_max_iterations() {
     return 0;
 }
 
+// A request the server refused for the window goes out once more, rebuilt by the context engine: not repeated
+// unchanged (the same prompt fails the same way), not retried forever.
+struct Refusing : agent::LLMClient {
+    int calls = 0, refuse = 1;   // refuse: how many calls fail before one answers
+    core::Message chat(const std::vector<core::Message>&, const core::Json&) override {
+        if (++calls <= refuse)
+            throw std::runtime_error("HTTP 400: request exceeds the context window: prompt (61447 tokens) leaves no "
+                                     "room to answer in the context (61337); requests are never truncated");
+        core::Message m;
+        m.role = "assistant";
+        m.content = "done";
+        m.finish_reason = "stop";
+        return m;
+    }
+};
+
+struct Rebuilder : agent::ContextEngine {
+    bool fixes = true;
+    int overflows = 0, payloads = 0;
+    void begin_turn(const std::string&) override {}
+    std::vector<core::Message> payload() override {
+        ++payloads;
+        core::Message u;
+        u.role = "user";
+        u.content = "go";
+        return {u};
+    }
+    core::Json tools() override { return core::json_arr(); }
+    void on_assistant(const core::Message&) override {}
+    void on_tool_results(const std::vector<core::Message>&) override {}
+    void after_tools() override {}
+    void end_turn(const std::string&, bool) override {}
+    bool on_overflow(const std::string&) override {
+        ++overflows;
+        return fixes;
+    }
+};
+
+static int test_overflow_retry() {
+    {   // the engine rebuilt the history: one more call, which answers
+        Refusing llm;
+        Rebuilder ctx;
+        agent::Agent a;
+        a.llm = &llm;
+        a.context = &ctx;
+        CHECK(a.run("go") == "done");
+        CHECK(llm.calls == 2 && ctx.overflows == 1 && ctx.payloads == 2 && a.api_call_count == 1);
+    }
+    {   // the engine could not make room: the error stands, nothing is sent again
+        Refusing llm;
+        Rebuilder ctx;
+        ctx.fixes = false;
+        agent::Agent a;
+        a.llm = &llm;
+        a.context = &ctx;
+        bool thrown = false;
+        try {
+            a.run("go");
+        } catch (const std::runtime_error& e) {
+            thrown = std::string(e.what()).find("exceeds the context window") != std::string::npos;
+        }
+        CHECK(thrown && llm.calls == 1 && ctx.overflows == 1);
+    }
+    {   // refused again after the rebuild: one retry, then the error (never a loop)
+        Refusing llm;
+        llm.refuse = 5;
+        Rebuilder ctx;
+        agent::Agent a;
+        a.llm = &llm;
+        a.context = &ctx;
+        bool thrown = false;
+        try {
+            a.run("go");
+        } catch (const std::runtime_error&) {
+            thrown = true;
+        }
+        CHECK(thrown && llm.calls == 2 && ctx.overflows == 1);
+    }
+    {   // without a context engine an error is the caller's, as before
+        Refusing llm;
+        agent::Agent a;
+        a.llm = &llm;
+        bool thrown = false;
+        try {
+            a.run("go");
+        } catch (const std::runtime_error&) {
+            thrown = true;
+        }
+        CHECK(thrown && llm.calls == 1);
+    }
+    return 0;
+}
+
 int main() {
     if (test_helpers()) return 1;
     if (test_run_loop()) return 1;
     if (test_max_iterations()) return 1;
+    if (test_overflow_retry()) return 1;
     std::cout << "all agent-loop tests passed\n";
     return 0;
 }

@@ -80,6 +80,7 @@ public:
     void on_tool_results(const std::vector<core::Message>& results) override;
     void after_tools() override;
     void end_turn(const std::string& final_response, bool interrupted) override;
+    bool on_overflow(const std::string& error) override;   // the server refused the window: rebase, send again
 
     void on_call(const agent::CallStats& st);   // tokens as the server counted them
     // ---- between turns (no turn running) ----
@@ -137,6 +138,8 @@ private:
     std::atomic<bool> prep_running_{false}, prep_cancel_{false};
     std::thread prep_thread_;
 
+    long window() const;       // what the server holds: /props, else the config's, else what a refusal told
+    long fast_layer() const;   // compression.fast_layer_tokens, never past the window
     long rebase_at() const;
     long high_at() const;
     std::string level(long pool) const;
@@ -144,7 +147,7 @@ private:
     void note(const std::string& s) const;
     void emit() const;
     void watermark(bool turn_start);
-    void rebase(const char* why);
+    bool rebase(const char* why);   // false: no room could be made, the history stands
     bool adopt(long pool, bool turn_start);
     void start_prep();
     void join_prep(bool cancel);
@@ -156,6 +159,7 @@ private:
     std::vector<long> turn_ids(bool earlier_only) const;
     long prefix_tokens(double ratio) const;   // system prompt + tools array
     long epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const;   // a new epoch, as the server counts it
+    long window_seen_ = 0;   // the window a refusal named, for a server that does not report it
     int skipped_gen_ = -1;   // the epoch whose rebase could not make room (said once)
 };
 
@@ -164,6 +168,9 @@ std::string turn_so_far(const std::vector<ItemPtr>& dropped);
 // A short question gets the previous real user turn as an anchor.
 std::string anchored_query(const std::vector<ItemPtr>& items, long current);
 bool trivial_prompt(const std::string& text);
+// A refused request's message (OpenAI's, llama-server's, Strata's wording): the tokens the server counted and the
+// window it has, 0 where the message does not say. false: the error is not about the context.
+bool parse_overflow(const std::string& what, long* prompt, long* window);
 
 }  // namespace context
 }  // namespace dd
