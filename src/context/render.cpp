@@ -223,7 +223,7 @@ std::string Renderer::capped(const Message& tool, const std::vector<ItemPtr>& vi
     if (!budget || static_cast<long>(content.size()) <= budget) return "";
     const std::string name = call ? call->name : "";
     Json args = core::json_obj();
-    if (call) try { args = core::json_parse(call->arguments.empty() ? "{}" : call->arguments); } catch (...) {}
+    if (call) { bool repaired = false; args = core::json_parse_args(call->arguments.empty() ? "{}" : call->arguments, repaired); }  // cut args: keep the members that arrived
     const std::string text = readable(content);
     if (name == "read_file" && args.type == Json::Obj && core::json_get(args, "path")) {
         long total = 0;
