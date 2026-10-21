@@ -136,11 +136,10 @@ std::string ToolDeck::call(const Json& args) const {
     Json inner = core::json_obj();
     if (const Json* a = core::json_get(args, "arguments")) {
         if (a->type == Json::Str) {
-            try {
-                inner = core::json_parse(a->str.empty() ? "{}" : a->str);
-            } catch (const std::exception& e) {
-                return tools::tool_error(std::string("tool_call 'arguments' is not valid JSON: ") + e.what());
-            }
+            bool repaired = false;
+            inner = core::json_parse_args(a->str.empty() ? "{}" : a->str, repaired);
+            if (repaired)
+                return tools::tool_error("tool_call 'arguments' were cut off by the model's output budget: retry with a smaller payload");
         } else {
             inner = *a;
         }

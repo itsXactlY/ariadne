@@ -48,6 +48,15 @@ std::string norm_path(std::string p) {
     if (!pp.is_absolute()) pp = std::filesystem::current_path() / pp;
     return pp.string();
 }
+
+// The model ran out of output budget mid-arguments: the call must NOT run
+// (a cut write_file would store half a file), so answer as a tool error the
+// model can act on; the turn keeps going.
+std::string bad_args_json(const core::Json& args, bool repaired) {
+    if (repaired && args.type == core::Json::Obj)
+        return "{\"error\":\"Tool arguments were cut off by the model's output budget. Retry with a smaller payload: write the file in pieces.\"}";
+    return "{\"error\":\"Tool arguments are not valid JSON.\"}";
+}
 }  // anon
 
 // ---- should_parallelize (run_agent.py:305) ----
@@ -58,8 +67,9 @@ bool should_parallelize(const std::vector<core::ToolCall>& calls, tools::ToolReg
 
     std::vector<std::string> reserved;
     for (const auto& tc : calls) {
-        core::Json args = core::json_parse(tc.arguments);
-        if (args.type != core::Json::Obj) return false;  // parse-fail / non-dict -> sequential
+        bool repaired = false;
+        core::Json args = core::json_parse_args(tc.arguments, repaired);
+        if (args.type != core::Json::Obj || repaired) return false;  // bad/cut args -> run it alone
         if (in_set(PATH_SCOPED, tc.name)) {
             const core::Json* p = core::json_get(args, "path");
             if (!p || p->type != core::Json::Str || p->str.empty()) return false;
@@ -147,8 +157,13 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
             for (size_t k = 0; k < batch; ++k) {
                 size_t idx = i + k;
                 workers.emplace_back([&, idx]() {
-                    results[idx] = registry ? registry->dispatch(calls[idx].name, core::json_parse(calls[idx].arguments))
-                                            : std::string("{\"error\":\"Unknown tool: ") + calls[idx].name + "\"}";
+                    bool repaired = false;
+                    const core::Json args = core::json_parse_args(calls[idx].arguments, repaired);
+                    if (registry && (repaired || args.type != core::Json::Obj))
+                        results[idx] = bad_args_json(args, repaired);
+                    else
+                        results[idx] = registry ? registry->dispatch(calls[idx].name, args)
+                                                : std::string("{\"error\":\"Unknown tool: ") + calls[idx].name + "\"}";
                 });
             }
             for (auto& t : workers) t.join();
@@ -157,8 +172,13 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
         }
     } else {
         for (size_t i = 0; i < calls.size(); ++i) {
-            results[i] = registry ? registry->dispatch(calls[i].name, core::json_parse(calls[i].arguments))
-                                  : std::string("{\"error\":\"Unknown tool: ") + calls[i].name + "\"}";
+            bool repaired = false;
+            const core::Json args = core::json_parse_args(calls[i].arguments, repaired);
+            if (registry && (repaired || args.type != core::Json::Obj))
+                results[i] = bad_args_json(args, repaired);
+            else
+                results[i] = registry ? registry->dispatch(calls[i].name, args)
+                                      : std::string("{\"error\":\"Unknown tool: ") + calls[i].name + "\"}";
             if (tool_delay > 0 && i + 1 < calls.size())
                 std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(tool_delay * 1000)));
         }

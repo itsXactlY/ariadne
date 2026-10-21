@@ -145,20 +145,19 @@ uint32_t tri(uint32_t a, uint32_t b, uint32_t c, double t) {
 
 // `key="v"  n=3` from a JSON object; anything else as given.
 std::string flat_args(const std::string& raw) {
-    try {
-        const core::Json j = core::json_parse(raw);
-        if (j.type != core::Json::Obj) return raw;
-        std::string o;
-        for (const auto& [k, v] : j.obj) {
-            if (!o.empty()) o += "  ";
-            o += k + "=";
-            if (v && v->type == core::Json::Str) o += "\"" + clip(v->str, 60) + "\"";
-            else if (v) o += clip(core::json_dump(*v), 60);
-        }
-        return o.empty() ? "{}" : o;
-    } catch (...) {
-        return raw;
+    bool repaired = false;
+    const core::Json j = core::json_parse_args(raw, repaired);
+    if (j.type != core::Json::Obj) return raw;  // not an object at all: show it as given
+    std::string o;
+    for (const auto& [k, v] : j.obj) {
+        if (!o.empty()) o += "  ";
+        o += k + "=";
+        if (v && v->type == core::Json::Str) o += "\"" + clip(v->str, 60) + "\"";
+        else if (v) o += clip(core::json_dump(*v), 60);
     }
+    if (o.empty()) o = "{}";
+    if (repaired) o += "  …cut";  // the model stopped mid-value: no half-values shown
+    return o;
 }
 
 // The part of a tool result worth a glance; .first = it is an error.

@@ -27,6 +27,12 @@ Json json_parse(const std::string& text);
 // Serialize to compact JSON (UTF-8 passes through, ensure_ascii=false; an
 // ill-formed byte goes out as U+FFFD, so a strict server always parses it).
 std::string json_dump(const Json& v);
+// Tolerant parse for tool-call `arguments`: a model that hits its output
+// budget stops mid-value, leaving a string unterminated and containers open.
+// Salvage the members that finished (close the containers they sat in) and set
+// `repaired`; a document that parses as-is leaves it false. Never throws:
+// Null + repaired=true means nothing was salvageable.
+Json json_parse_args(const std::string& text, bool& repaired);
 
 // Builders.
 Json json_null();

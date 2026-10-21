@@ -40,6 +40,23 @@ int main() {
     const std::string out = json_dump(json_parse(wire));
     chk(out.find("\xF0\x9F\x94\xB4") != std::string::npos && out.find("\xED") == std::string::npos, "recall round trip");
 
+    // the write_file crash of 2026-10-20: the model ran out of output budget
+    // mid-string, so the arguments arrive cut; salvage, never a half-value.
+    bool rep = false;
+    const Json cut = json_parse_args(R"({"path":"/x/y.md","content":"# a book)", rep);
+    chk(rep && cut.type == Json::Obj, "truncated args -> repaired object");
+    chk(json_get(cut, "path") && json_get(cut, "path")->str == "/x/y.md", "the finished member survives");
+    chk(json_get(cut, "content") == nullptr, "the cut member is dropped, never half-written");
+    rep = false;
+    const Json nested = json_parse_args(R"({"m":{"k":1},"x":"y)", rep);
+    chk(rep && nested.type == Json::Obj && json_get(nested, "m"), "a finished nested member survives");
+    rep = false;
+    const Json whole = json_parse_args(R"({"cmd":"ls"})", rep);
+    chk(!rep && whole.type == Json::Obj, "well-formed args parse as-is");
+    rep = false;
+    const Json junk = json_parse_args("{oops", rep);
+    chk(rep && junk.type == Json::Null, "unrecoverable -> Null, no throw");
+
     std::cout << "json: " << g_pass << " passed, " << g_fail << " failed\n";
     return g_fail ? 1 : 0;
 }

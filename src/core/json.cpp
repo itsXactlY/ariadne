@@ -167,11 +167,89 @@ static Json parse_value(const std::string& s, size_t& i) {
     return v;
 }
 
+// Salvage a document cut off mid-value: keep every member that finished,
+// close the containers it sat in, drop whatever was still open. Cut points
+// are recorded after each complete value (and after each closed container),
+// then tried newest-first so the longest intact prefix wins.
+static std::string repair_truncated(const std::string& s) {
+    auto ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    auto closers = [](const std::string& stack) {
+        std::string cl;
+        for (auto it = stack.rbegin(); it != stack.rend(); ++it)
+            cl += (*it == '{' ? '}' : ']');
+        return cl;
+    };
+    std::vector<std::pair<size_t, std::string>> cuts;
+    std::string stack;  // open '{' / '['
+    size_t i = 0;
+    while (i < s.size()) {
+        const char c = s[i];
+        if (ws(c)) { ++i; continue; }
+        if (c == '"') {
+            size_t k = i + 1;
+            bool closed = false;
+            while (k < s.size()) {
+                if (s[k] == '\\') { k += 2; continue; }
+                if (s[k] == '"') { closed = true; ++k; break; }
+                ++k;
+            }
+            if (!closed) break;  // the cut is inside this string: nothing past it survives
+            i = k;
+            cuts.emplace_back(i, closers(stack));
+            continue;
+        }
+        if (c == '{' || c == '[') { stack.push_back(c); ++i; continue; }
+        if (c == '}' || c == ']') {
+            if (!stack.empty()) stack.pop_back();
+            ++i;
+            cuts.emplace_back(i, closers(stack));
+            continue;
+        }
+        if (c == ',' || c == ':') { ++i; continue; }
+        size_t k = i;
+        while (k < s.size() && (std::isalnum((unsigned char)s[k]) || s[k] == '-' || s[k] == '+' || s[k] == '.'))
+            ++k;
+        if (k == i) break;  // not a value start: stop salvaging
+        i = k;
+        cuts.emplace_back(i, closers(stack));
+    }
+    for (size_t t = cuts.size(); t-- > 0;) {
+        const std::string cand = s.substr(0, cuts[t].first) + cuts[t].second;
+        try {
+            (void)json_parse(cand);
+            return cand;
+        } catch (...) {}
+        if (cuts.size() - t >= 512) break;  // a megabyte of prefixes is not worth trying
+    }
+    return {};
+}
+
 Json json_parse(const std::string& text) {
     size_t i = 0;
     auto v = parse_value(text, i);
     skip_ws(text, i);
     return v;
+}
+
+// Tool-call arguments come from the model, which stops mid-value when it runs
+// out of output budget. Salvage instead of throwing: the caller learns the
+// document was repaired and refuses the call, so the turn keeps going.
+Json json_parse_args(const std::string& text, bool& repaired) {
+    try {
+        Json j = json_parse(text);
+        repaired = false;
+        return j;
+    } catch (...) {}
+    const std::string fixed = repair_truncated(text);
+    if (!fixed.empty()) {
+        try {
+            Json j = json_parse(fixed);
+            repaired = true;
+            return j;
+        } catch (...) {}
+    }
+    repaired = true;
+    return Json{};
 }
 
 static void dump_str(const Json& v, std::string& out) {

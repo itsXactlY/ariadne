@@ -115,6 +115,8 @@ static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems,
 
 `core::Json` is a hand-rolled value type: `Type{Null,Bool,Num,Str,Arr,Obj}`, `JsonSP = shared_ptr<Json>`, members `arr`/`obj`. Builders `json_parse`/`json_dump`/`json_obj`/`json_arr`/`json_str`/`json_num`; init-lists take `JsonSP` (wrap with `jsp(...)`); `arr_push`/`obj_set` take a bare `Json`; read size **before** a move. `message_to_json`/`message_from_json` marshal `core::Message` (wire `tool_calls` = `{id,type:"function",function:{name,arguments}}`; `finish_reason` is a **sibling** of `message` on `choices[0]`).
 
+- **Truncated tool arguments are salvaged per call, not fatal:** a model that runs out of output budget mid-value streams an unterminated JSON string. `core::json_parse_args(text, repaired)` closes the value stack at the last complete value and returns the longest parseable prefix with `repaired = true` (it never throws). The agent loop and the tool deck turn a cut call into a tool error — *retry with a smaller payload* — and keep the turn alive instead of killing the run; the TUI card shows the members that did arrive, suffixed `…cut`. Strict `json_parse` still guards config, MCP and model-response consumers.
+
 ---
 
 ## The whole deal — context tape
