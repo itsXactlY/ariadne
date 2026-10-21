@@ -10,9 +10,11 @@
 //     Streamable-HTTP; the server's instructions join the system prompt.
 //   * Esc / Ctrl-C interrupt a turn, including an LLM call in flight.
 //
-//   build/dd_tui                                 # config from ~/.daedalus, interactive
-//   build/dd_tui path/to/config.yaml -- "msg"    # explicit config, single-shot msg
-//   env: DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
+//   build/dd_tui                                 # config.yaml beside the binary, interactive
+//   build/dd_tui --init [--from FILE]            # write config.yaml + folders beside the binary
+//   build/dd_tui --home DIR                      # another home: config.yaml, skills/, rules/, state/, logs/
+//   build/dd_tui path/to/config.yaml -- "msg"    # explicit config (its folder is the home), single-shot msg
+//   env: DD_HOME, DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
 //   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /clear /interrupt /quit
 
@@ -24,6 +26,7 @@
 #include "dd/context/maze.hpp"
 #include "dd/context/recall.hpp"
 #include "dd/core/config.hpp"
+#include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
 #include "dd/tools/mcp.hpp"
@@ -370,8 +373,7 @@ bool enter(bool mouse) {
 }
 
 // stderr would scribble over the frame: send it to a log while we draw.
-int hide_stderr(const std::string& home) {
-    const std::string dir = home + "/.daedalus/logs";
+int hide_stderr(const std::string& dir) {
     std::error_code ec;
     int fd = -1;
     if (std::filesystem::is_directory(dir, ec))
@@ -623,16 +625,42 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
 
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
-    const char* h_env = std::getenv("HOME");
-    std::string home = h_env ? h_env : std::string("/home/alca");
-    std::string config_path = home + "/.daedalus/config.yaml";
+    std::string home_flag, config_flag, init_from;
+    bool init = false;
     std::vector<std::string> msg_words;
     bool after_dd = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--") { after_dd = true; continue; }
-        if (!after_dd) config_path = a;
-        else msg_words.push_back(a);
+        if (after_dd) msg_words.push_back(a);
+        else if (a == "--") after_dd = true;
+        else if (a == "--home" && i + 1 < argc) home_flag = argv[++i];
+        else if (a == "--config" && i + 1 < argc) config_flag = argv[++i];
+        else if (a == "--init") init = true;
+        else if (a == "--from" && i + 1 < argc) init_from = argv[++i];
+        else config_flag = a;   // a bare path is the config, as it always was
+    }
+
+    // Beside the binary unless told otherwise; never the Python Daedalus's ~/.daedalus.
+    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag);
+    ddcore::set_daedalus_home_override(home.root.string());   // the ported modules agree on it
+    const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
+    {
+        std::string why;
+        if (!ddcore::ensure_home(home, &why)) {
+            std::cerr << "dd_tui: " << why << "\n  pass --home DIR for a folder you can write\n";
+            return 2;
+        }
+        if (init) {
+            const bool wrote = ddcore::init_config(home, init_from, &why);
+            std::cout << (wrote ? "wrote " : "kept ") << config_path << (wrote || why.empty() ? "" : "  (" + why + ")") << "\n";
+            return wrote || std::filesystem::exists(config_path) ? 0 : 2;
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(config_path, ec) && !std::getenv("DD_BASE_URL")) {
+            std::cerr << "dd_tui: no config at " << config_path << "\n  create one: dd_tui --init [--from FILE]   "
+                      << "(or --config FILE, --home DIR)\n";
+            return 2;
+        }
     }
 
     ddcore::Config cfg{ddcore::Json{}};
@@ -664,7 +692,7 @@ int main(int argc, char** argv) {
     const bool color = to_tty && !std::getenv("NO_COLOR");
 
     const std::string skin = cfg.get_string("display.skin");
-    dd::ui::Scene scene(dd::ui::Theme::load(home + "/.daedalus/skins/" + (skin.empty() ? "neural" : skin) + ".yaml"));
+    dd::ui::Scene scene(dd::ui::Theme::load((home.skins() / ((skin.empty() ? "neural" : skin) + ".yaml")).string()));
 
     // ---- the registry; every handler reports its run to the scene ----
     dd::tools::ToolRegistry reg;
@@ -850,8 +878,7 @@ int main(int argc, char** argv) {
         add_tool(e);
     }
     deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "skill_load"});
-    std::error_code cwd_ec;
-    const std::string work = std::filesystem::current_path(cwd_ec).string() + "/.daedalus";
+    const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
 
     // ---- the transport ----
@@ -1049,7 +1076,7 @@ int main(int argc, char** argv) {
     // ---- interactive: keys + frames on main, agent.run on a worker ----
     const char* mouse_env = std::getenv("DD_TUI_MOUSE");
     const bool mouse = !(mouse_env && std::strcmp(mouse_env, "0") == 0);
-    const int saved_err = term::hide_stderr(home);
+    const int saved_err = term::hide_stderr(home.logs().string());
     if (!term::enter(mouse)) {
         term::show_stderr(saved_err);
         std::cerr << "dd_tui: cannot put the terminal in raw mode\n";

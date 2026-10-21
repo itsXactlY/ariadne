@@ -1,9 +1,14 @@
-# ~/.daedalus/config.yaml — all dd_tui / dd_agent need; no Python Daedalus.
+# config.yaml — all dd_tui / dd_agent need. It lives BESIDE the binary:
 #
-#   mkdir -p ~/.daedalus/logs && cp examples/daedalus/config.yaml ~/.daedalus/
+#   dd_tui --init                    # writes this file and the folders next to the binary
+#   dd_tui --init --from FILE        # ... starting from an existing config
+#   dd_tui --home DIR                # run from another folder (config.yaml, skills/, rules/, state/ ...)
 #
-# Env overrides: DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.
-# ~/.daedalus/logs is optional: dd_tui writes stderr there while the screen is up.
+# Nothing is read from ~/.daedalus (the Python Daedalus's home). `dd import-daedalus`
+# copies skills and skins over once, on request.
+#
+# Env overrides: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.
+# logs/ is optional: dd_tui writes stderr there while the screen is up.
 # The values below are the reference box's (daedalus doctor on :8080, the
 # mazemaker pod on :8765); the comments say what to change on another one.
 
@@ -19,7 +24,7 @@ agent:
   thinking_budget: 1024    # max thinking tokens per call on a local server; 0 = no cap
 
 display:
-  skin: neural             # ~/.daedalus/skins/<skin>.yaml if present, else the built-in neural palette
+  skin: neural             # ./skins/<skin>.yaml if present, else the built-in neural palette
   show_reasoning: true     # false starts with reasoning cards folded to one line
 
 # The context tape: what each request carries.
@@ -29,6 +34,7 @@ context:
   tool_group_ttl: 8        # newest tool exchanges kept whole at an epoch start
 
 # Rebase from retrieval at the fast-layer watermarks (server tokens, both slots).
+# The mark is clamped to the server's real window (/props n_ctx) minus a sixteenth.
 compression:
   fast_layer_tokens: 65536 # the GPU-resident KV budget; 0 = rebase at hot_swap_hard_ratio of n_ctx
   watermarks:
@@ -40,9 +46,41 @@ compression:
   prewarm: true
 
 memory:
-  turn_recall: true        # one recall per turn, enriched from the graph, on the question
+  turn_recall: true        # look something up for the question; false switches every offer below off
   soak:
     window_turns: 18       # an epoch's head window: 2x this many messages before the question
+
+# Skills: ./skills is yours; the maze's catalogue is merged in under it.
+skills:
+  enabled: true
+  auto_route: true         # the harness offers a fitting skill at a turn's start and when the task shifts
+  maze: true               # merge the maze's skill catalogue under ./skills (disk first)
+  external_dirs: []        # read-only skill trees, e.g. [~/.daedalus/skills]
+  disabled: []             # skill names to hide
+
+# What the harness looks up for the model, and when (docs/KNOWLEDGE.md).
+knowledge:
+  deep_ms: 1500            # a turn start waits this long for the pod's recall; a late answer rides the next tool result
+  deep_recall_ms: 30000    # ... and this long when the question is about the past ("what did we decide ...")
+  budget:
+    turn_tokens: 600       # the note on a question
+    hint_tokens: 250       # a note after a tool batch
+    max_turn_tokens: 1500  # everything retrieval adds to one turn
+  confidence:              # calibrated with `dd replay` on real prompts against the real catalogue
+    offer_score: 0.15      # a skill is offered when it holds this share of the question's evidence ...
+    offer_mass: 6.5        # ... and that is this much evidence in absolute terms (two terms, or one rare one and more)
+    open_score: 0.25       # at this share the head of the skill is opened for the model
+  rank:                    # BM25F field weights
+    name: 8
+    tags: 3
+    group: 1.5
+    gist: 1
+    k1: 2.0
+  mid_turn:
+    shift: true            # the task moved to something new
+    failure: true          # a call failed twice, or its error is a known one
+    stall: true            # the same call twice, or three blind explorations
+  rules: true              # tripwires: ./rules/*.md and the maze's rule: rows
 
 # Local tools and these stay in the window; the rest is found with tool_search.
 tool_search:
@@ -56,11 +94,14 @@ tool_search:
 # Streamable-HTTP MCP only (transport: http); stdio servers are skipped.
 # The server that answers mazemaker_recall is the tape's memory: soaks, rebases,
 # skills, /resume. Without one the tape forgets what ages out.
+# instructions: what to do with the server's own protocol text — harness (default for the
+# maze: the harness's retrieval contract replaces it), verbatim, or off.
 mcp_servers:
   mazemaker:
     enabled: true
     transport: http
     url: http://127.0.0.1:8765/mcp
+    instructions: harness
     tools:                                # optional per-tool switch
       mazemaker_prune: {enabled: false}
 

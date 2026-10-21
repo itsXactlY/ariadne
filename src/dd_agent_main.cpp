@@ -6,12 +6,13 @@
 // list_dir) with real I/O so the agent actually executes a turn.
 //
 // usage:
-//   build/dd-agent                                 # config from ~/.daedalus/config.yaml, msg on stdin
+//   build/dd-agent                                 # config.yaml beside the binary, msg on stdin
 //   build/dd-agent path/to/config.yaml -- "msg"    # explicit config, msg on argv
 // env overrides: DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS
 
 #include "dd/agent/agent.hpp"
 #include "dd/core/config.hpp"
+#include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
 #include "dd/tools/registry.hpp"
@@ -171,17 +172,21 @@ static void register_fs_tools(dd::tools::ToolRegistry& reg) {
 
 // ---- entry ----
 int main(int argc, char** argv) {
-    const char* h_env = std::getenv("HOME");
-    std::string home = h_env ? h_env : std::string("/home/alca");
-    std::string config_path = home + "/.daedalus/config.yaml";
+    std::string home_flag, config_flag;
     std::vector<std::string> msg_words;
     bool after_dd = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--") { after_dd = true; continue; }
-        if (!after_dd) config_path = a;
-        else msg_words.push_back(a);
+        if (after_dd) msg_words.push_back(a);
+        else if (a == "--") after_dd = true;
+        else if (a == "--home" && i + 1 < argc) home_flag = argv[++i];
+        else if (a == "--config" && i + 1 < argc) config_flag = argv[++i];
+        else config_flag = a;
     }
+    // config.yaml beside the binary (see dd_tui --init), not the Python Daedalus's ~/.daedalus
+    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag);
+    ddcore::set_daedalus_home_override(home.root.string());
+    const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
 
     ddcore::Config cfg{ddcore::Json{}};
     try { cfg = ddcore::load_config(config_path); }

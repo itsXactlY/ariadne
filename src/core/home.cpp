@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <system_error>
 
 namespace dd {
 namespace core {
@@ -13,6 +14,11 @@ static std::string trim(const std::string& s) {
     if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\n\r");
     return s.substr(a, b - a + 1);
+}
+
+static std::string env_str(const char* key) {
+    const char* v = std::getenv(key);
+    return trim(v ? std::string(v) : std::string());
 }
 
 void set_daedalus_home_override(const std::string& path) { g_override = path; }
@@ -28,17 +34,54 @@ std::filesystem::path platform_default_daedalus_home() {
     return std::filesystem::path(home) / ".daedalus";
 }
 
+std::filesystem::path exe_dir() {
+    std::error_code ec;
+    const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec || exe.empty()) return {};
+    return exe.parent_path();
+}
+
 std::filesystem::path daedalus_home_from_env() {
-    const char* v = std::getenv("DAEDALUS_HOME");
-    std::string val = trim(v ? std::string(v) : std::string(""));
-    if (!val.empty()) return std::filesystem::path(val);
-    return platform_default_daedalus_home();
+    for (const char* key : {"DD_HOME", "DAEDALUS_HOME"})
+        if (const std::string v = env_str(key); !v.empty()) return std::filesystem::path(v);
+    if (std::filesystem::path d = exe_dir(); !d.empty()) return d;
+    std::error_code ec;
+    return std::filesystem::current_path(ec);   // no /proc: beside where we were started
 }
 
 std::filesystem::path get_daedalus_home() {
     std::optional<std::string> ov = get_daedalus_home_override();
     if (ov.has_value() && !trim(*ov).empty()) return std::filesystem::path(trim(*ov));
     return daedalus_home_from_env();
+}
+
+Home resolve_home(const std::string& home_flag, const std::string& config_flag) {
+    namespace fs = std::filesystem;
+    Home h;
+    if (!trim(home_flag).empty()) {
+        h.root = trim(home_flag);
+    } else if (!trim(config_flag).empty()) {
+        h.root = fs::path(trim(config_flag)).parent_path();
+        if (h.root.empty()) h.root = ".";
+    } else {
+        h.root = daedalus_home_from_env();
+    }
+    std::error_code ec;
+    const fs::path abs = fs::absolute(h.root, ec);
+    if (!ec) h.root = abs.lexically_normal();
+    return h;
+}
+
+bool ensure_home(const Home& h, std::string* why) {
+    std::error_code ec;
+    for (const auto& dir : {h.root, h.state(), h.cache(), h.logs()}) {
+        std::filesystem::create_directories(dir, ec);
+        if (ec) {
+            if (why) *why = "cannot create " + dir.string() + ": " + ec.message();
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace core
