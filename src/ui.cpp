@@ -933,6 +933,7 @@ double Scene::work_ms() const {
 bool Scene::stale(size_t i, int w) const {
     const Cache& c = cache_[i];
     const Entry& e = entries_[i];
+    if (c.tw != static_cast<int>(e.text.size())) return true;   // streamed text grew
     const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
     const int view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
     return c.w != w || c.ver != e.ver || c.spin != spin || c.view != view;
@@ -944,6 +945,7 @@ const Canvas& Scene::block(size_t i, int w) {
         const Entry& e = entries_[i];
         c.block = render(e, w);
         c.w = w;
+        c.tw = static_cast<int>(e.text.size());
         c.ver = e.ver;
         c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
         c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
@@ -967,7 +969,10 @@ Canvas Scene::render(const Entry& e, int w) const {
         return c;
     }
     case Kind::Say: {
-        const auto lines = wrap(e.text, w - 4);
+        // dynamic height: the box grows with the stream as it writes (capped),
+        // then shrinks to the wrapped answer once resolved.
+        const int cap = e.resolved ? 0 : 24;
+        const auto lines = wrap(e.text, w - 4, cap);
         const int h = static_cast<int>(lines.size()) + 3;
         Canvas c(w, h);
         const Style b{th_.response};
@@ -982,10 +987,24 @@ Canvas Scene::render(const Entry& e, int w) const {
         return c;
     }
     case Kind::Tool: {
-        Canvas c(w, 6);
+        // dynamic height: args up to 6 rows, result preview up to 12.
+        const int aw = std::clamp(w - 4, 40, 96);
+        // flat_args first (it repairs a cut-off JSON blob into key="v" form),
+        // then wrap: long args get their rows instead of one clipped line.
+        auto alines = wrap(flat_args(e.text), aw, 6);
+        while (alines.size() > 1 && alines.front().empty()) alines.erase(alines.begin());
+        bool err = false;
+        std::vector<std::string> rlines;
+        if (e.resolved) {
+            const auto [e_, body] = preview(e.result);
+            err = e_;
+            rlines = wrap(body.empty() ? std::string("(empty)") : body, w - 6, 12);
+        }
+        const int h = static_cast<int>(alines.size()) + (e.resolved ? static_cast<int>(rlines.size()) + 1 : 1) + 3;
+        Canvas c(w, h);
         const uint32_t bc = e.run == Run::Failed ? th_.error : e.run == Run::Running ? th_.accent : th_.dim;
         const Style b{bc};
-        c.box(0, 0, w, 5, b, false);
+        c.box(0, 0, w, h - 1, b, false);
         c.put(1, 0, U' ', b);
         c.put(2, 0, U'▸', Style{th_.gold, kNone, kBold});
         c.put(3, 0, U' ', b);
@@ -1009,15 +1028,17 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.put(w - sw - 3, 0, U' ', b);
         c.text(w - sw - 2, 0, st, ss);
         c.put(w - 2, 0, U' ', b);
-        c.text(2, 1, clip(flat_args(e.text), w - 4), Style{th_.muted});
+        int ry = 1;
+        for (size_t k = 0; k < alines.size(); ++k, ++ry) {
+            if (alines[k].empty()) continue;
+            c.text(2, ry, alines[k], Style{th_.muted});
+        }
         if (e.resolved) {
-            const auto [err, body] = preview(e.result);
-            const auto lines = wrap(body.empty() ? "(empty)" : body, w - 6, 2);
-            c.text(2, 2, "◂", Style{err ? th_.error : th_.ok, kNone, kBold});
-            for (size_t k = 0; k < lines.size(); ++k)
-                c.text(4, 2 + static_cast<int>(k), lines[k], Style{err ? th_.error : th_.text});
+            c.text(2, ry++, "◂", Style{err ? th_.error : th_.ok, kNone, kBold});
+            for (size_t k = 0; k < rlines.size(); ++k)
+                c.text(4, ry + static_cast<int>(k), rlines[k], Style{err ? th_.error : th_.text});
         } else if (e.run == Run::Running) {
-            c.text(2, 2, "◂ …", Style{th_.muted});
+            c.text(2, ry, "◂ …", Style{th_.muted});
         }
         return c;
     }
@@ -1051,11 +1072,17 @@ Canvas Scene::render(const Entry& e, int w) const {
             c.text(n + 1, 0, "· " + meta + " · /reasoning show", txt);
             return c;
         }
+        // dynamic height: Full shows every line; Tail grows with the stream
+        // up to its cap and always keeps the NEWEST lines (cut the front).
         auto lines = wrap(e.text.empty() ? std::string("…") : e.text, w - 4);
         while (lines.size() > 1 && lines.front().empty()) lines.erase(lines.begin());
         while (lines.size() > 1 && lines.back().empty()) lines.pop_back();
-        const int rows = view_ == ReasonView::Full ? static_cast<int>(lines.size()) : kReasonRows;
-        const size_t first = lines.size() > static_cast<size_t>(rows) ? lines.size() - static_cast<size_t>(rows) : 0;
+        // how much the cap will hide has to be read off BEFORE the cut
+        const size_t first = (view_ == ReasonView::Full || static_cast<int>(lines.size()) <= kReasonRows)
+            ? 0
+            : lines.size() - static_cast<size_t>(kReasonRows);
+        if (first > 0) lines.erase(lines.begin(), lines.begin() + first);
+        const int rows = static_cast<int>(lines.size());
         Canvas c(w, rows + 3);
         for (int i = 1; i < w - 1; ++i) {
             c.put(i, 0, U'╌', dim);
@@ -1071,9 +1098,9 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.put(w - 1, rows + 1, U'╯', dim);
         c.title(2, 0, head, Style{th_.accent, kNone, kItalic | kBold}, dim);
         c.title_right(w - 2, 0, meta, Style{th_.muted}, dim);
-        if (first > 0) c.title(2, rows + 1, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
-        for (size_t k = first; k < lines.size(); ++k)
-            c.text(2, 1 + static_cast<int>(k - first), lines[k], txt);
+        if (first > 0) c.title_right(w - 2, rows + 2, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
+        for (size_t k = 0; k < lines.size(); ++k)
+            c.text(2, 1 + static_cast<int>(k), lines[k], txt);
         return c;
     }
     case Kind::Memory: {
@@ -1172,7 +1199,8 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
         paint_splash(f, ix, iy, iw, ih);
         return;
     }
-    const int cw = std::min(iw, kCardMaxW);
+    // cards fill the transcript box — no dead column band on wide terminals
+    const int cw = std::max(40, iw);
     {   // a resize invalidates every card: wrap them on all cores
         std::vector<size_t> todo;
         for (size_t i = 0; i < entries_.size(); ++i)
@@ -1186,6 +1214,7 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
                 Cache& c = cache_[i];
                 c.block = render(e, cw);
                 c.w = cw;
+                c.tw = static_cast<int>(e.text.size());
                 c.ver = e.ver;
                 c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
                 c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
@@ -1321,11 +1350,20 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     }
 
     if (th < 3) return;
+    // Dynamic height: the tools panel is as tall as its content, never a
+    // stretched box. It keeps every call the session has made (entries_ is
+    // the rolling history), so it grows as work accumulates instead of
+    // padding to a fixed budget with blank rows.
+    int want = 0;
+    for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
+        if (it->kind == Kind::Tool) ++want;
+    if (want == 0) want = std::max<int>(1, static_cast<int>(info_.sources.size()) + 1);
+    const int th2 = std::min(th, want + 2);
     const int ty = y + sh + eh + tph;
-    f.box(x, ty, w, th, b, true);
-    f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
+    f.box(x, ty, w, th2, b, true);
+    f.title(x + 2, ty, "tools Â· " + std::to_string(info_.tools), head, b);
     int ry = ty + 1;
-    for (auto it = entries_.rbegin(); it != entries_.rend() && ry < ty + th - 1; ++it) {
+    for (auto it = entries_.rbegin(); it != entries_.rend() && ry < ty + th2 - 1; ++it) {
         if (it->kind != Kind::Tool) continue;
         char32_t g = U'·';
         Style gs = mut;
@@ -1339,12 +1377,32 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         ++ry;
     }
     if (ry == ty + 1) {
-        for (const auto& s : info_.sources) {
-            if (ry >= ty + th - 1) break;
+        for (const auto& sc : info_.sources) {
+            if (ry >= ty + th2 - 1) break;
             f.put(x + 2, ry, U'◇', Style{th_.accent});
-            f.text(x + 4, ry++, clip(s, w - 6), val);
+            f.text(x + 4, ry++, clip(sc, w - 6), val);
         }
-        if (ry < ty + th - 1) f.text(x + 2, ry, "no calls yet", mut);
+        if (ry < ty + th2 - 1) f.text(x + 2, ry, "no calls yet", mut);
+    }
+
+    // Recent turns, only when the column has leftover rows to spend: one row
+    // per turn, newest last. The panel exists when it can say something, so
+    // the sidebar never stretches into blank rows.
+    const int left = th - th2;
+    if (left >= 3 && turns_ > 0) {
+        std::vector<std::string> hist;
+        for (const auto& e : entries_)
+            if (e.kind == Kind::Rule) hist.push_back(e.text);
+        const int cap = left - 2;
+        if (static_cast<int>(hist.size()) > cap)
+            hist.erase(hist.begin(), hist.end() - static_cast<size_t>(cap));
+        if (!hist.empty() && cap > 0) {
+            const int py2 = ty + th2;
+            f.box(x, py2, w, 2 + static_cast<int>(hist.size()), b, true);
+            f.title(x + 2, py2, "turns", head, b);
+            int ry2 = py2 + 1;
+            for (const auto& h : hist) f.text(x + 2, ry2++, clip(h, w - 4), mut);
+        }
     }
 }
 

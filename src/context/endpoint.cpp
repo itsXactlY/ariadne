@@ -90,7 +90,7 @@ std::vector<Endpoint::Slot> Endpoint::slots() const {
 }
 
 long Endpoint::pool_tokens(long main_tokens) const {
-    if (!multi_slot()) return main_tokens;
+    if (!multi_slot() || info_.strata) return main_tokens;  // strata: slots are separate sessions, one shared pool never exists
     const int side = sidekick_slot();
     for (const auto& s : slots())
         if (s.id == side) return main_tokens + s.tokens;

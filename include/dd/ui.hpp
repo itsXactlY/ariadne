@@ -212,7 +212,14 @@ public:
     void scroll_end() { scroll_ = 0; }
     void set_reason_view(ReasonView v) { view_ = v; }
     ReasonView reason_view() const { return view_; }
-    void redraw() { if (frame_) frame_->invalidate(); }
+    void redraw() { invalidate_all(); }
+    // Drop every cached card block: geometry changed around the cards, so
+    // all of them must go through render() again.
+    void invalidate_all() {
+        if (!frame_) return;
+        frame_->invalidate();
+        for (auto& c : cache_) c.tw = -1;
+    }
     // One synchronized frame: changed cells + cursor at the prompt; empty
     // when nothing changed.
     std::string present(int cols, int rows, bool truecolor);
@@ -248,7 +255,7 @@ private:
 
     // everything below: render thread only
     std::deque<Entry> entries_;
-    struct Cache { int w = -1; unsigned ver = 0; int spin = -1, view = -1; Canvas block; };
+    struct Cache { int w = -1, tw = -1; unsigned ver = 0; int spin = -1, view = -1; Canvas block; };
     std::deque<Cache> cache_;
     size_t printed_ = 0;     // drain_inline cursor (index into entries_)
     Info info_;

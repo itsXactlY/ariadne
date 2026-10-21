@@ -180,7 +180,10 @@ int main() {
         s.tool_call("c2", "read_file", "{\"path\":\"/x\"}");
         s.tool_result("c2", "{\"path\":\"/x\",\"content\":\"y\"}");
         const auto out = lines_of(s.drain_inline(80, false, false));
-        chk(out.size() == 12, "tool cards are 6 rows each");
+        // dynamic tool cards: header + wrapped args rows + result rows + footer.
+        // dynamic cards: header + args rows + result marker row + result rows + footer.
+        // card 1 wraps its 5000-char result to the 12-row cap (16 rows), card 2 is 5.
+        chk(out.size() == 16 + 1 + 5 + 1, "tool cards grow with their result (16 + 1 + 5 + trailing)");
         const std::string tail = "─ ✓ done ┐";
         chk(out[0].rfind("┌ ▸ run_terminal ─", 0) == 0 && out[0].size() > tail.size() &&
             out[0].compare(out[0].size() - tail.size(), tail.size(), tail) == 0, "tool card header");
@@ -236,11 +239,11 @@ int main() {
         s.llm_end(st);
         const auto out = lines_of(s.drain_inline(80, false, false));
         const size_t R = Scene::kReasonRows;
-        chk(out.size() == R + 3 + 4, "reason tail + answer heights");
+        chk(out.size() == R + 3 + 4, "reason tail (capped) + answer heights");
         if (out.size() == R + 3 + 4) {
             chk(out[0].find("◈ thought") != std::string::npos && out[0].find("40 tok") != std::string::npos, "reason header");
             chk(out[R].find("step 39") != std::string::npos && out[1].find("step 34") != std::string::npos, "tail = newest lines");
-            chk(out[R + 1].find("↑ 34 lines") != std::string::npos, "hidden-lines marker");
+            chk(out[R + 2].find("↑ 34 lines") != std::string::npos, "hidden-lines marker under the border");
             chk(out[R + 3].find("DAEDALUS") != std::string::npos && out[R + 3].find("1.2s") != std::string::npos &&
                     out[R + 4].find("The answer.") != std::string::npos, "streamed answer card");
         }
@@ -255,7 +258,8 @@ int main() {
             s.llm_end(LlmStats{});
             return lines_of(s.drain_inline(80, false, false));
         };
-        chk(run(ReasonView::Tail, 1).size() == Scene::kReasonRows + 3, "tail fixed height");
+        chk(run(ReasonView::Tail, 1).size() == 1 + 3, "tail grows: 1 line = 1 row");
+        chk(run(ReasonView::Tail, 30).size() == Scene::kReasonRows + 3, "tail caps at kReasonRows");
         const auto hide = run(ReasonView::Hide, 30);
         chk(hide.size() == 2 && hide[0].find("◈ thought") != std::string::npos && hide[1].empty(), "hide = one row");
         chk(run(ReasonView::Full, 30).size() == 30 + 3, "full = every line");
