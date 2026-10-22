@@ -118,12 +118,15 @@ void MemoryCatalogue::publish() {
     snap_.publish(std::move(snap));
 }
 
+void MemoryCatalogue::preload() {
+    if (cache_loaded_) return;
+    load_cache();
+    if (!rows_.empty()) publish();   // searchable at once, from what the last run knew
+}
+
 void MemoryCatalogue::refresh() {
     if (!mem_ || !mem_->configured()) return;
-    if (!cache_loaded_) {
-        load_cache();
-        if (!rows_.empty()) publish();   // searchable at once, from what the last run knew
-    }
+    preload();
     if (!mem_->up()) mem_->probe();
 
     std::map<long, std::string> live;   // id -> label, the maze now

@@ -591,6 +591,9 @@ static void test_memory_catalogue(const fs::path& tmp) {
     MemoryCatalogue cold(pod2, s->root / "cache" / "memory-cards.jsonl");
     cold.refresh();
     chk(cold.ready() && cold.size() == 3 && !cold.healthy(), "memory: pod down at launch: searchable from the cache, not healthy");
+    MemoryCatalogue pre(pod2, s->root / "cache" / "memory-cards.jsonl");
+    pre.preload();   // no refresh, no pod call: the cached rows alone
+    chk(pre.ready() && pre.size() == 3 && !pre.healthy() && pod2->gets.load() == 0, "memory: preload() makes the cached rows searchable without touching the pod");
     const int gets_before = s->pod->gets.load();
     s->memory->refresh();
     chk(s->pod->gets.load() == gets_before, "memory: an unchanged maze costs no row reads, only labels");

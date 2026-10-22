@@ -471,9 +471,13 @@ query term up once, not again for every hit; its arithmetic is unchanged. `-fope
 
 **Review.** An independent read of this code (a fork, read-only, with proof programs) found three real defects and four small ones; all
 are fixed. (1) The catalogue map in the system prompt lacked the memory and tools lines: one refresher thread went through skills,
-memory and tools in turn, and startup only waited for skills, polling every 20 ms. Now `tool_cat->refresh()` runs at once (it is
-local), each catalogue fed by the maze has its own refresher thread, and startup sleeps on each catalogue's first snapshot
-(`SnapCell::wait`, `Catalogue::wait_ready`: woken by `publish()`, bounded to 4 s, no polling). (2) A use after free at exit: the
+memory and tools in turn, and startup only waited for skills, polling every 20 ms. Now the local parts are searchable at once and the
+pod is the slow leg that enriches them: `tool_cat->refresh()` runs first (it is local), `MemoryCatalogue::preload()` loads the cached
+rows before any pod call, and the skill catalogue publishes its first (local, disk) source as a snapshot of its own while the maze is
+still being listed, then a second one with the maze's skills. Each catalogue fed by the maze has its own refresher thread; the
+skills start first and get the pod to themselves, startup sleeps on their first snapshot (`SnapCell::wait`, `Catalogue::wait_ready`:
+woken by `publish()`, bounded to 4 s, no polling), and the memory sync follows. The map can therefore count the local skills only
+when the maze listing is slow; the router searches the merged set as soon as it lands. (2) A use after free at exit: the
 refresher thread could still be inside `ToolCatalogue::refresh()` reading the deck after the deck was gone (shown with ASAN); the
 refreshers are now declared after the deck and the router, so they stop first, and the tool catalogue is not on a thread at all.
 (3) A stale recall reached the next turn: `submit_deep` skipped while any older recall ran, and `on()` then delivered whatever was in

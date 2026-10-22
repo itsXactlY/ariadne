@@ -914,22 +914,21 @@ int main(int argc, char** argv) {
     }
     deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load"});
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
-    // each catalogue fed by the maze refreshes on its own thread (the memory cache is searchable while the maze listing runs),
-    // again when a source comes back. Declared after the deck and the router, so they are stopped before either goes.
-    std::vector<std::shared_ptr<dd::know::Catalogue>> fed;
-    if (skill_cat) fed.push_back(skill_cat);
-    if (memory_cat) fed.push_back(memory_cat);
+    if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call
+    // each catalogue fed by the maze refreshes on its own thread, again when a source comes back. Declared after the deck
+    // and the router, so they are stopped before either goes.
     std::vector<std::unique_ptr<dd::know::Refresher>> refreshers;
-    for (const auto& c : fed) {
+    auto start_refresher = [&](const std::shared_ptr<dd::know::Catalogue>& c) {
         refreshers.push_back(std::make_unique<dd::know::Refresher>(std::vector<std::shared_ptr<dd::know::Catalogue>>{c}));
         refreshers.back()->start();
+    };
+    // the skills go first and get the pod to themselves: the catalogue map goes into the system prompt, which never changes
+    // during a session, so give their first look a moment, asleep until it is published (not polling). The memory sync follows.
+    if (skill_cat) {
+        start_refresher(skill_cat);
+        skill_cat->wait_ready(std::chrono::seconds(4));
     }
-    {   // the catalogue map goes into the system prompt, which never changes during a session: give each first look a moment,
-        // asleep until it is published (not polling)
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-        for (const auto& c : fed)
-            c->wait_ready(std::max(std::chrono::milliseconds(0), std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())));
-    }
+    if (memory_cat) start_refresher(memory_cat);
     const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
 

@@ -40,6 +40,9 @@ public:
     std::optional<Body> open(const Uri& u) override;
     std::string map() const override;
     void refresh() override;
+    // The cached rows, searchable before any pod call (refresh() starts with the same). Call it before the refresher
+    // thread starts, or from it: the rows are the refreshing thread's alone.
+    void preload();
     void cancel(bool on) override { cancel_.store(on); }
     float idf(const std::string& term) const override;
 

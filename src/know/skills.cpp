@@ -347,6 +347,30 @@ void SkillCatalogue::refresh() {
     Census census;
     bool any_ok = false, all_ok = true;
 
+    // makes a snapshot of what the sources have given so far searchable (unless it is the one already published)
+    auto publish = [&](std::vector<Card> cards, std::vector<Owned> own, Census cen) {
+        uint64_t fp = 1469598103934665603ull;
+        for (auto& c : cards) {
+            if (const auto p = opt_.priors.find(c.uri.id); p != opt_.priors.end()) c.prior = p->second;
+            fp = fnv(fp, c.uri.id + "|" + c.rev + "|" + c.source + "|" + (c.has_body ? "1" : "0") + "|" + c.gist);
+        }
+        if (const auto old = snap_.read(); old && old->fingerprint == fp) return;   // nothing changed: same generation
+        auto snap = std::make_unique<Snapshot>();
+        snap->fingerprint = fp;
+        snap->generation = gen_.fetch_add(1) + 1;
+        cen.cards = cards.size();
+        for (const auto& c : cards) {
+            if (!c.has_body) ++cen.bodyless;
+            ++cen.by_group[c.group.empty() ? "other" : c.group];
+            ++cen.by_source[c.source];
+        }
+        snap->census = std::move(cen);
+        snap->owned = std::move(own);
+        for (size_t i = 0; i < cards.size(); ++i) snap->by_id[cards[i].uri.id] = i;
+        snap->index = std::make_unique<Bm25f>(std::move(cards), opt_.bm25);
+        snap_.publish(std::move(snap));
+    };
+
     for (size_t si = 0; si < sources_.size(); ++si) {
         auto& src = sources_[si];
         std::vector<Card> cards;
@@ -399,31 +423,12 @@ void SkillCatalogue::refresh() {
             owned.push_back({src, c});
             ++census.aliased;
         }
+        // the first source is the local one: searchable now, while the maze is still being listed (the pod is the slow leg)
+        if (si == 0 && sources_.size() > 1 && snap_.empty() && !shown.empty()) publish(shown, owned, census);
     }
     healthy_.store(all_ok);
     if (!any_ok && shown.empty()) return;   // nothing reachable yet: stay unready rather than publish an empty set
-
-    uint64_t fp = 1469598103934665603ull;
-    for (auto& c : shown) {
-        if (const auto p = opt_.priors.find(c.uri.id); p != opt_.priors.end()) c.prior = p->second;
-        fp = fnv(fp, c.uri.id + "|" + c.rev + "|" + c.source + "|" + (c.has_body ? "1" : "0") + "|" + c.gist);
-    }
-    if (const auto old = snap_.read(); old && old->fingerprint == fp) return;   // nothing changed: same generation
-
-    auto snap = std::make_unique<Snapshot>();
-    snap->fingerprint = fp;
-    snap->generation = gen_.fetch_add(1) + 1;
-    census.cards = shown.size();
-    for (const auto& c : shown) {
-        if (!c.has_body) ++census.bodyless;
-        ++census.by_group[c.group.empty() ? "other" : c.group];
-        ++census.by_source[c.source];
-    }
-    snap->census = std::move(census);
-    snap->owned = std::move(owned);
-    for (size_t i = 0; i < shown.size(); ++i) snap->by_id[shown[i].uri.id] = i;
-    snap->index = std::make_unique<Bm25f>(std::move(shown), opt_.bm25);
-    snap_.publish(std::move(snap));
+    publish(std::move(shown), std::move(owned), std::move(census));
 }
 
 uint64_t SkillCatalogue::generation() const {

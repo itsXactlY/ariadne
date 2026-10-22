@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -435,7 +436,8 @@ static void test_catalogue_merge(const fs::path& tmp) {
     SkillCatalogue cat({disk, maze});
     chk(!cat.ready() && cat.size() == 0 && cat.generation() == 0, "catalogue: empty before the first refresh");
     cat.refresh();
-    chk(cat.ready() && cat.healthy() && cat.generation() == 1, "catalogue: ready, healthy, generation 1");
+    const uint64_t g0 = cat.generation();   // the local source is published first, the merged set after it: how many bumps is not the point
+    chk(cat.ready() && cat.healthy() && g0 >= 1, "catalogue: ready, healthy, a generation");
 
     auto c = cat.census();
     // podman (disk+maze identical), maze-only, ascii-art + ascii-art@builtin, bodyless, multi = 6 cards
@@ -495,11 +497,11 @@ static void test_catalogue_merge(const fs::path& tmp) {
 
     // nothing changed: same generation
     cat.refresh();
-    chk(cat.generation() == 1, "catalogue: a refresh that finds the same cards keeps the generation");
+    chk(cat.generation() == g0, "catalogue: a refresh that finds the same cards keeps the generation");
     w.mem->add("skill:local:brand-new", maze_card("brand-new", "misc", "local", "Just authored in the maze", "555555555555", 9, 1));
     w.mem->add("skillsrc:local:brand-new#000", "new body\n");
     cat.refresh();
-    chk(cat.generation() == 2 && cat.find("brand-new"), "catalogue: a new card bumps the generation and is found");
+    chk(cat.generation() > g0 && cat.find("brand-new"), "catalogue: a new card bumps the generation and is found");
 
     // disabled names are hidden
     SkillCatalogue::Options o;
@@ -555,6 +557,37 @@ static void test_catalogue_pod_down_and_up(const fs::path& tmp) {
     for (int i = 0; i < 60 && !cat2->ready(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     chk(cat2->ready() && cat2->size() > 0, "refresher: retries soon and picks the pod up when it returns");
     r.stop();
+}
+
+// a source that answers only when told to
+struct SlowSource : SkillSource {
+    std::atomic<bool> go{false};
+    std::string name() const override { return "slow"; }
+    std::vector<Card> list() override {
+        while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        Card c;
+        c.uri.kind = Kind::Skill;
+        c.uri.id = c.title = "late-skill";
+        c.gist = "arrives when the pod answers";
+        c.source = "slow";
+        return {c};
+    }
+    std::optional<std::string> body(const Card&) override { return std::nullopt; }
+};
+
+// the local source is searchable at once; the slow one (the pod) enriches the catalogue when its listing lands
+static void test_early_snapshot(const fs::path& tmp) {
+    World w = make_world(tmp);
+    auto disk = std::make_shared<DiskSkills>(std::vector<fs::path>{w.root});
+    auto slow = std::make_shared<SlowSource>();
+    auto cat = std::make_shared<SkillCatalogue>(std::vector<std::shared_ptr<SkillSource>>{disk, slow});
+    std::thread refresh([&] { cat->refresh(); });
+    chk(cat->wait_ready(std::chrono::seconds(5)), "early: the local skills are searchable while the slow source has not answered");
+    chk(cat->size() == 1 && !cat->healthy(), "early: only the local skill so far, and the catalogue says it is not complete");
+    const uint64_t g1 = cat->generation();
+    slow->go = true;
+    refresh.join();
+    chk(cat->size() == 2 && cat->find("late-skill").has_value() && cat->generation() > g1, "early: the slow source's skill arrives in a second snapshot");
 }
 
 // a catalogue says when its first snapshot is there: the caller sleeps on it, it does not poll
@@ -722,6 +755,7 @@ int main() {
     test_catalogue_merge(tmp);
     test_catalogue_pod_down_and_up(tmp);
     test_wait_ready(tmp);
+    test_early_snapshot(tmp);
     test_open_pages(tmp);
     test_replay();
 
