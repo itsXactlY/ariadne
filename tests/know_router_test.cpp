@@ -819,6 +819,50 @@ static void test_router_midturn(const fs::path& tmp) {
     chk(!has(st2.note, "system-notice"), "mid-turn: the notice is given once per turn");
 }
 
+struct RecSink : EventSink {
+    std::vector<Event> got;
+    void emit(Event&& e) noexcept override { got.push_back(std::move(e)); }
+    int count(Event::Type t) const {
+        int n = 0;
+        for (const auto& e : got) n += e.type == t;
+        return n;
+    }
+};
+
+static void test_router_events(const fs::path& tmp) {
+    auto s = make_stack(tmp, "events");
+    auto rec = std::make_shared<RecSink>();
+    s->router->set_sink(rec);
+    s->pod->recall_hits = {};
+    auto d = s->router->on(turn("restart the podman quadlet units, the symlink mess is back"));
+    chk(rec->count(Event::Type::TurnStart) == 1, "events: a turn start is emitted once");
+    chk(rec->count(Event::Type::Offered) == static_cast<int>(d.offered.size()) && !d.offered.empty(), "events: one Offered per pointer");
+    bool scored = false;
+    for (const auto& e : rec->got)
+        if (e.type == Event::Type::Offered && e.matched >= 2 && e.mass > 0 && !e.terms.empty()) scored = true;
+    chk(scored, "events: an Offered carries the hit's evidence and the query terms");
+    chk(rec->count(Event::Type::OpenedByRouter) == static_cast<int>(d.opened.size()), "events: the auto-opened head is emitted");
+
+    Uri u = d.offered.front();
+    s->router->note_opened(u, u.id, 400);
+    CallRecord c;
+    c.tool = "read_file";
+    c.digest = "read_file|a";
+    CallsFinished cf;
+    cf.calls = {c};
+    s->router->on(cf);
+    chk(rec->count(Event::Type::OpenedByModel) == 1, "events: a model open is emitted on the agent thread");
+    chk(rec->count(Event::Type::Calls) == 1, "events: one Calls event per call");
+    s->router->end_turn();
+    s->router->note_tripwire("podman-not-docker");
+    s->router->on(Rebased{});
+    chk(rec->count(Event::Type::TurnEnd) == 1 && rec->count(Event::Type::Tripwire) == 1 && rec->count(Event::Type::Rebase) == 1, "events: turn end, tripwire and rebase");
+    uint32_t prev_turn = 0;
+    bool mono = true;
+    for (const auto& e : rec->got) { mono = mono && e.turn >= prev_turn; prev_turn = e.turn; }
+    chk(mono, "events: turn numbers never go back");
+}
+
 static void test_router_tools(const fs::path& tmp) {
     auto s = make_stack(tmp, "tools");
     Resolver r(*s->router);
@@ -949,6 +993,7 @@ int main() {
     test_router_deep(tmp);
     test_router_deep_turns(tmp);
     test_router_midturn(tmp);
+    test_router_events(tmp);
     test_router_tools(tmp);
     test_prompt();
     test_policy();
