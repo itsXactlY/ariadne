@@ -146,6 +146,11 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
         return;
     }
 
+    // a gate may refuse a call: decided up front, in order, before anything runs
+    std::vector<std::optional<std::string>> vetoed(calls.size());
+    if (gate)
+        for (size_t i = 0; i < calls.size(); ++i) vetoed[i] = gate->veto(calls[i]);
+
     const bool parallel = should_parallelize(calls, registry);
     std::vector<std::string> results(calls.size());
 
@@ -156,6 +161,10 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
             size_t batch = std::min<size_t>(MAX_TOOL_WORKERS, calls.size() - i);
             for (size_t k = 0; k < batch; ++k) {
                 size_t idx = i + k;
+                if (vetoed[idx]) {
+                    results[idx] = *vetoed[idx];
+                    continue;
+                }
                 workers.emplace_back([&, idx]() {
                     bool repaired = false;
                     const core::Json args = core::json_parse_args(calls[idx].arguments, repaired);
@@ -172,6 +181,10 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
         }
     } else {
         for (size_t i = 0; i < calls.size(); ++i) {
+            if (vetoed[i]) {
+                results[i] = *vetoed[i];
+                continue;
+            }
             bool repaired = false;
             const core::Json args = core::json_parse_args(calls[i].arguments, repaired);
             if (registry && (repaired || args.type != core::Json::Obj))

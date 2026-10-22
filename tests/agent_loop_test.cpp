@@ -1,5 +1,7 @@
 // tests/agent_loop_test.cpp — agent run loop + helpers against a scripted LLM.
+#include <atomic>
 #include <iostream>
+#include <optional>
 #include <vector>
 #include <memory>
 #include <stdexcept>
@@ -256,11 +258,113 @@ static int test_overflow_retry() {
     return 0;
 }
 
+// A gate can refuse a call before it runs: the model gets the gate's text as that call's result, the
+// handler never runs, the rest of the batch does. Sequential and parallel batches alike.
+struct OneRefusal : agent::ToolGate {
+    std::string name;   // refuses the first call of this tool
+    int seen = 0;
+    bool refused = false;
+    std::optional<std::string> veto(const core::ToolCall& c) override {
+        ++seen;
+        if (c.name == name && !refused) {
+            refused = true;
+            return std::string("{\"error\":\"[rule held] not like this\"}");
+        }
+        return std::nullopt;
+    }
+};
+
+struct TwoCalls : agent::LLMClient {
+    std::string a, b;
+    std::string args_a, args_b;
+    int round = 0;
+    core::Message chat(const std::vector<core::Message>&, const core::Json&) override {
+        core::Message m;
+        m.role = "assistant";
+        if (round++ == 0) {
+            m.tool_calls = {{"c1", a, args_a}, {"c2", b, args_b}};
+            return m;
+        }
+        m.content = "done";
+        m.finish_reason = "stop";
+        return m;
+    }
+};
+
+static int run_gate_case(const std::string& a, const std::string& args_a, const std::string& b, const std::string& args_b, const char* label) {
+    tools::ToolRegistry reg;
+    std::atomic<int> ran_a{0}, ran_b{0};
+    for (const auto& [name, counter] : {std::pair<std::string, std::atomic<int>*>{a, &ran_a}, std::pair<std::string, std::atomic<int>*>{b, &ran_b}}) {
+        if (name == b && a == b) continue;
+        tools::ToolEntry e;
+        e.name = name;
+        e.handler = [counter](const Json&) {
+            ++*counter;
+            return std::string("{\"ok\":true}");
+        };
+        reg.register_tool(e);
+    }
+    TwoCalls llm;
+    llm.a = a;
+    llm.b = b;
+    llm.args_a = args_a;
+    llm.args_b = args_b;
+    OneRefusal gate;
+    gate.name = a;
+    agent::Agent ag;
+    ag.registry = &reg;
+    ag.llm = &llm;
+    ag.gate = &gate;
+    ag.tool_delay = 0.0;
+    std::vector<std::string> results;
+    ag.step_hook = [&](const core::Message& m) {
+        if (m.role == "tool") results.push_back(m.content);
+    };
+    const std::string final = ag.run("go");
+    if (final != "done" || gate.seen != 2 || ran_a != 0 || ran_b != 1 || results.size() != 2 ||
+        results[0].find("[rule held]") == std::string::npos || results[1].find("ok") == std::string::npos) {
+        std::cerr << "FAIL: gate " << label << ": final=" << final << " seen=" << gate.seen << " ran_a=" << ran_a << " ran_b=" << ran_b << " results=" << results.size() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+static int test_gate() {
+    if (run_gate_case("echo", "{\"x\":1}", "weird", "{}", "sequential batch")) return 1;
+    if (run_gate_case("read_file", "{\"path\":\"/x/f1\"}", "list_dir", "{\"path\":\"/y\"}", "parallel batch")) return 1;
+    {   // no gate: as before
+        tools::ToolRegistry reg;
+        std::atomic<int> ran{0};
+        tools::ToolEntry e;
+        e.name = "echo";
+        e.handler = [&](const Json&) {
+            ++ran;
+            return std::string("{}");
+        };
+        reg.register_tool(e);
+        TwoCalls llm;
+        llm.a = "echo";
+        llm.b = "echo";
+        llm.args_a = "{\"x\":1}";
+        llm.args_b = "{\"x\":2}";
+        agent::Agent ag;
+        ag.registry = &reg;
+        ag.llm = &llm;
+        ag.tool_delay = 0.0;
+        if (ag.run("go") != "done" || ran != 2) {
+            std::cerr << "FAIL: no gate changes nothing\n";
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main() {
     if (test_helpers()) return 1;
     if (test_run_loop()) return 1;
     if (test_max_iterations()) return 1;
     if (test_overflow_retry()) return 1;
+    if (test_gate()) return 1;
     std::cout << "all agent-loop tests passed\n";
     return 0;
 }

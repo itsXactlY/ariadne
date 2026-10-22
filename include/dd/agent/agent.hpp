@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <dd/core/message.hpp>
 #include <dd/core/json.hpp>
 #include <atomic>
@@ -53,6 +54,14 @@ struct ContextEngine {
     virtual bool on_overflow(const std::string& /*error*/) { return false; }
 };
 
+// A rule that can refuse a tool call before it runs. veto() returns the tool result the model gets
+// instead (the call is not executed), or nullopt: the call may run. Called on the agent thread, in
+// order, before any call of the batch starts.
+struct ToolGate {
+    virtual ~ToolGate() = default;
+    virtual std::optional<std::string> veto(const core::ToolCall& call) = 0;
+};
+
 class Agent {
 public:
     // ---- configuration ----
@@ -77,6 +86,7 @@ public:
     tools::ToolRegistry* registry = nullptr;
     LLMClient* llm = nullptr;
     ContextEngine* context = nullptr;
+    ToolGate* gate = nullptr;
 
     // ---- owned state ----
     std::unique_ptr<IterationBudget> budget;
