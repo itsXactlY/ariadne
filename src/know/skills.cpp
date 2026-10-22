@@ -6,9 +6,11 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <system_error>
 
+#include "dd/core/par.hpp"
 #include "dd/core/sha256.hpp"
 #include "dd/core/yaml.hpp"
 #include "dd/skills/scanner.hpp"
@@ -19,6 +21,8 @@ namespace know {
 namespace fs = std::filesystem;
 
 namespace {
+
+constexpr size_t kParSkills = 64;   // fewer skills than this are read in turn: a parallel region costs more than it saves
 
 std::string squash(const std::string& s) {
     std::string o;
@@ -124,49 +128,71 @@ std::vector<Card> DiskSkills::list() {
     for (const auto& r : roots_)
         if (fs::is_directory(r, ec)) sc.add_root(r);
     sc.set_platform("linux");
-    auto places = std::make_shared<Places>();
-    std::vector<Card> out;
-    for (const auto& s : sc.scan()) {
-        const auto text = read_all(s.skill_md);
-        if (!text) continue;
-        Card c;
-        c.uri.kind = Kind::Skill;
-        c.uri.id = s.name;
-        c.title = s.name;
-        c.gist = gist_of(s.description);
-        c.group = s.category;
-        if (auto it = s.frontmatter.find("tags"); it != s.frontmatter.end()) c.tags = core::parse_list(it->second);
-        c.source = "disk";
-        for (const auto& r : roots_)
-            if (s.skill_md.string().rfind(r.string(), 0) == 0) {
-                c.source = "disk:" + (r.has_parent_path() ? r.parent_path().filename().string() + "/" : std::string()) + r.filename().string();
-                break;
-            }
-        c.body_bytes = text->size();
-        c.rev = rev_of(*text);
-        places->emplace(s.name, Place{s.skill_md, s.skill_dir});
-        out.push_back(std::move(c));
+    const auto found = sc.scan();
+    // each skill's file is read and hashed on its own: the loop runs on all cores, the cards are gathered in order below
+    std::vector<std::optional<Card>> slots(found.size());
+    const long n = static_cast<long>(found.size());
+    [[maybe_unused]] const bool par = found.size() >= kParSkills;   // only the OpenMP clause reads it
+#pragma omp parallel for schedule(dynamic, 8) num_threads(par ? core::par_threads() : 1) if (par)
+    for (long i = 0; i < n; ++i) {
+        try {
+            const auto& s = found[static_cast<size_t>(i)];
+            const auto text = read_all(s.skill_md);
+            if (!text) continue;
+            Card c;
+            c.uri.kind = Kind::Skill;
+            c.uri.id = s.name;
+            c.title = s.name;
+            c.gist = gist_of(s.description);
+            c.group = s.category;
+            if (auto it = s.frontmatter.find("tags"); it != s.frontmatter.end()) c.tags = core::parse_list(it->second);
+            c.source = "disk";
+            for (const auto& r : roots_)
+                if (s.skill_md.string().rfind(r.string(), 0) == 0) {
+                    c.source = "disk:" + (r.has_parent_path() ? r.parent_path().filename().string() + "/" : std::string()) + r.filename().string();
+                    break;
+                }
+            c.body_bytes = text->size();
+            c.rev = rev_of(*text);
+            slots[static_cast<size_t>(i)] = std::move(c);
+        } catch (...) {   // a skill that cannot be read is left out, as one with no file is
+        }
     }
-    places_.store(places);
+    auto places = std::make_unique<Places>();
+    std::vector<Card> out;
+    for (size_t i = 0; i < found.size(); ++i) {
+        if (!slots[i]) continue;
+        places->emplace(found[i].name, Place{found[i].skill_md, found[i].skill_dir});
+        out.push_back(std::move(*slots[i]));
+    }
+    places_.publish(std::move(places));
     return out;
 }
 
 std::optional<std::string> DiskSkills::body(const Card& c) {
-    const auto places = places_.load();
-    if (!places) return std::nullopt;
-    auto it = places->find(c.uri.id);
-    if (it == places->end()) return std::nullopt;
-    return read_all(it->second.md);
+    fs::path md;
+    {
+        const auto places = places_.read();
+        if (!places) return std::nullopt;
+        auto it = places->find(c.uri.id);
+        if (it == places->end()) return std::nullopt;
+        md = it->second.md;   // copied out: the file is read with the pin released
+    }
+    return read_all(md);
 }
 
 std::optional<std::string> DiskSkills::file(const Card& c, const std::string& rel) {
-    const auto places = places_.load();
-    if (!places) return std::nullopt;
-    auto it = places->find(c.uri.id);
-    if (it == places->end()) return std::nullopt;
+    fs::path root;
+    {
+        const auto places = places_.read();
+        if (!places) return std::nullopt;
+        auto it = places->find(c.uri.id);
+        if (it == places->end()) return std::nullopt;
+        root = it->second.dir;
+    }
     std::error_code ec;
-    const fs::path dir = fs::weakly_canonical(it->second.dir, ec);
-    const fs::path tgt = fs::weakly_canonical(it->second.dir / rel, ec);
+    const fs::path dir = fs::weakly_canonical(root, ec);
+    const fs::path tgt = fs::weakly_canonical(root / rel, ec);
     if (ec) return std::nullopt;
     const std::string d = dir.string(), t = tgt.string();
     if (t != d && t.compare(0, d.size() + 1, d + "/") != 0) return std::nullopt;   // never out of the skill's folder
@@ -187,6 +213,10 @@ std::vector<Card> MazeSkills::list() {
     skipped_.store(0);
     std::vector<context::Hit> labels;
     for (int off = 0; off < 4000; off += 200) {
+        if (cancel_.load()) {
+            ok_.store(false);
+            return {};
+        }
         auto page = mem_->labels("skill:", off, 200);
         labels.insert(labels.end(), page.begin(), page.end());
         if (page.size() < 200) break;
@@ -197,6 +227,10 @@ std::vector<Card> MazeSkills::list() {
     }
     std::set<std::string> with_body;   // "<source>:<name>" of every skillsrc:<source>:<name>#NNN
     for (int off = 0; off < 8000; off += 200) {
+        if (cancel_.load()) {
+            ok_.store(false);
+            return {};
+        }
         auto page = mem_->labels("skillsrc:", off, 200);
         for (const auto& h : page)
             if (const size_t hash = h.label.rfind('#'); hash != std::string::npos && h.label.size() > 9) with_body.insert(h.label.substr(9, hash - 9));
@@ -204,12 +238,21 @@ std::vector<Card> MazeSkills::list() {
     }
     std::vector<long> ids;
     for (const auto& h : labels) ids.push_back(h.id);
-    const auto rows = mem_->get(ids);
+    std::vector<context::Hit> rows;
+    for (size_t i = 0; i < ids.size(); i += 100) {   // in chunks, so a cancel is heard within one call
+        if (cancel_.load()) {
+            ok_.store(false);
+            return {};
+        }
+        const std::vector<long> chunk(ids.begin() + static_cast<long>(i), ids.begin() + static_cast<long>(std::min(ids.size(), i + 100)));
+        auto part = mem_->get(chunk);
+        rows.insert(rows.end(), std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
+    }
     ok_.store(mem_->up() && !rows.empty());
 
     std::vector<Card> out;
     size_t skipped = 0;
-    auto paths = std::make_shared<Paths>();
+    auto paths = std::make_unique<Paths>();
     for (const auto& r : rows) {
         // skill:<source>:<name>; a note filed under skill: ("fact: a skill was created ...") has no source
         const std::string rest = r.label.rfind("skill:", 0) == 0 ? r.label.substr(6) : r.label;
@@ -259,7 +302,7 @@ std::vector<Card> MazeSkills::list() {
         }
         out.push_back(std::move(c));
     }
-    paths_.store(paths);
+    paths_.publish(std::move(paths));
     skipped_.store(skipped);
     auto rank = [](const std::string& s) { return s == "maze:local" ? 0 : s == "maze:maze" ? 1 : s == "maze:builtin" ? 3 : 2; };
     std::stable_sort(out.begin(), out.end(), [&](const Card& a, const Card& b) { return rank(a.source) < rank(b.source); });
@@ -267,9 +310,11 @@ std::vector<Card> MazeSkills::list() {
 }
 
 std::optional<std::string> MazeSkills::body(const Card& c) {
-    if (const auto paths = paths_.load()) {
-        if (auto it = paths->find(c.source + "/" + c.uri.id); it != paths->end()) return read_all(it->second);
+    fs::path pointed;   // a pointer card's own file
+    if (const auto paths = paths_.read()) {
+        if (auto it = paths->find(c.source + "/" + c.uri.id); it != paths->end()) pointed = it->second;
     }
+    if (!pointed.empty()) return read_all(pointed);
     const std::string src = c.source.rfind("maze:", 0) == 0 ? c.source.substr(5) : c.source;
     for (const std::string& s : {src, std::string("local"), std::string("builtin")}) {
         if (s.empty()) continue;
@@ -363,9 +408,9 @@ void SkillCatalogue::refresh() {
         if (const auto p = opt_.priors.find(c.uri.id); p != opt_.priors.end()) c.prior = p->second;
         fp = fnv(fp, c.uri.id + "|" + c.rev + "|" + c.source + "|" + (c.has_body ? "1" : "0") + "|" + c.gist);
     }
-    if (const auto old = snap_.load(); old && old->fingerprint == fp) return;   // nothing changed: same generation
+    if (const auto old = snap_.read(); old && old->fingerprint == fp) return;   // nothing changed: same generation
 
-    auto snap = std::make_shared<Snapshot>();
+    auto snap = std::make_unique<Snapshot>();
     snap->fingerprint = fp;
     snap->generation = gen_.fetch_add(1) + 1;
     census.cards = shown.size();
@@ -378,31 +423,31 @@ void SkillCatalogue::refresh() {
     snap->owned = std::move(owned);
     for (size_t i = 0; i < shown.size(); ++i) snap->by_id[shown[i].uri.id] = i;
     snap->index = std::make_unique<Bm25f>(std::move(shown), opt_.bm25);
-    snap_.store(snap);
+    snap_.publish(std::move(snap));
 }
 
 uint64_t SkillCatalogue::generation() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->generation : 0;
 }
 
 size_t SkillCatalogue::size() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->size() : 0;
 }
 
 std::vector<Hit> SkillCatalogue::search(const Query& q, int k) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->search(q, k) : std::vector<Hit>{};
 }
 
 float SkillCatalogue::idf(const std::string& term) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->idf(term) : 0.0f;
 }
 
 std::optional<Card> SkillCatalogue::find(const std::string& name) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     if (!s) return std::nullopt;
     auto it = s->by_id.find(name);
     if (it == s->by_id.end()) return std::nullopt;
@@ -410,21 +455,24 @@ std::optional<Card> SkillCatalogue::find(const std::string& name) const {
 }
 
 std::vector<Card> SkillCatalogue::cards() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->cards() : std::vector<Card>{};
 }
 
 SkillCatalogue::Census SkillCatalogue::census() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->census : Census{};
 }
 
 std::optional<Body> SkillCatalogue::open(const Uri& u) {
-    const auto s = snap_.load();
-    if (!s || u.kind != Kind::Skill) return std::nullopt;
-    auto it = s->by_id.find(u.id);
-    if (it == s->by_id.end()) return std::nullopt;
-    const Owned& o = s->owned[it->second];
+    Owned o;
+    {
+        const auto s = snap_.read();
+        if (!s || u.kind != Kind::Skill) return std::nullopt;
+        auto it = s->by_id.find(u.id);
+        if (it == s->by_id.end()) return std::nullopt;
+        o = s->owned[it->second];   // copied out: the source is opened (a file, the pod) with the pin released
+    }
     std::optional<std::string> text = u.path.empty() ? o.src->body(o.orig) : o.src->file(o.orig, u.path);
     if (!text) return std::nullopt;
     if (u.path.empty() && text->rfind("---", 0) == 0) {   // the SKILL.md's own frontmatter is the card's business, not the model's tokens
@@ -435,7 +483,7 @@ std::optional<Body> SkillCatalogue::open(const Uri& u) {
 }
 
 std::string SkillCatalogue::map() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     if (!s) return "";
     std::vector<std::pair<std::string, size_t>> groups(s->census.by_group.begin(), s->census.by_group.end());
     std::stable_sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.second > b.second; });

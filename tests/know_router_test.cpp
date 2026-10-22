@@ -36,7 +36,8 @@ struct FakePod : context::Memory {
     std::vector<context::Hit> rows;
     std::atomic<bool> is_up{true};
     std::atomic<int> recalls{0}, gets{0};
-    std::atomic<int> recall_ms{0};
+    std::atomic<int> recall_ms{0}, get_ms{0}, first_recall_ms{0};   // the first recall alone can be slower
+    bool echo_query = false;   // recall answers with a hit that quotes the question it was asked
     std::vector<context::Hit> recall_hits;
     std::set<long> hidden;   // ids a flaky listing leaves out
     void add(const std::string& label, const std::string& content) {
@@ -49,10 +50,17 @@ struct FakePod : context::Memory {
     bool configured() const override { return true; }
     bool up() const override { return is_up.load(); }
     bool probe() override { return is_up.load(); }
-    std::vector<context::Hit> recall(const std::string&, int, const std::string&) override {
-        ++recalls;
+    std::vector<context::Hit> recall(const std::string& query, int, const std::string&) override {
+        const int n = ++recalls;
+        if (n == 1) std::this_thread::sleep_for(std::chrono::milliseconds(first_recall_ms.load()));
         std::this_thread::sleep_for(std::chrono::milliseconds(recall_ms.load()));
-        return recall_hits;
+        if (!echo_query) return recall_hits;
+        context::Hit h;
+        h.id = 1000 + n;
+        h.label = "decision:topic";
+        h.content = "ANSWER-FOR[" + query + "]";
+        h.score = 0.9;
+        return {h};
     }
     long remember(const std::string&, const std::string&) override { return -1; }
     std::vector<context::Hit> think(long, int) override { return {}; }
@@ -76,6 +84,7 @@ struct FakePod : context::Memory {
     }
     std::vector<context::Hit> get(const std::vector<long>& ids) override {
         ++gets;
+        std::this_thread::sleep_for(std::chrono::milliseconds(get_ms.load()));
         std::vector<context::Hit> out;
         if (!is_up) return out;
         for (long id : ids)
@@ -498,6 +507,70 @@ static TurnStarted turn(const std::string& text, int epoch = 0) {
     return t;
 }
 
+// quitting does not wait out a sync: the refresher cancels it, and what was fetched is kept
+static void test_cancel() {
+    auto pod = std::make_shared<FakePod>();
+    for (int i = 0; i < 400; ++i) pod->add("decision:topic-" + std::to_string(i), "row " + std::to_string(i));
+    pod->get_ms = 40;   // 16 batches of 25: a whole sync takes ~640 ms
+    auto mem = std::make_shared<MemoryCatalogue>(pod);
+    Refresher r({mem}, std::chrono::milliseconds(1), std::chrono::milliseconds(1));
+    r.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));   // inside the first sync
+    const auto t0 = std::chrono::steady_clock::now();
+    r.stop();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    chk(ms < 250, "cancel: stop() does not wait out a sync (" + std::to_string(static_cast<int>(ms)) + " ms)");
+    chk(pod->gets.load() < 16, "cancel: the rest of the sync was not fetched");
+    chk(mem->ready() && mem->size() > 0 && mem->size() < 400, "cancel: what was fetched is searchable");
+    pod->get_ms = 0;
+    mem->refresh();
+    chk(mem->size() == 400, "cancel: the flag is reset, the next refresh completes");
+
+    // the maze's skill listing hears it too, and says "not ok" so a catalogue keeps its last good cards
+    MazeSkills maze(pod);
+    maze.cancel(true);
+    chk(maze.list().empty() && !maze.ok(), "cancel: a cancelled maze listing is empty and not ok");
+}
+
+// a catalogue that only counts its refreshes
+struct Counting : Catalogue {
+    std::atomic<int> refreshes{0};
+    Kind kind() const override { return Kind::Memory; }
+    bool ready() const override { return true; }
+    uint64_t generation() const override { return 0; }
+    size_t size() const override { return 0; }
+    std::vector<Hit> search(const Query&, int) const override { return {}; }
+    std::optional<Body> open(const Uri&) override { return std::nullopt; }
+    std::string map() const override { return ""; }
+    void refresh() override { ++refreshes; }
+};
+
+// the refresher sleeps in the kernel between refreshes: nothing runs while it is idle, a poke is heard at once, a stop does not wait
+static void test_refresher_parks() {
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
+    auto cat = std::make_shared<Counting>();
+    Refresher r({cat}, std::chrono::minutes(10), std::chrono::minutes(10));
+    r.start();
+    auto t0 = Clock::now();
+    while (cat->refreshes < 1 && ms_since(t0) < 2000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    chk(cat->refreshes == 1, "refresher: the first refresh is at once");
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    chk(cat->refreshes == 1, "refresher: idle between refreshes (" + std::to_string(cat->refreshes.load()) + " refreshes in 250 ms)");
+    t0 = Clock::now();
+    r.poke();
+    while (cat->refreshes < 2 && ms_since(t0) < 2000) std::this_thread::sleep_for(std::chrono::microseconds(200));
+    chk(cat->refreshes == 2 && ms_since(t0) < 30, "refresher: a poke is heard at once (" + std::to_string(ms_since(t0)) + " ms)");
+    t0 = Clock::now();
+    r.stop();
+    chk(ms_since(t0) < 30, "refresher: stop() does not wait out the ten minutes (" + std::to_string(ms_since(t0)) + " ms)");
+    r.start();   // and it can start again
+    t0 = Clock::now();
+    while (cat->refreshes < 3 && ms_since(t0) < 2000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    chk(cat->refreshes == 3, "refresher: restarts");
+    r.stop();
+}
+
 static void test_memory_catalogue(const fs::path& tmp) {
     auto s = make_stack(tmp, "memcat");
     chk(s->memory->ready() && s->memory->size() == 3, "memory: three curated rows are cards");
@@ -653,6 +726,53 @@ static void test_router_deep(const fs::path& tmp) {
     s4->pod->is_up = false;
     auto down = s4->router->on(turn("restart the podman quadlet units"));
     chk(has(down.note, "podman-quadlet-ops") && s4->pod->recalls.load() == 0, "deep: pod down: the catalogue still answers, nothing waits");
+}
+
+// a recall still running when the next turn starts is not that turn's answer: it is let go and the new turn asks its own
+static void test_router_deep_turns(const fs::path& tmp) {
+    // the next turn waits for its own answer, never the old one
+    auto s = make_stack(tmp, "deepturns1");
+    s->pod->echo_query = true;
+    s->pod->first_recall_ms = 700;   // turn 1's recall outlives its turn
+    auto d1 = s->router->on(turn("QUESTIONONE how do the quadlet generators restart"));
+    chk(d1.deep_late && d1.deep.block.empty(), "stale: turn 1's slow recall is late");
+    auto d2 = s->router->on(turn("what did we decide earlier about QUESTIONTWO the kernel cache?"));
+    chk(has(d2.deep.block, "QUESTIONTWO"), "stale: turn 2 got a recall of its own question");
+    chk(!has(d2.deep.block, "QUESTIONONE") && !has(d2.note, "QUESTIONONE"), "stale: turn 2 was not given turn 1's recall");
+    chk(s->pod->recalls.load() == 2 && s->router->stats().deep_in.load() == 1, "stale: two recalls asked, one delivered in turn");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));   // the old recall ends
+    chk(!s->router->late(), "stale: the old recall is never delivered afterwards");
+
+    // the same through late(): turn 2's answer rides a later round, turn 1's never does
+    auto s2 = make_stack(tmp, "deepturns2");
+    s2->pod->echo_query = true;
+    s2->pod->first_recall_ms = 450;
+    s2->pod->recall_ms = 200;
+    s2->router->on(turn("QUESTIONONE how do the quadlet generators restart"));
+    auto e2 = s2->router->on(turn("QUESTIONTWO restart the kernel cache units"));
+    chk(e2.deep_late && !has(e2.note, "QUESTIONONE"), "stale: turn 2's own recall is late, not turn 1's");
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));   // turn 2's is in, turn 1's still running
+    const auto late = s2->router->late();
+    chk(late && has(late->note, "QUESTIONTWO") && !has(late->note, "QUESTIONONE"), "stale: late() brings turn 2's answer");
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));   // turn 1's ends
+    chk(!s2->router->late(), "stale: turn 1's answer never arrives");
+
+    // a recall that landed and that nobody has taken is handed over by the next mid-turn trigger, not replaced by a new question
+    auto s3 = make_stack(tmp, "deepkept");
+    s3->pod->echo_query = true;
+    s3->pod->first_recall_ms = 200;
+    auto k1 = s3->router->on(turn("QUESTIONKEPT restart the quadlet units"));
+    chk(k1.deep_late, "kept: the recall is late");
+    std::this_thread::sleep_for(std::chrono::milliseconds(320));   // it has landed
+    CallRecord same;
+    same.tool = "read_file";
+    same.digest = "read_file|{\"path\":\"/a\"}";
+    CallsFinished sc;
+    sc.calls = {same};
+    s3->router->on(sc);
+    auto k2 = s3->router->on(sc);   // the same call twice: the stall trigger asks for a deep recall
+    chk(has(k2.deep.block, "QUESTIONKEPT"), "kept: the landed recall rides the stall note");
+    chk(s3->pod->recalls.load() == 1, "kept: no second question while one was waiting (" + std::to_string(s3->pod->recalls.load()) + " recalls)");
 }
 
 static void test_router_midturn(const fs::path& tmp) {
@@ -818,10 +938,13 @@ int main() {
     test_triggers();
     test_deliverer();
     test_memory_catalogue(tmp);
+    test_cancel();
+    test_refresher_parks();
     test_router_turn(tmp);
     test_router_open_head(tmp);
     test_router_budget(tmp);
     test_router_deep(tmp);
+    test_router_deep_turns(tmp);
     test_router_midturn(tmp);
     test_router_tools(tmp);
     test_prompt();

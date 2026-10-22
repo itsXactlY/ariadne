@@ -58,7 +58,7 @@ RU := src/agent/retry_utils.cpp
 KVW := src/agent/kv_watermarks.cpp
 MS := src/agent/message_sanitization.cpp
 HOMEINIT := src/core/home_init.cpp src/core/default_config.cpp
-KNOW := src/know/types.cpp src/know/text.cpp src/know/bm25.cpp src/know/catalogue.cpp src/know/skills.cpp src/know/wiring.cpp src/know/signal.cpp src/know/working_set.cpp src/know/trigger.cpp src/know/deliver.cpp src/know/prompt.cpp src/know/memory_catalogue.cpp src/know/tool_catalogue.cpp src/know/router.cpp src/know/policy.cpp src/know/resolver.cpp src/know/tripwire.cpp
+KNOW := src/know/types.cpp src/know/text.cpp src/know/bm25.cpp src/know/catalogue.cpp src/know/skills.cpp src/know/wiring.cpp src/know/signal.cpp src/know/working_set.cpp src/know/trigger.cpp src/know/deliver.cpp src/know/prompt.cpp src/know/memory_catalogue.cpp src/know/tool_catalogue.cpp src/know/router.cpp src/know/policy.cpp src/know/resolver.cpp src/know/tripwire.cpp src/know/scan.cpp
 # what the know module links against: the skill scanner, sha256, config, the home; and the pod's side (recall, maze, deck)
 KNOWDEP := $(KNOW) $(SKILLS) $(SHA256) $(CONFIG) $(COREHOME)
 KNOWPOD := src/context/recall.cpp src/context/maze.cpp src/context/deck.cpp $(NET) $(MCP) $(TSEARCH) $(TOOLS)
@@ -70,17 +70,32 @@ src/core/default_config.cpp: examples/daedalus/config.yaml
 build/dd_home_tests: $(CORE) $(COREHOME) $(HOMEINIT) include/dd/core/home.hpp tests/core_home_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(HOMEINIT) tests/core_home_test.cpp -o build/dd_home_tests
 
+build/dd_snap_cell_tests: include/dd/core/snap_cell.hpp tests/core_snap_cell_test.cpp
+	$(CXX) $(CXXFLAGS) tests/core_snap_cell_test.cpp -pthread -o build/dd_snap_cell_tests
+
+build/dd_park_tests: include/dd/core/park.hpp tests/core_park_test.cpp
+	$(CXX) $(CXXFLAGS) tests/core_park_test.cpp -pthread -o build/dd_park_tests
+
+build/dd_know_scan_tests: src/know/scan.cpp include/dd/know/scan.hpp tests/know_scan_test.cpp
+	$(CXX) $(CXXFLAGS) src/know/scan.cpp tests/know_scan_test.cpp -o build/dd_know_scan_tests
+
+build/dd_know_bm25_tests: src/know/bm25.cpp src/know/text.cpp src/know/scan.cpp src/know/types.cpp include/dd/know/bm25.hpp include/dd/core/par.hpp tests/know_bm25_test.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp src/know/bm25.cpp src/know/text.cpp src/know/scan.cpp src/know/types.cpp tests/know_bm25_test.cpp -o build/dd_know_bm25_tests
+
+build/dd_know_tokenizer_tests: src/know/text.cpp src/know/scan.cpp include/dd/know/text.hpp include/dd/know/scan.hpp tests/know_tokenizer_test.cpp
+	$(CXX) $(CXXFLAGS) src/know/text.cpp src/know/scan.cpp tests/know_tokenizer_test.cpp -o build/dd_know_tokenizer_tests
+
 build/dd_know_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) tests/know_test.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) tests/know_test.cpp -pthread -lcurl -o build/dd_know_tests
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) tests/know_test.cpp -pthread -lcurl -o build/dd_know_tests
 
 build/dd_know_router_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) tests/know_router_test.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) tests/know_router_test.cpp -pthread -lcurl -o build/dd_know_router_tests
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) tests/know_router_test.cpp -pthread -lcurl -o build/dd_know_router_tests
 
 build/dd_know_rules_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT) $(wildcard include/dd/know/*.hpp) tests/know_rules_test.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT)) tests/know_rules_test.cpp -pthread -lcurl -o build/dd_know_rules_tests
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT)) tests/know_rules_test.cpp -pthread -lcurl -o build/dd_know_rules_tests
 
 build/dd: $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o build/dd
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o build/dd
 
 build/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o build/dd_agent
@@ -90,10 +105,10 @@ build/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGEN
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o build/dd_tui
 
 build/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o build/dd_maze_tests
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o build/dd_maze_tests
 
 build/dd_context_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/context_test.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/context_test.cpp -pthread -lcurl -o build/dd_context_tests
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/context_test.cpp -pthread -lcurl -o build/dd_context_tests
 
 build/dd_chat_stream_tests: $(CORE) src/agent/chat_stream.cpp include/dd/agent/chat_stream.hpp tests/chat_stream_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) src/agent/chat_stream.cpp tests/chat_stream_test.cpp -o build/dd_chat_stream_tests
@@ -325,6 +340,11 @@ test: build/dd_context_tests
 test: build/dd_maze_tests
 test: build/dd_json_tests
 test: build/dd_home_tests
+test: build/dd_snap_cell_tests
+test: build/dd_park_tests
+test: build/dd_know_scan_tests
+test: build/dd_know_tokenizer_tests
+test: build/dd_know_bm25_tests
 test: build/dd_know_tests
 test: build/dd_know_router_tests
 test: build/dd_know_rules_tests
@@ -400,6 +420,11 @@ test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_t
 	./build/dd_maze_tests
 	./build/dd_json_tests
 	./build/dd_home_tests
+	./build/dd_snap_cell_tests
+	./build/dd_park_tests
+	./build/dd_know_scan_tests
+	./build/dd_know_tokenizer_tests
+	./build/dd_know_bm25_tests
 	./build/dd_know_tests
 	./build/dd_know_router_tests
 	./build/dd_know_rules_tests

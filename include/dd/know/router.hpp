@@ -22,6 +22,7 @@
 #include "dd/context/memory.hpp"
 #include "dd/context/recall.hpp"
 #include "dd/core/mpsc.hpp"
+#include "dd/core/snap_cell.hpp"
 #include "dd/know/deliver.hpp"
 #include "dd/know/memory_catalogue.hpp"
 #include "dd/know/policy.hpp"
@@ -82,7 +83,7 @@ public:
 
 private:
     struct DeepJob {
-        std::atomic<bool> done{false};
+        std::atomic<uint32_t> done{0};   // 1 when `result` is in; the waiter parks on it
         context::Prefetch result;
         int turn = 0;
         bool delivered = false;   // the agent thread's
@@ -105,7 +106,7 @@ private:
     std::shared_ptr<DeepJob> inflight_;
     std::set<long> last_in_window_;
     std::vector<long> last_earlier_;
-    std::atomic<std::shared_ptr<const std::string>> reattach_{};
+    core::SnapCell<std::string> reattach_;
     Stats stats_;
 
     void drain_opened();

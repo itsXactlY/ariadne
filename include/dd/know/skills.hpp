@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "dd/context/memory.hpp"
+#include "dd/core/snap_cell.hpp"
 #include "dd/know/bm25.hpp"
 #include "dd/know/catalogue.hpp"
 
@@ -34,6 +35,7 @@ public:
     virtual std::vector<Card> list() = 0;                     // blocks; every skill this source holds
     virtual bool ok() const { return true; }                  // did the last list() reach its store?
     virtual size_t skipped() const { return 0; }              // rows in the last list() that were not skills
+    virtual void cancel(bool /*on*/) {}                       // abandon a list() in progress
     virtual std::optional<std::string> body(const Card& c) = 0;                                // the SKILL.md
     virtual std::optional<std::string> file(const Card&, const std::string& /*rel*/) { return std::nullopt; }
 };
@@ -52,7 +54,7 @@ private:
     };
     using Places = std::map<std::string, Place>;
     std::vector<std::filesystem::path> roots_;
-    std::atomic<std::shared_ptr<const Places>> places_{};
+    core::SnapCell<Places> places_;
 };
 
 class MazeSkills : public SkillSource {
@@ -62,14 +64,16 @@ public:
     std::vector<Card> list() override;
     bool ok() const override { return ok_.load(); }
     size_t skipped() const override { return skipped_.load(); }
+    void cancel(bool on) override { cancel_.store(on); }
     std::optional<std::string> body(const Card& c) override;
 
 private:
     std::shared_ptr<context::Memory> mem_;
+    std::atomic<bool> cancel_{false};
     using Paths = std::map<std::string, std::filesystem::path>;   // "<source>/<name>" -> the SKILL.md a pointer card names
     std::atomic<bool> ok_{false};
     std::atomic<size_t> skipped_{0};
-    std::atomic<std::shared_ptr<const Paths>> paths_{};
+    core::SnapCell<Paths> paths_;
 };
 
 class SkillCatalogue : public Catalogue {
@@ -85,7 +89,8 @@ public:
     SkillCatalogue(std::vector<std::shared_ptr<SkillSource>> sources, Options o);
 
     Kind kind() const override { return Kind::Skill; }
-    bool ready() const override { return snap_.load() != nullptr; }
+    bool ready() const override { return !snap_.empty(); }
+    bool wait_ready(std::chrono::milliseconds t) const override { return snap_.wait(t); }
     bool healthy() const override { return healthy_.load(); }
     uint64_t generation() const override;
     size_t size() const override;
@@ -93,6 +98,9 @@ public:
     std::optional<Body> open(const Uri& u) override;
     std::string map() const override;
     void refresh() override;
+    void cancel(bool on) override {
+        for (auto& s : sources_) s->cancel(on);
+    }
     float idf(const std::string& term) const override;
 
     std::optional<Card> find(const std::string& name) const;   // by uri id
@@ -118,7 +126,7 @@ private:
     };
     std::vector<std::shared_ptr<SkillSource>> sources_;
     Options opt_;
-    std::atomic<std::shared_ptr<const Snapshot>> snap_{};
+    core::SnapCell<Snapshot> snap_;
     std::atomic<bool> healthy_{false};
     std::atomic<uint64_t> gen_{0};
     std::vector<std::vector<Card>> last_good_;   // per source, what it last gave (the refresh thread's alone)

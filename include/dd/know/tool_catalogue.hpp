@@ -11,6 +11,7 @@
 #include <string>
 
 #include "dd/context/deck.hpp"
+#include "dd/core/snap_cell.hpp"
 #include "dd/know/bm25.hpp"
 #include "dd/know/catalogue.hpp"
 
@@ -22,8 +23,9 @@ public:
     explicit ToolCatalogue(const context::ToolDeck& deck) : deck_(deck) {}
 
     Kind kind() const override { return Kind::Tool; }
-    bool ready() const override { return snap_.load() != nullptr; }
-    uint64_t generation() const override { return snap_.load() ? 1 : 0; }
+    bool ready() const override { return !snap_.empty(); }
+    bool wait_ready(std::chrono::milliseconds t) const override { return snap_.wait(t); }
+    uint64_t generation() const override { return snap_.empty() ? 0 : 1; }
     size_t size() const override;
     std::vector<Hit> search(const Query& q, int k) const override;
     std::optional<Body> open(const Uri& u) override;
@@ -37,7 +39,7 @@ private:
         std::map<std::string, size_t> by_source;
     };
     const context::ToolDeck& deck_;
-    std::atomic<std::shared_ptr<const Snapshot>> snap_{};
+    core::SnapCell<Snapshot> snap_;
 };
 
 }  // namespace know

@@ -6,12 +6,15 @@
 #include <sstream>
 
 #include "dd/core/json.hpp"
+#include "dd/core/par.hpp"
 #include "dd/know/text.hpp"
 
 namespace dd {
 namespace know {
 
 namespace {
+
+constexpr size_t kParLines = 512;   // fewer cached rows than this are parsed in turn
 
 std::string squash(const std::string& s) {
     std::string o;
@@ -55,18 +58,26 @@ void MemoryCatalogue::load_cache() {
     cache_loaded_ = true;
     if (cache_.empty()) return;
     std::ifstream in(cache_);
-    std::string line;
-    while (std::getline(in, line)) {
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);) lines.push_back(std::move(line));
+    // every line is its own JSON document: parsed on all cores, gathered in order
+    std::vector<Row> parsed(lines.size());
+    const long n = static_cast<long>(lines.size());
+    [[maybe_unused]] const bool par = lines.size() >= kParLines;   // only the OpenMP clause reads it
+#pragma omp parallel for schedule(static) num_threads(par ? core::par_threads() : 1) if (par)
+    for (long i = 0; i < n; ++i) {
         try {
-            const core::Json j = core::json_parse(line);
+            const core::Json j = core::json_parse(lines[static_cast<size_t>(i)]);
             Row r;
             if (const core::Json* v = core::json_get(j, "id"); v && v->type == core::Json::Num) r.id = static_cast<long>(v->num);
             if (const core::Json* v = core::json_get(j, "label"); v && v->type == core::Json::Str) r.label = v->str;
             if (const core::Json* v = core::json_get(j, "gist"); v && v->type == core::Json::Str) r.gist = v->str;
-            if (r.id > 0 && !r.label.empty()) rows_[r.id] = std::move(r);
+            if (r.id > 0 && !r.label.empty()) parsed[static_cast<size_t>(i)] = std::move(r);
         } catch (...) {
         }
     }
+    for (auto& r : parsed)
+        if (r.id > 0) rows_[r.id] = std::move(r);
 }
 
 void MemoryCatalogue::save_cache() const {
@@ -88,7 +99,7 @@ void MemoryCatalogue::save_cache() const {
 
 void MemoryCatalogue::publish() {
     std::vector<Card> cards;
-    auto snap = std::make_shared<Snapshot>();
+    auto snap = std::make_unique<Snapshot>();
     for (const auto& [id, r] : rows_) {
         Card c;
         c.uri.kind = Kind::Memory;
@@ -104,7 +115,7 @@ void MemoryCatalogue::publish() {
     }
     snap->generation = gen_.fetch_add(1) + 1;
     snap->index = std::make_unique<Bm25f>(std::move(cards));
-    snap_.store(snap);
+    snap_.publish(std::move(snap));
 }
 
 void MemoryCatalogue::refresh() {
@@ -119,6 +130,7 @@ void MemoryCatalogue::refresh() {
     bool reached = true;
     for (const auto& prefix : prefixes()) {
         for (int off = 0; off < 6000; off += 200) {
+            if (cancel_.load()) return;
             const auto page = mem_->labels(prefix, off, 200);
             if (page.empty() && off == 0 && !mem_->up()) {
                 reached = false;
@@ -147,6 +159,7 @@ void MemoryCatalogue::refresh() {
     for (const auto& [id, label] : live)
         if (!rows_.count(id)) fresh.push_back(id);
     for (size_t i = 0; i < fresh.size(); i += 25) {
+        if (cancel_.load()) break;   // what was fetched is kept and saved below
         const std::vector<long> batch(fresh.begin() + static_cast<long>(i), fresh.begin() + static_cast<long>(std::min(fresh.size(), i + 25)));
         for (const auto& h : mem_->get(batch)) {
             Row r;
@@ -157,29 +170,29 @@ void MemoryCatalogue::refresh() {
             changed = true;
         }
     }
-    if (changed || !snap_.load()) {
+    if (changed || snap_.empty()) {
         publish();
         save_cache();
     }
 }
 
 uint64_t MemoryCatalogue::generation() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->generation : 0;
 }
 
 size_t MemoryCatalogue::size() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->size() : 0;
 }
 
 std::vector<Hit> MemoryCatalogue::search(const Query& q, int k) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->search(q, k) : std::vector<Hit>{};
 }
 
 float MemoryCatalogue::idf(const std::string& term) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->idf(term) : 0.0f;
 }
 
@@ -198,7 +211,7 @@ std::optional<Body> MemoryCatalogue::open(const Uri& u) {
 }
 
 std::string MemoryCatalogue::map() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     if (!s) return "";
     std::vector<std::pair<std::string, size_t>> groups(s->by_group.begin(), s->by_group.end());
     std::stable_sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.second > b.second; });

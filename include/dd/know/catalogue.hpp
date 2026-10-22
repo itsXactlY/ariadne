@@ -25,12 +25,15 @@ public:
     virtual Kind kind() const = 0;
     virtual bool ready() const = 0;                      // a snapshot has been published
     virtual bool healthy() const { return ready(); }     // the last refresh reached every source
+    // Sleeps until the first snapshot is published (woken by it, not polling) or the timeout; true when ready.
+    virtual bool wait_ready(std::chrono::milliseconds /*timeout*/) const { return ready(); }
     virtual uint64_t generation() const = 0;             // bumps when the card set changes
     virtual size_t size() const = 0;
     virtual std::vector<Hit> search(const Query& q, int k) const = 0;   // local, lock-free
     virtual std::optional<Body> open(const Uri& u) = 0;                 // may block; owns its deadline
     virtual std::string map() const = 0;                 // the awareness line: what is here, in groups
     virtual void refresh() = 0;                          // blocking: the owner picks the thread
+    virtual void cancel(bool /*on*/) {}                  // abandon a refresh in progress: the Refresher asks when it stops
     virtual float idf(const std::string&) const { return 0.0f; }   // for choosing a query's terms
 };
 
@@ -47,7 +50,7 @@ public:
     Refresher& operator=(const Refresher&) = delete;
 
     void start();
-    void poke() { poke_.store(true); }   // refresh now
+    void poke();   // refresh now
     void stop();
 
 private:
@@ -55,6 +58,7 @@ private:
     std::vector<std::shared_ptr<Catalogue>> cats_;
     std::chrono::milliseconds period_, retry_;
     std::thread th_;
+    std::atomic<uint32_t> wake_{0};   // bumped by poke() and stop(); the thread parks on it between refreshes
     std::atomic<bool> stop_{false}, poke_{false};
 };
 

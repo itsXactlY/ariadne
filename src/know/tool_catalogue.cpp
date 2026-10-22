@@ -9,8 +9,8 @@ namespace dd {
 namespace know {
 
 void ToolCatalogue::refresh() {
-    if (snap_.load()) return;
-    auto snap = std::make_shared<Snapshot>();
+    if (!snap_.empty()) return;
+    auto snap = std::make_unique<Snapshot>();
     std::vector<Card> cards;
     for (const auto& e : deck_.catalog()) {
         Card c;
@@ -24,21 +24,21 @@ void ToolCatalogue::refresh() {
         cards.push_back(std::move(c));
     }
     snap->index = std::make_unique<Bm25f>(std::move(cards));
-    snap_.store(snap);
+    snap_.publish(std::move(snap));
 }
 
 size_t ToolCatalogue::size() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->size() : 0;
 }
 
 std::vector<Hit> ToolCatalogue::search(const Query& q, int k) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->search(q, k) : std::vector<Hit>{};
 }
 
 float ToolCatalogue::idf(const std::string& term) const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     return s ? s->index->idf(term) : 0.0f;
 }
 
@@ -53,7 +53,7 @@ std::optional<Body> ToolCatalogue::open(const Uri& u) {
 }
 
 std::string ToolCatalogue::map() const {
-    const auto s = snap_.load();
+    const auto s = snap_.read();
     if (!s || s->index->size() == 0) return "";
     std::string out = "tools " + std::to_string(s->index->size()) + " deferred (behind tool_search):";
     size_t n = 0;

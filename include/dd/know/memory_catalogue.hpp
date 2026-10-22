@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "dd/context/memory.hpp"
+#include "dd/core/snap_cell.hpp"
 #include "dd/know/bm25.hpp"
 #include "dd/know/catalogue.hpp"
 
@@ -30,7 +31,8 @@ public:
     MemoryCatalogue(std::shared_ptr<context::Memory> mem, std::filesystem::path cache_file = {}, size_t page_bytes = 4200);
 
     Kind kind() const override { return Kind::Memory; }
-    bool ready() const override { return snap_.load() != nullptr; }
+    bool ready() const override { return !snap_.empty(); }
+    bool wait_ready(std::chrono::milliseconds t) const override { return snap_.wait(t); }
     bool healthy() const override { return healthy_.load(); }
     uint64_t generation() const override;
     size_t size() const override;
@@ -38,6 +40,7 @@ public:
     std::optional<Body> open(const Uri& u) override;
     std::string map() const override;
     void refresh() override;
+    void cancel(bool on) override { cancel_.store(on); }
     float idf(const std::string& term) const override;
 
     static const std::vector<std::string>& prefixes();
@@ -57,8 +60,9 @@ private:
     std::shared_ptr<context::Memory> mem_;
     std::filesystem::path cache_;
     size_t page_bytes_;
-    std::atomic<std::shared_ptr<const Snapshot>> snap_{};
+    core::SnapCell<Snapshot> snap_;
     std::atomic<bool> healthy_{false};
+    std::atomic<bool> cancel_{false};
     std::atomic<uint64_t> gen_{0};
     std::map<long, Row> rows_;   // the refresh thread's alone
     bool cache_loaded_ = false;

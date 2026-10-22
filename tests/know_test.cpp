@@ -557,6 +557,30 @@ static void test_catalogue_pod_down_and_up(const fs::path& tmp) {
     r.stop();
 }
 
+// a catalogue says when its first snapshot is there: the caller sleeps on it, it does not poll
+static void test_wait_ready(const fs::path& tmp) {
+    using Clock = std::chrono::steady_clock;
+    auto ms_since = [](Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
+    World w = make_world(tmp);
+    w.mem->is_up = false;
+    auto cat = std::make_shared<SkillCatalogue>(std::vector<std::shared_ptr<SkillSource>>{std::make_shared<MazeSkills>(w.mem)});
+    auto t0 = Clock::now();
+    chk(!cat->wait_ready(std::chrono::milliseconds(60)) && ms_since(t0) >= 55, "wait_ready: a catalogue that is not ready times out");
+    Refresher r({cat}, std::chrono::seconds(60), std::chrono::milliseconds(40));
+    r.start();
+    std::thread pod_returns([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        w.mem->is_up = true;
+    });
+    t0 = Clock::now();
+    const bool ok = cat->wait_ready(std::chrono::seconds(10));
+    chk(ok && ms_since(t0) < 1500 && cat->size() > 0, "wait_ready: returns when the first snapshot lands (" + std::to_string(ms_since(t0)) + " ms)");
+    t0 = Clock::now();
+    chk(cat->wait_ready(std::chrono::seconds(10)) && ms_since(t0) < 25, "wait_ready: a ready catalogue returns at once");
+    pod_returns.join();
+    r.stop();
+}
+
 static void test_open_pages(const fs::path& tmp) {
     const fs::path root = tmp / "pages" / "skills";
     std::string body;
@@ -697,6 +721,7 @@ int main() {
     test_disk_skills(tmp);
     test_catalogue_merge(tmp);
     test_catalogue_pod_down_and_up(tmp);
+    test_wait_ready(tmp);
     test_open_pages(tmp);
     test_replay();
 

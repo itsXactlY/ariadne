@@ -785,7 +785,6 @@ int main(int argc, char** argv) {
         "size) call run_terminal or read_file FIRST, e.g. `nvidia-smi --query-gpu=memory.used,memory.total "
         "--format=csv`, `free -h`, `curl -s http://127.0.0.1:8080/props`.";
     if (std::string cp = cfg.get_string("agent.system_prompt"); !cp.empty()) system_prompt += "\n\n" + cp;
-    std::unique_ptr<dd::know::Refresher> refresher;   // stopped before the catalogues go
     std::vector<std::unique_ptr<MCPClient>> mcps;  // stable addresses
     struct ServerNote {
         std::string url, text, mode;   // mode: the server's `instructions:` setting
@@ -914,17 +913,22 @@ int main(int argc, char** argv) {
         add_tool(e);
     }
     deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load"});
-    {   // the catalogues refresh on their own thread, again when a source comes back
-        std::vector<std::shared_ptr<dd::know::Catalogue>> cats;
-        if (skill_cat) cats.push_back(skill_cat);
-        if (memory_cat) cats.push_back(memory_cat);
-        cats.push_back(tool_cat);
-        refresher = std::make_unique<dd::know::Refresher>(std::move(cats));
-        refresher->start();
-        // the catalogue map goes into the system prompt, which never changes during a session: give the first look a moment
-        const auto t0 = std::chrono::steady_clock::now();
-        while (skill_cat && !skill_cat->ready() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(4))
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
+    // each catalogue fed by the maze refreshes on its own thread (the memory cache is searchable while the maze listing runs),
+    // again when a source comes back. Declared after the deck and the router, so they are stopped before either goes.
+    std::vector<std::shared_ptr<dd::know::Catalogue>> fed;
+    if (skill_cat) fed.push_back(skill_cat);
+    if (memory_cat) fed.push_back(memory_cat);
+    std::vector<std::unique_ptr<dd::know::Refresher>> refreshers;
+    for (const auto& c : fed) {
+        refreshers.push_back(std::make_unique<dd::know::Refresher>(std::vector<std::shared_ptr<dd::know::Catalogue>>{c}));
+        refreshers.back()->start();
+    }
+    {   // the catalogue map goes into the system prompt, which never changes during a session: give each first look a moment,
+        // asleep until it is published (not polling)
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        for (const auto& c : fed)
+            c->wait_ready(std::max(std::chrono::milliseconds(0), std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())));
     }
     const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");

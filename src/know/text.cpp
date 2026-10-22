@@ -1,6 +1,8 @@
 // src/know/text.cpp — impl of dd/know/text.hpp.
 #include "dd/know/text.hpp"
 
+#include "dd/know/scan.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -113,13 +115,14 @@ const std::unordered_set<std::string_view>& generic_path_words() {
     return s;
 }
 
-bool is_digit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
-bool is_upper(char c) { return std::isupper(static_cast<unsigned char>(c)) != 0; }
-bool is_lower(char c) { return std::islower(static_cast<unsigned char>(c)) != 0; }
-bool is_alnum(char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; }
+bool is_digit(char c) { return c >= '0' && c <= '9'; }
+bool is_upper(char c) { return c >= 'A' && c <= 'Z'; }
+bool is_lower(char c) { return c >= 'a' && c <= 'z'; }
+bool is_alnum(char c) { return is_digit(c) || is_upper(c) || is_lower(c); }
+char lower_of(char c) { return is_upper(c) ? static_cast<char>(c + 32) : c; }   // ASCII only, whatever the locale
 
 // "0.1.45", "v1.2", "3.14.7-rc1"
-bool version_shaped(const std::string& w) {
+bool version_shaped(std::string_view w) {
     size_t i = (w.size() > 1 && (w[0] == 'v' || w[0] == 'V') && is_digit(w[1])) ? 1 : 0;
     int dots = 0;
     bool digit_seen = false;
@@ -133,7 +136,7 @@ bool version_shaped(const std::string& w) {
 }
 
 // ENOENT, SIGSEGV, ERR_CONNECTION, E0433
-bool error_shaped(const std::string& w) {
+bool error_shaped(std::string_view w) {
     if (w.size() < 4) return false;
     if (w[0] == 'E' && std::all_of(w.begin() + 1, w.end(), is_digit) && w.size() <= 6) return true;
     int upper = 0;
@@ -145,18 +148,18 @@ bool error_shaped(const std::string& w) {
 }
 
 std::string lower_ascii(std::string s) {
-    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : s) c = lower_of(c);
     return s;
 }
 
 // Plural, -ing, -ed and a final e fold together (containers/container, deployed/deploy, caches/cache).
 // Only plain lowercase words; both sides of a match go through the same function, so it need not be right, only the same.
-std::string stem(std::string w) {
-    if (w.size() < 4 || !std::all_of(w.begin(), w.end(), [](char c) { return c >= 'a' && c <= 'z'; })) return w;
-    auto ends = [&](const char* suf) {
-        const std::string t(suf);
-        return w.size() >= t.size() && w.compare(w.size() - t.size(), t.size(), t) == 0;
-    };
+std::string stem(std::string_view in) {
+    if (in.size() < 4) return std::string(in);
+    for (char c : in)
+        if (!is_lower(c)) return std::string(in);
+    std::string w(in);
+    auto ends = [&](std::string_view suf) { return std::string_view(w).ends_with(suf); };
     auto undouble = [&] {
         const char c = w.back();
         if (w.size() >= 4 && w[w.size() - 2] == c && std::string_view("aeiouylsz").find(c) == std::string_view::npos) w.pop_back();
@@ -178,51 +181,125 @@ std::string stem(std::string w) {
     return w;
 }
 
+// A stopword is short and there are few: the table is bucketed by first byte and length, so a lookup compares a
+// handful of words instead of hashing the token.
+struct StopTable {
+    std::vector<std::vector<std::string_view>> by;   // [first byte * 32 + length]
+    StopTable() : by(256 * 32) {
+        for (std::string_view w : stopwords())
+            if (!w.empty() && w.size() < 32) by[static_cast<size_t>(static_cast<unsigned char>(w[0])) * 32 + w.size()].push_back(w);
+    }
+};
+
+// The bytes a word is trimmed of: before it ("(" "[" quotes ...) and after it (those and ". ! ?").
+struct TrimSet {
+    bool open[256] = {}, close[256] = {};
+    constexpr TrimSet() {
+        for (char c : std::string_view("()[]{}<>,;:\"'`")) open[static_cast<unsigned char>(c)] = close[static_cast<unsigned char>(c)] = true;
+        for (char c : std::string_view(".!?")) close[static_cast<unsigned char>(c)] = true;
+    }
+};
+constexpr TrimSet kTrim;
+
 }  // namespace
 
-bool is_stopword(std::string_view folded) { return stopwords().count(folded) > 0; }
+bool is_stopword(std::string_view folded) {
+    static const StopTable t;
+    if (folded.empty()) return false;
+    if (folded.size() >= 32) return stopwords().count(folded) > 0;
+    for (std::string_view w : t.by[static_cast<size_t>(static_cast<unsigned char>(folded[0])) * 32 + folded.size()])
+        if (w == folded) return true;
+    return false;
+}
 bool is_generic_path_word(std::string_view lower) { return generic_path_words().count(lower) > 0; }
 
 std::vector<std::string> terms_of(std::string_view text, bool keep_stop) {
     std::vector<std::string> out;
+    const size_t n = text.size();
+    out.reserve(n / 8 + 4);
+
+    // a version or an error code is also a term as written. The words are the runs between blanks; a 64-byte
+    // window at a time, the blanks come out of one classification as a mask, and a word is a view, not a copy.
+    {
+        auto word = [&](size_t b, size_t e) {
+            while (b < e && kTrim.open[static_cast<unsigned char>(text[b])]) ++b;
+            if (e - b < 3) return;   // no version or code is shorter
+            const char c = text[b];
+            if (!(is_digit(c) || is_upper(c) || c == '_' || c == 'v')) return;   // neither shape starts with another letter
+            while (e > b && kTrim.close[static_cast<unsigned char>(text[e - 1])]) --e;
+            const std::string_view w = text.substr(b, e - b);
+            if (w.size() < 3) return;
+            if (version_shaped(w) || error_shaped(w)) out.push_back(lower_ascii(std::string(w)));
+        };
+        size_t start = 0;
+        bool in_word = false;
+        for (size_t off = 0; off < n; off += 64) {
+            const size_t len = std::min<size_t>(64, n - off);
+            simd::Masks m;
+            simd::classify(text.data() + off, len, &m);
+            const uint64_t valid = len == 64 ? ~uint64_t{0} : (uint64_t{1} << len) - 1;
+            const uint64_t sp = m.space & valid;
+            // bit i: byte i is a blank and byte i-1 was not, or the other way round: a word ends or starts there
+            uint64_t flips = (sp ^ ((sp << 1) | (in_word ? 0u : 1u))) & valid;
+            while (flips) {
+                const unsigned i = static_cast<unsigned>(__builtin_ctzll(flips));
+                flips &= flips - 1;
+                if ((sp >> i) & 1) {
+                    word(start, off + i);
+                    in_word = false;
+                } else {
+                    start = off + i;
+                    in_word = true;
+                }
+            }
+        }
+        if (in_word) word(start, n);
+    }
+
     std::string cur, run;   // cur: the part (camelCase split); run: the whole alphanumeric run it sits in
     bool split_in_run = false;
-    auto emit = [&](const std::string& tok) {
-        const bool digits = std::all_of(tok.begin(), tok.end(), is_digit);
+    auto emit = [&](std::string_view tok, bool digits) {
         const bool keep = digits ? tok.size() >= 3 : tok.size() >= 2;
         if (keep && (keep_stop || !is_stopword(tok))) out.push_back(stem(tok));
     };
+    auto emit_str = [&](const std::string& tok) { emit(tok, std::all_of(tok.begin(), tok.end(), is_digit)); };
     auto flush = [&] {
-        if (!cur.empty()) emit(cur);
+        if (!cur.empty()) emit_str(cur);
         cur.clear();
     };
     auto end_run = [&] {
         flush();
-        if (split_in_run && run.size() >= 3) emit(run);   // BTQuant is also btquant
+        if (split_in_run && run.size() >= 3) emit_str(run);   // BTQuant is also btquant
         run.clear();
         split_in_run = false;
     };
 
-    // a version or an error code is also a term as written
-    {
-        size_t i = 0;
-        while (i < text.size()) {
-            while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r')) ++i;
-            size_t j = i;
-            while (j < text.size() && text[j] != ' ' && text[j] != '\t' && text[j] != '\n' && text[j] != '\r') ++j;
-            if (j > i) {
-                std::string w(text.substr(i, j - i));
-                while (!w.empty() && std::string_view("()[]{}<>,;:\"'`").find(w.front()) != std::string_view::npos) w.erase(w.begin());
-                while (!w.empty() && (std::string_view("()[]{}<>,;:\"'`.!?").find(w.back()) != std::string_view::npos)) w.pop_back();
-                if (version_shaped(w) || error_shaped(w)) out.push_back(lower_ascii(w));
-            }
-            i = j;
-        }
-    }
-
     size_t i = 0;
     char prev = 0;   // the last letter's case: 'A' upper, 'a' lower or other, 0 at a break
-    while (i < text.size()) {
+    while (i < n) {
+        // at a boundary an ASCII word begins: when it has no camelCase seam and ends at an ASCII byte (or the
+        // end), it is one term, taken straight from the text with no per-character work
+        if (cur.empty() && is_alnum(text[i])) {
+            simd::Masks32 m;
+            simd::classify32(text.data() + i, std::min<size_t>(32, n - i), &m);
+            const unsigned len = m.alnum == ~uint32_t{0} ? 32u : static_cast<unsigned>(__builtin_ctz(~m.alnum));
+            if (len < 32 && (i + len == n || !((m.high >> len) & 1))) {
+                const uint32_t bits = (uint32_t{1} << len) - 1;
+                const uint32_t up = m.upper & bits, lo = m.lower & bits;
+                const uint32_t seams = (up & ((~up & bits) << 1)) | (up & (up << 1) & (lo >> 1));   // readFile, HTTPServer
+                if (!seams) {
+                    char buf[32];
+                    std::string_view tok = text.substr(i, len);
+                    if (up) {
+                        for (unsigned k = 0; k < len; ++k) buf[k] = static_cast<char>(text[i + k] | (((up >> k) & 1u) << 5));
+                        tok = std::string_view(buf, len);
+                    }
+                    emit(tok, (up | lo) == 0);
+                    i += len;
+                    continue;
+                }
+            }
+        }
         const size_t at = i;
         const uint32_t cp = next_cp(text, i);
         if (cp < 0x80) {
@@ -234,13 +311,13 @@ std::vector<std::string> terms_of(std::string_view text, bool keep_stop) {
             }
             // camelCase: readFile -> read file, HTTPServer -> http server
             if (is_upper(c) && !cur.empty()) {
-                const bool next_lower = i < text.size() && is_lower(text[i]);
+                const bool next_lower = i < n && is_lower(text[i]);
                 if (prev == 'a' || (prev == 'A' && next_lower)) {
                     flush();
                     split_in_run = true;
                 }
             }
-            const char l = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const char l = lower_of(c);
             cur.push_back(l);
             run.push_back(l);
             prev = is_upper(c) ? 'A' : 'a';

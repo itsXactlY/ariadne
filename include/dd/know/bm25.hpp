@@ -23,6 +23,7 @@ struct Bm25fParams {
     float w_name = 8.0f, w_tags = 3.0f, w_group = 1.5f, w_gist = 1.0f;
     float b_name = 0.2f, b_tags = 0.2f, b_group = 0.0f, b_gist = 0.75f;
     float k1 = 2.0f;
+    size_t par_docs = 512;   // a catalogue of at least this many cards is indexed in parallel (OpenMP); smaller ones never wake a thread
 };
 
 class Bm25f {
@@ -39,10 +40,15 @@ private:
         uint32_t doc;
         float tf;   // weighted over the fields, length-normalised
     };
+    struct Entry {
+        std::vector<Posting> list;   // by doc, ascending
+        float idf = 0.0f;
+    };
+    using Shard = std::unordered_map<std::string, Entry>;
+    const Entry* entry(const std::string& term) const;
     Bm25fParams p_;
     std::vector<Card> cards_;
-    std::unordered_map<std::string, std::vector<Posting>> postings_;
-    std::unordered_map<std::string, float> idf_;
+    std::vector<Shard> shards_;   // one, or kShards when built in parallel: a term lives in hash(term) % size
 };
 
 }  // namespace know

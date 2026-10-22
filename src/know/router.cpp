@@ -9,6 +9,7 @@
 #include <thread>
 
 #include "dd/core/json.hpp"
+#include "dd/core/park.hpp"
 #include "dd/know/text.hpp"
 
 namespace dd {
@@ -71,11 +72,11 @@ void Router::drain_opened() {
 }
 
 void Router::publish_reattach() {
-    reattach_.store(std::make_shared<const std::string>(Deliverer::reattach(ws_.in_use(Kind::Skill, 2))));
+    reattach_.publish(std::make_unique<const std::string>(Deliverer::reattach(ws_.in_use(Kind::Skill, 2))));
 }
 
 std::string Router::reattach() const {
-    const auto s = reattach_.load();
+    const auto s = reattach_.read();
     return s ? *s : std::string();
 }
 
@@ -118,14 +119,17 @@ std::vector<std::string> Router::map() const {
 
 void Router::submit_deep(const std::string& query) {
     if (!pod_ || query.empty()) return;
-    if (inflight_ && !inflight_->done.load(std::memory_order_acquire)) return;   // the pod serialises: one at a time
+    // one at a time within a turn, and this turn's recall that nobody has taken yet (running, or landed) is not replaced by a new
+    // question; an older turn's recall is not this turn's answer: it is let go (its thread ends, its result is dropped) and a fresh one is asked
+    if (inflight_ && inflight_->turn == ws_.turn() && !inflight_->delivered) return;
     auto job = std::make_shared<DeepJob>();
     job->turn = ws_.turn();
     inflight_ = job;
     const size_t chars = std::clamp<size_t>((policy_.max_turn_tokens > ws_.turn_tokens() ? policy_.max_turn_tokens - ws_.turn_tokens() : 0) * 4, 1200, 6000);
     std::thread([job, rec = recaller_, query, win = last_in_window_, earlier = last_earlier_, chars] {
         job->result = rec.run(query, win, earlier, chars);
-        job->done.store(true, std::memory_order_release);
+        job->done.store(1, std::memory_order_release);
+        core::unpark(job->done);
     }).detach();
 }
 
@@ -249,12 +253,17 @@ Delivery Router::on(const Signal& s) {
         if (!pod_->up() && std::get_if<TurnStarted>(&s)) pod_->probe();
         if (pod_->up()) {
             submit_deep(deep_query);
-            if (inflight_ && wait_ms > 0) {
+            const bool mine = inflight_ && inflight_->turn == ws_.turn();   // never a recall an earlier turn asked
+            if (mine && wait_ms > 0) {
                 const auto end = Clock::now() + std::chrono::milliseconds(wait_ms);
-                while (!inflight_->done.load(std::memory_order_acquire) && Clock::now() < end && !(cancelled && cancelled()))
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                while (!inflight_->done.load(std::memory_order_acquire) && !(cancelled && cancelled())) {
+                    const auto left = end - Clock::now();
+                    if (left <= std::chrono::nanoseconds(0)) break;
+                    // asleep until the recall lands (woken at once); the slice is how often a cancel is looked for
+                    core::park(inflight_->done, 0, std::min<std::chrono::nanoseconds>(left, std::chrono::milliseconds(20)));
+                }
             }
-            if (inflight_ && inflight_->done.load(std::memory_order_acquire) && !inflight_->delivered) {
+            if (mine && inflight_->done.load(std::memory_order_acquire) && !inflight_->delivered) {
                 inflight_->delivered = true;
                 d.deep = inflight_->result;
                 if (!d.deep.block.empty()) {
@@ -263,7 +272,7 @@ Delivery Router::on(const Signal& s) {
                 }
                 ++stats_.deep_in;
                 deep_state = "in";
-            } else if (inflight_ && !inflight_->delivered) {
+            } else if (mine && !inflight_->delivered) {
                 d.deep_late = true;
                 deep_state = "late";
             }
