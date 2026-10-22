@@ -79,10 +79,12 @@ int main() {
     reg.register_tool(capped);
     CHECK(reg.get_max_result_size("capped") == 512);
 
-    // --- aliases ---
+    // --- aliases: only the alias name itself resolves; a wire name never borrows
+    //     a toolset because it starts with one ("pulse_x" is not an x_ tool) ---
     reg.register_toolset_alias("core_ext", "core");
     CHECK(reg.get_toolset_alias_target("core_ext") == "core");
-    CHECK(reg.get_toolset_for_tool("core_ext_foo") == "core");  // alias prefix match
+    CHECK(reg.get_toolset_for_tool("core_ext") == "core");           // the alias itself
+    CHECK(reg.get_toolset_for_tool("core_ext_foo").empty());         // no prefix guessing
 
     // --- names / schema / emoji ---
     auto names = reg.get_all_tool_names();

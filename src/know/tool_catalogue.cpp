@@ -55,11 +55,16 @@ std::optional<Body> ToolCatalogue::open(const Uri& u) {
 std::string ToolCatalogue::map() const {
     const auto s = snap_.read();
     if (!s || s->index->size() == 0) return "";
+    // every source gets its line: a truncated list is read as the catalogue being
+    //     smaller than it is, and 4 slots cannot hold one line per connected pod
+    std::vector<std::pair<size_t, std::string>> by_size;
+    for (const auto& [src, k] : s->by_source) by_size.push_back({k, src});
+    std::sort(by_size.begin(), by_size.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); });
     std::string out = "tools " + std::to_string(s->index->size()) + " deferred (behind tool_search):";
-    size_t n = 0;
-    for (const auto& [src, k] : s->by_source) {
-        if (n++ == 4) break;
-        out += (n == 1 ? " " : " · ") + src + " " + std::to_string(k);
+    for (std::size_t i = 0; i < by_size.size(); ++i) {
+        if (i) out += (by_size.size() > 2 && i + 1 == by_size.size() ? " + " : " · ");
+        out += by_size[i].second + " " + std::to_string(by_size[i].first);
     }
     return out;
 }

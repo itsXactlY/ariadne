@@ -24,7 +24,7 @@ one enqueue. Learning is a second system beside the router that observes it and 
    │                                              ▼                            ▼
    │                                       EpisodeRecorder ─► Detector ─► Author ─► Reviewer ─► Lifecycle
    │                                                                                                │
-   └── Overlay (SnapCell snapshot: priors, learned terms) ◄── Curator ◄────────────────────────────┘
+   └── Overlay (SnapCell snapshot: priors, learned terms) ◄── Curator ◄─────────────────────────────┘
                                                               └─► SkillSink ─► LearnedSkills (a SkillSource)
 ```
 

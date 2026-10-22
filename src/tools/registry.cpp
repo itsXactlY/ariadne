@@ -20,6 +20,12 @@ void ToolRegistry::register_tool(const ToolEntry& entry) {
     tools_[entry.name] = entry;
     if (entry.check_fn && !toolset_checks_.count(entry.toolset))
         toolset_checks_[entry.toolset] = entry.check_fn;
+    // An MCP server has one entry per tool, all under the server's name as toolset.
+    // That name also becomes an alias for itself, so the requirement check and the
+    // availability map see the server even after every one of its tools is gone:
+    // a dead server is then a visible error, not silently invisible.
+    if (!entry.toolset.empty() && !toolset_aliases_.count(entry.toolset))
+        toolset_aliases_[entry.toolset] = entry.toolset;
     ++generation_;
 }
 
@@ -59,9 +65,11 @@ std::string ToolRegistry::get_toolset_alias_target(const std::string& alias) con
 std::string ToolRegistry::get_toolset_for_tool(const std::string& name) const {
     auto it = tools_.find(name);
     if (it != tools_.end()) return it->second.toolset;
-    for (const auto& [alias, target] : toolset_aliases_) {
-        if (name.rfind(alias + "_", 0) == 0 || name == alias) return target;
-    }
+    // Only the explicit aliases resolve a prefix: wire names carry their own
+    // separators (`mazemaker_recall` is a mazemaker tool, not a `maze` one), so
+    // guessing from a leading underscore turns every snake_case MCP name into
+    // a phantom member of a shorter toolset.
+    if (const auto a = toolset_aliases_.find(name); a != toolset_aliases_.end()) return a->second;
     return {};
 }
 
