@@ -58,6 +58,7 @@ RU := src/agent/retry_utils.cpp
 KVW := src/agent/kv_watermarks.cpp
 MS := src/agent/message_sanitization.cpp
 HOMEINIT := src/core/home_init.cpp src/core/default_config.cpp
+KNOW := src/know/types.cpp src/know/text.cpp src/know/bm25.cpp src/know/catalogue.cpp src/know/skills.cpp src/know/wiring.cpp
 
 # the embedded default config is examples/daedalus/config.yaml, byte for byte
 src/core/default_config.cpp: examples/daedalus/config.yaml
@@ -66,8 +67,11 @@ src/core/default_config.cpp: examples/daedalus/config.yaml
 build/dd_home_tests: $(CORE) $(COREHOME) $(HOMEINIT) include/dd/core/home.hpp tests/core_home_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(HOMEINIT) tests/core_home_test.cpp -o build/dd_home_tests
 
-build/dd: $(CORE) $(SKILLS) $(TOOLS) src/cli_main.cpp
-	$(CXX) $(CXXFLAGS) $(CORE) $(SKILLS) $(TOOLS) src/cli_main.cpp -o build/dd
+build/dd_know_tests: $(CORE) $(COREHOME) $(CONFIG) $(SKILLS) $(SHA256) $(KNOW) $(wildcard include/dd/know/*.hpp) tests/know_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(CONFIG) $(SKILLS) $(SHA256) $(KNOW) tests/know_test.cpp -pthread -o build/dd_know_tests
+
+build/dd: $(CORE) $(COREHOME) $(CONFIG) $(SKILLS) $(SHA256) $(KNOW) $(NET) $(MCP) src/context/maze.cpp $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(CONFIG) $(SKILLS) $(SHA256) $(KNOW) $(NET) $(MCP) src/context/maze.cpp src/cli_main.cpp -pthread -lcurl -o build/dd
 
 build/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o build/dd_agent
@@ -312,6 +316,7 @@ test: build/dd_context_tests
 test: build/dd_maze_tests
 test: build/dd_json_tests
 test: build/dd_home_tests
+test: build/dd_know_tests
 
 test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_tests build/dd_gateway_tests build/dd_agent_retry_tests build/dd_agent_misc_tests build/dd_agent_boundary_tests build/dd_agent_tape_tests build/dd_cron_tests build/dd_cron_jobs_tests build/dd_sticker_tests build/dd_pairing_tests build/dd_tools_security_tests build/dd_tools_interrupt_tests build/dd_debug_tests build/dd_budget_tests build/dd_tool_limits_tests build/dd_env_passthrough_tests build/dd_backend_helpers_tests build/dd_audio_container_tests build/dd_sha1_tests build/dd_sha256_tests build/dd_camofox_tests build/dd_terminal_hints_tests build/dd_threat_patterns_tests build/dd_schema_sanitizer_tests build/dd_url_safety_tests build/dd_osv_parse_tests build/dd_ansi_strip_tests build/dd_mcp_schema_cache_tests build/dd_delegation_schema_tests build/dd_patch_parser_tests build/dd_fuzzy_match_tests build/dd_todo_tests build/dd_tool_search_tests build/dd_website_policy_tests build/dd_gateway_authz_tests build/dd_channel_directory_tests build/dd_hooks_tests build/dd_mirror_tests build/dd_backend_kind_tests build/dd_errors_tests build/dd_ssl_guard_tests build/dd_retry_tests
 	./build/dd_tests
@@ -384,6 +389,7 @@ test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_t
 	./build/dd_maze_tests
 	./build/dd_json_tests
 	./build/dd_home_tests
+	./build/dd_know_tests
 
 clean:
 	-rm -rf build
