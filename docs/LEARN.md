@@ -250,3 +250,19 @@ Classes live in `include/dd/learn/` and `src/learn/`; the seams into `know` are 
 | Inspection | `inspect` (`status`, `why`, `export_jsonl`, `forget`), `dd learn ...`, `/learn` | `make learn-inspect-test` |
 
 Where things sit: the journal and snapshots in `<home>/learn/`, the curator's `report.md` beside them, learned skills in `<home>/skills/<category>/<name>/SKILL.md`, forgotten ones in `<home>/skills/.retired/` (the scanner skips that folder). `dd learn` reads the ledger without opening it for writing, so it is safe beside a running TUI; `forget` is the one writer and should not run at the same moment as a TUI that is learning. Switches: `learn.enabled`, `learn.feedback`, `learn.author`, `learn.max_drafts_per_day`, and an empty `<home>/learn/OFF` file.
+
+## 11. Later: forging with Mazemaker
+
+Not built, and not to be built before the template path has run on real agent work and been bug-fixed. The direction (operator, 2026-10-22):
+Mazemaker holds the whole session, conversation and reasoning, and already forges skills in the dream engine, so the better author is
+the maze, not the harness. The harness stays amnesic by design; it should hand the maze the *pointer* to an episode and take back a draft.
+
+What is already in place for it:
+- `Author` is an interface (`TemplateAuthor` is one implementation). A `MazeAuthor` takes the same `Detection` and returns the same `Draft`.
+- Everything after authoring is shared: `Reviewer` (secrets, duplicates, no-instruction rule), `SkillSink`, `Lifecycle`, the journal.
+- The detectors and the ledger already say which episodes are worth forging and how each skill fared afterwards; the maze can use both as signal.
+
+What it will need, and is not there yet:
+- The maze turn ids of an episode on the `Detection` (the Soaker knows them; the events do not carry them today).
+- A forge request the maze understands (episode ids in, a skill card out, through the dream path) and a deadline: the pod serialises calls.
+- A decision on who owns the card: a `skill:learned:*` row in the maze with the disk copy as a mirror, or the other way round.
