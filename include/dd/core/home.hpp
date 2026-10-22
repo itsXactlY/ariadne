@@ -48,6 +48,7 @@ struct Home {
     std::filesystem::path state() const { return root / "state"; }
     std::filesystem::path cache() const { return root / "cache"; }
     std::filesystem::path logs() const { return root / "logs"; }
+    std::filesystem::path learn() const { return root / "learn"; }
 };
 
 // The home for this run. Absolute, lexically normal.

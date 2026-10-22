@@ -20,7 +20,7 @@ std::unique_ptr<LearnService> LearnService::start(ServiceOptions opt, std::strin
     s->ledger_ = Ledger::open(s->opt_.dir, s->opt_.ledger, err);
     if (!s->ledger_) return nullptr;
     s->sink_ = std::make_shared<QueueSink>();
-    s->overlay_ = std::make_shared<LearnOverlay>();
+    s->overlay_ = s->opt_.overlay ? s->opt_.overlay : std::make_shared<LearnOverlay>();
     s->curator_ = std::make_unique<Curator>(s->overlay_);
     LearnService* self = s.get();
     s->observer_ = std::make_unique<Observer>([self](OutcomeRec&& o) {

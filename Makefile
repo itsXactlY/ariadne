@@ -60,6 +60,7 @@ MS := src/agent/message_sanitization.cpp
 HOMEINIT := src/core/home_init.cpp src/core/default_config.cpp
 KNOW := src/know/types.cpp src/know/text.cpp src/know/bm25.cpp src/know/catalogue.cpp src/know/skills.cpp src/know/wiring.cpp src/know/signal.cpp src/know/working_set.cpp src/know/trigger.cpp src/know/deliver.cpp src/know/prompt.cpp src/know/memory_catalogue.cpp src/know/tool_catalogue.cpp src/know/router.cpp src/know/policy.cpp src/know/resolver.cpp src/know/tripwire.cpp src/know/scan.cpp
 # what the know module links against: the skill scanner, sha256, config, the home; and the pod's side (recall, maze, deck)
+LEARN := $(wildcard src/learn/*.cpp) src/core/crc32c.cpp
 KNOWDEP := $(KNOW) $(SKILLS) $(SHA256) $(CONFIG) $(COREHOME)
 KNOWPOD := src/context/recall.cpp src/context/maze.cpp src/context/deck.cpp $(NET) $(MCP) $(TSEARCH) $(TOOLS)
 
@@ -101,8 +102,8 @@ build/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o build/dd_agent
 
 
-build/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o build/dd_tui
+build/dd_tui: $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o build/dd_tui
 
 build/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o build/dd_maze_tests

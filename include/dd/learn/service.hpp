@@ -39,6 +39,7 @@ struct ServiceOptions {
     Reviewer::SearchFn search;           // the catalogue, for the duplicate check
     std::function<void()> on_skill;      // a skill was written: ask the catalogue to refresh
     LedgerOptions ledger;
+    std::shared_ptr<LearnOverlay> overlay;   // made before the catalogues' first refresh; null: the service makes one
 };
 
 class LearnService {

@@ -33,6 +33,7 @@
 #include "dd/know/resolver.hpp"
 #include "dd/know/router.hpp"
 #include "dd/know/tripwire.hpp"
+#include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/registry.hpp"
@@ -915,6 +916,11 @@ int main(int argc, char** argv) {
     deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load"});
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
     if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call
+    // the router learns what was worth offering (priors, terms for the skills that were found by other words); the overlay
+    // must be in place before the first refresh, the service itself starts after the refreshers (it is stopped first)
+    const bool learn_on = !cfg.has("learn.enabled") || cfg.get_bool("learn.enabled");
+    auto learn_overlay = std::make_shared<dd::learn::LearnOverlay>();
+    if (learn_on && skill_cat) skill_cat->set_overlay(learn_overlay);
     // each catalogue fed by the maze refreshes on its own thread, again when a source comes back. Declared after the deck
     // and the router, so they are stopped before either goes.
     std::vector<std::unique_ptr<dd::know::Refresher>> refreshers;
@@ -929,6 +935,27 @@ int main(int argc, char** argv) {
         skill_cat->wait_ready(std::chrono::seconds(4));
     }
     if (memory_cat) start_refresher(memory_cat);
+    std::unique_ptr<dd::learn::LearnService> learner;
+    if (learn_on) {
+        dd::learn::ServiceOptions lo;
+        lo.dir = home.learn();
+        lo.skills_root = home.skills();
+        lo.overlay = learn_overlay;
+        lo.project_dir = std::filesystem::current_path().string();
+        if (const char* h = std::getenv("HOME")) lo.home_dir = h;
+        lo.feedback = !cfg.has("learn.feedback") || cfg.get_bool("learn.feedback");
+        lo.author = !cfg.has("learn.author") || cfg.get_bool("learn.author");
+        if (cfg.has("learn.max_drafts_per_day")) lo.max_drafts_per_day = static_cast<int>(cfg.get_int("learn.max_drafts_per_day"));
+        lo.search = [&router](const dd::know::Query& q) {   // the duplicate check asks the catalogue
+            std::string text;
+            for (const auto& t : q.terms) text += (text.empty() ? "" : " ") + t.text;
+            return router.find(text, {dd::know::Kind::Skill}, 5);
+        };
+        if (!refreshers.empty() && skill_cat) lo.on_skill = [r = refreshers.front().get()] { r->poke(); };
+        std::string lerr;
+        learner = dd::learn::LearnService::start(std::move(lo), &lerr);
+        if (learner) router.set_sink(learner->sink());
+    }
     const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
 
