@@ -641,6 +641,7 @@ void TapeEngine::after_tools() {
 // ---- turn end ----
 
 void TapeEngine::end_turn(const std::string& final_response, bool interrupted) {
+    if (router_) router_->end_turn();
     if (!interrupted && !final_response.empty() && soaker_)
         soaker_->turn(session_->id(), question_, final_response, session_->generation());
     // the final answer's thinking is never sent again this turn: soak it now

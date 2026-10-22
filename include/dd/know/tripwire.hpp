@@ -78,6 +78,7 @@ class TripwireGate : public agent::ToolGate {
 public:
     explicit TripwireGate(Tripwires& t) : trip_(t) {}
     std::optional<std::string> veto(const core::ToolCall& call) override;
+    std::function<void(const std::string& rule)> on_rule;   // once per rule that held a call (learning)
     std::function<void(const std::string& note)> on_fire;   // "⛔ rule podman-not-docker held podman ..."
 
 private:

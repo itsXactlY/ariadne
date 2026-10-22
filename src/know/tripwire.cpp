@@ -176,6 +176,8 @@ std::string Tripwires::veto_text(const std::vector<const Rule*>& rules) {
 std::optional<std::string> TripwireGate::veto(const core::ToolCall& call) {
     const auto fired = trip_.check(call);
     if (fired.empty()) return std::nullopt;
+    if (on_rule)
+        for (const Rule* r : fired) on_rule(r->name);
     if (on_fire) {
         std::string names;
         for (const Rule* r : fired) names += (names.empty() ? "" : ", ") + r->name;

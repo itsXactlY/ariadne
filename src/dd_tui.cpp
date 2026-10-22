@@ -998,6 +998,7 @@ int main(int argc, char** argv) {
         if (maze->up()) tripwires.load_maze(*maze);
     }
     tripwires.set_clock([&router] { return router.turn(); });
+    gate.on_rule = [&router](const std::string& r) { router.note_tripwire(r); };
     gate.on_fire = [&scene](const std::string& n) { scene.note(n); };
     engine.on_note = [&scene](const std::string& n) { scene.note(n); };
     engine.on_recall = [&scene](bool on) { scene.recall(on); };
