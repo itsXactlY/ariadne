@@ -40,6 +40,8 @@ public:
     // nullptr (and *err) when the directory cannot be used, or holds a snapshot from a newer version
     // (left untouched: learning stays off rather than damage it).
     static std::unique_ptr<Ledger> open(const std::filesystem::path& dir, LedgerOptions opt = {}, std::string* err = nullptr);
+    // Read-only: the newest snapshot and the journal tail folded into `out`; creates, truncates and deletes nothing.
+    static bool load_readonly(const std::filesystem::path& dir, Stats& out, Health* health = nullptr, std::string* err = nullptr);
     ~Ledger();
     Ledger(const Ledger&) = delete;
     Ledger& operator=(const Ledger&) = delete;

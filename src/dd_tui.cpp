@@ -62,6 +62,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -599,7 +600,7 @@ struct Editor {
 };
 
 static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/context", "/rebase",
-                                        "/resume", "/clear", "/new", "/interrupt", "/quit"};
+                                        "/resume", "/clear", "/new", "/learn", "/interrupt", "/quit"};
 
 static std::string trim_ws(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
@@ -1208,6 +1209,7 @@ int main(int argc, char** argv) {
         });
     };
 
+    std::function<void()> learn_pin;   // /learn: set where the learn service lives; null while learning is off
     auto effort_cmd = [&](const std::string& arg) {
         std::string levels;
         for (const auto& e : efforts) levels += (levels.empty() ? "" : " ") + e;
@@ -1241,7 +1243,14 @@ int main(int argc, char** argv) {
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
                            "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /context  /rebase  "
-                           "/tools  /turns N  /clear (new session)  /interrupt  /quit");
+                           "/tools  /turns N  /clear (new session)  /learn  /interrupt  /quit");
+            } else if (cmd == "/learn") {
+                if (learn_pin) {
+                    learn_pin();
+                    scene.note("learn: the recent work becomes a skill when this turn ends");
+                } else {
+                    scene.note("learning is off");
+                }
             } else if (cmd == "/tools") {
                 std::string all;
                 for (const auto& n : reg.get_all_tool_names()) all += (all.empty() ? "" : "  ") + n;

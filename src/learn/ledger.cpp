@@ -42,6 +42,33 @@ std::unique_ptr<Ledger> Ledger::open(const fs::path& dir, LedgerOptions opt, std
     return l;
 }
 
+bool Ledger::load_readonly(const fs::path& dir, Stats& out, Health* health, std::string* err) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        if (err) *err = "no ledger at " + dir.string();
+        return false;
+    }
+    SnapshotLoad snap = load_snapshot(dir);
+    if (snap.newer) {
+        if (err) *err = "snapshot from a newer version in " + dir.string();
+        return false;
+    }
+    uint64_t floor = 0;
+    out = Stats();
+    if (snap.snap) {
+        floor = snap.snap->last_seq;
+        out = std::move(snap.snap->stats);
+    }
+    const ReplayInfo info = Journal::replay(dir, floor, ~uint64_t{0}, [&](uint64_t, const Record& r) { out.apply(r); });
+    if (health) {
+        *health = Health();
+        health->recovered = info.records, health->replay_newer = info.newer, health->replay_undecodable = info.undecodable;
+        health->bad_segments = info.bad_segments, health->snapshots_corrupt = snap.corrupt;
+        health->last_seq = std::max(info.last_seq, floor);
+    }
+    return true;
+}
+
 Ledger::~Ledger() {
     if (journal_) journal_->sync();
 }

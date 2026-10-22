@@ -1,6 +1,6 @@
 # P5 — the knowledge router learns
 
-Status: 2026-10-22, design only. Nothing is built. Builds on P0–P4 (`docs/KNOWLEDGE.md`, merged into `main` at b9cc4af).
+Status: 2026-10-22, P5.0–P5.4 built on `feat/learn` (template authoring; probation promotion and the sidekick author are not). See section 10. Builds on P0–P4 (`docs/KNOWLEDGE.md`, merged into `main` at b9cc4af).
 
 ## 1. Why P5 needs its own architecture
 
@@ -235,3 +235,18 @@ an edit). Online weight updates inside a turn.
 2. **Where learned skills live**: `<home>/skills/learned/` plus a maze mirror (recommended), or the maze only?
 3. **Explicit feedback**: add `/good` and `/bad` on the last offered skill as a hard label for credit (cheap, high value), or stay fully implicit?
 4. **Probation threshold**: N=3 wins with 0 failures in 30 days proposed; tighter or looser?
+
+## 10. Built
+
+Classes live in `include/dd/learn/` and `src/learn/`; the seams into `know` are `know/event.hpp` (`Event`, `EventSink`, `Overlay`) and the router's `set_sink`, `end_turn`, `note_tripwire`.
+
+| Part | Headers | Tests (make target) |
+|---|---|---|
+| Durability | `core/crc32c`, `codec`, `journal`, `compactor`, `ledger` (`Ledger::open`, `Ledger::load_readonly`) | `build/dd_learn_ledger_tests` (+ `_asan`, `_tsan`) |
+| Credit | `credit` (`RuleCredit`), `observer`, `sink` (`QueueSink`), `stats` (the fold), `decayed`, `record` | `make learn-credit-test` |
+| Read side | `affinity`, `curator`, `overlay` (`LearnOverlay`), `Bm25f` `learned` field, `SkillCatalogue::set_overlay` | `build/dd_learn_overlay_tests` |
+| Authoring | `episode`, `detector`, `author` (`TemplateAuthor`), `reviewer`, `skill_sink` | `build/dd_learn_author_tests` |
+| Service | `service` (`LearnService`, one thread, wired in `dd_tui`) | `make learn-service-test` |
+| Inspection | `inspect` (`status`, `why`, `export_jsonl`, `forget`), `dd learn ...`, `/learn` | `make learn-inspect-test` |
+
+Where things sit: the journal and snapshots in `<home>/learn/`, the curator's `report.md` beside them, learned skills in `<home>/skills/<category>/<name>/SKILL.md`, forgotten ones in `<home>/skills/.retired/` (the scanner skips that folder). `dd learn` reads the ledger without opening it for writing, so it is safe beside a running TUI; `forget` is the one writer and should not run at the same moment as a TUI that is learning. Switches: `learn.enabled`, `learn.feedback`, `learn.author`, `learn.max_drafts_per_day`, and an empty `<home>/learn/OFF` file.

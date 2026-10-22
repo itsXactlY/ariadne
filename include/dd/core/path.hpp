@@ -15,7 +15,7 @@ namespace core {
 struct WalkOptions {
     // Names that, if present as any path component, exclude the entry.
     std::vector<std::string> exclude_parts{".git", ".github", ".hub",
-                                           ".curator_backups"};
+                                           ".curator_backups", ".retired"};
     // Follow directory symlinks (default true — the fix).
     bool follow_symlinks = true;
 };

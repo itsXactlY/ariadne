@@ -7,12 +7,14 @@
 //   dd skills check [--strict]                          the census: bodyless, duplicate, note-like, no-gist cards
 //   dd replay FILE [--k N] [--show]                     prompts (jsonl {"text","want":[...]}, or one per line)
 //                                                       through the catalogue: offers, hits and misses per threshold
+//   dd learn status|why SKILL|report|forget SKILL|export   what the router has learned (read-only, except forget)
 //   dd import-daedalus [--from DIR] [--skills] [--skins] [--with-config]   copy from the Python Daedalus's home, once
 //
 // flags: --home DIR  --config FILE  --maze URL  --no-maze  (config.yaml sits beside the binary)
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -27,6 +29,7 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/know/policy.hpp"
+#include "dd/learn/inspect.hpp"
 #include "dd/know/skills.hpp"
 #include "dd/know/text.hpp"
 #include "dd/know/wiring.hpp"
@@ -343,11 +346,36 @@ int cmd_import(const Args& a) {
     return 0;
 }
 
+// ---- learn: the ledger beside the binary, shown or (forget) edited ----
+int cmd_learn(const Args& a) {
+    const char* usage = "usage: dd learn status | why SKILL | report | forget SKILL | export\n";
+    if (a.pos.empty()) { std::cerr << usage; return 1; }
+    const core::Home home = core::resolve_home(a.home, a.config);
+    const learn::InspectPaths p{home.learn(), home.skills()};
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const std::string& sub = a.pos[0];
+    learn::Result r;
+    if (sub == "status") r = learn::status(p, now);
+    else if (sub == "export") r = learn::export_jsonl(p, now);
+    else if (sub == "why" || sub == "forget") {
+        if (a.pos.size() < 2) { std::cerr << usage; return 1; }
+        r = sub == "why" ? learn::why(p, a.pos[1], now) : learn::forget(p, a.pos[1], now);
+    } else if (sub == "report") {
+        const std::string path = learn::report_path(p);
+        if (path.empty()) { std::cerr << "no report yet (the first curator pass writes " << (home.learn() / "report.md") << ")\n"; return 1; }
+        std::ifstream f(path);
+        std::cout << f.rdbuf();
+        return 0;
+    } else { std::cerr << usage; return 1; }
+    (r.ok ? std::cout : std::cerr) << r.text << (r.text.empty() || r.text.back() == '\n' ? "" : "\n");
+    return r.ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: dd <list|view|resolve|find|skills check|replay|import-daedalus> ...\n";
+        std::cerr << "usage: dd <list|view|resolve|find|skills check|replay|learn|import-daedalus> ...\n";
         return 1;
     }
     const std::string cmd = argv[1];
@@ -364,6 +392,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (cmd == "replay") return cmd_replay(a);
+    if (cmd == "learn") return cmd_learn(a);
     if (cmd == "import-daedalus") return cmd_import(a);
     std::cerr << "unknown command: " << cmd << "\n";
     return 1;
