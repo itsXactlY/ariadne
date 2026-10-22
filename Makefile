@@ -429,5 +429,7 @@ test: build/dd_tests build/dd_tools_tests build/dd_agent_tests build/dd_config_t
 	./build/dd_know_router_tests
 	./build/dd_know_rules_tests
 
+-include $(wildcard mk/learn-*.mk)
+
 clean:
 	-rm -rf build
