@@ -7,7 +7,7 @@ namespace fs = std::filesystem;
 namespace dd {
 namespace learn {
 
-int64_t LearnService::now() const { return static_cast<int64_t>(std::time(nullptr)); }
+int64_t LearnService::now() const { return opt_.clock ? opt_.clock() : static_cast<int64_t>(std::time(nullptr)); }
 
 std::unique_ptr<LearnService> LearnService::start(ServiceOptions opt, std::string* err) {
     std::error_code ec;
@@ -36,7 +36,8 @@ std::unique_ptr<LearnService> LearnService::start(ServiceOptions opt, std::strin
     ro.home_dir = s->opt_.home_dir;
     ro.project_dir = s->opt_.project_dir;
     s->reviewer_ = std::make_unique<Reviewer>(s->opt_.search ? s->opt_.search : Reviewer::SearchFn([](const know::Query&) { return std::vector<know::Hit>(); }), ro);
-    s->skill_sink_ = std::make_unique<SkillSink>(s->opt_.skills_root);
+    s->skill_sink_ = std::make_unique<SkillSink>(s->opt_.skills_root, [self] { return self->now(); });
+    s->lifecycle_ = std::make_unique<Lifecycle>(s->opt_.skills_root, s->opt_.lifecycle);
     s->author_ = TemplateAuthor(s->opt_.home_dir);
     s->next_curate_ = s->now();   // the first pass folds what the journal recovered
     s->th_ = std::thread([self] { self->run(); });
@@ -73,6 +74,7 @@ LearnService::Status LearnService::status() const {
     s.drafts = drafts_.load();
     s.rejected = rejected_.load();
     s.passes = passes_.load();
+    s.transitions = transitions_.load();
     s.overlay_version = overlay_->version();
     s.ledger = ledger_->health();
     return s;
@@ -128,6 +130,11 @@ void LearnService::author_now(uint32_t turn) {
 
 void LearnService::curate() {
     ledger_->tick();
+    if (opt_.author) {   // learned skills live and die by what the ledger says of them; priors follow the state
+        const auto changed = lifecycle_->step(ledger_->live(), now(), [this](const StateRec& r) { ledger_->record(Record{r}); });
+        transitions_ += changed.size();
+        if (!changed.empty() && opt_.on_skill) opt_.on_skill();
+    }
     if (opt_.feedback) {
         curator_->pass(ledger_->live(), now());
         curator_->write_report(ledger_->live(), now(), opt_.dir);

@@ -21,6 +21,7 @@
 #include "dd/learn/detector.hpp"
 #include "dd/learn/episode.hpp"
 #include "dd/learn/ledger.hpp"
+#include "dd/learn/lifecycle.hpp"
 #include "dd/learn/observer.hpp"
 #include "dd/learn/reviewer.hpp"
 #include "dd/learn/sink.hpp"
@@ -39,6 +40,8 @@ struct ServiceOptions {
     Reviewer::SearchFn search;           // the catalogue, for the duplicate check
     std::function<void()> on_skill;      // a skill was written: ask the catalogue to refresh
     LedgerOptions ledger;
+    std::function<int64_t()> clock;      // unix seconds; null: the wall clock (tests walk months)
+    LifecycleParams lifecycle;
     std::shared_ptr<LearnOverlay> overlay;   // made before the catalogues' first refresh; null: the service makes one
 };
 
@@ -56,7 +59,7 @@ public:
     void stop();
 
     struct Status {
-        uint64_t pushed = 0, dropped = 0, processed = 0, outcomes = 0, drafts = 0, rejected = 0, passes = 0;
+        uint64_t pushed = 0, dropped = 0, processed = 0, outcomes = 0, drafts = 0, rejected = 0, passes = 0, transitions = 0;
         uint64_t overlay_version = 0;
         Ledger::Health ledger;
     };
@@ -84,9 +87,10 @@ private:
     TemplateAuthor author_;
     std::unique_ptr<Reviewer> reviewer_;
     std::unique_ptr<SkillSink> skill_sink_;
+    std::unique_ptr<Lifecycle> lifecycle_;
     std::thread th_;
     std::atomic<bool> stop_{false}, curate_{false};
-    std::atomic<uint64_t> processed_{0}, outcomes_{0}, drafts_{0}, rejected_{0}, passes_{0};
+    std::atomic<uint64_t> processed_{0}, outcomes_{0}, drafts_{0}, rejected_{0}, passes_{0}, transitions_{0};
     int64_t next_curate_ = 0, day_ = 0;
     int day_drafts_ = 0;
 };
