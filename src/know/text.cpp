@@ -314,6 +314,8 @@ std::string squash(const std::string& s) {
     return o;
 }
 
+}  // namespace
+
 std::string utf8_head(const std::string& s, size_t n) {
     if (s.size() <= n) return s;
     while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
@@ -325,6 +327,8 @@ std::string utf8_tail(const std::string& s, size_t n) {
     while (from < s.size() && (static_cast<unsigned char>(s[from]) & 0xC0) == 0x80) ++from;
     return s.substr(from);
 }
+
+namespace {
 
 // "http://x/y" -> ""
 std::string without_urls(const std::string& s) {
@@ -349,7 +353,7 @@ const std::string& user_name() {
 }
 
 // The words a path is about: its project and file, never the generic folders on the way.
-void path_terms(const std::string& word, std::vector<Term>& out) {
+void path_terms(const std::string& word, std::vector<Term>& out, float scale = 1.0f) {
     std::vector<std::string> parts;
     std::string cur;
     for (char c : word) {
@@ -371,11 +375,11 @@ void path_terms(const std::string& word, std::vector<Term>& out) {
         float w = last ? 1.0f : 1.3f;   // a project folder names the topic more than a file does
         if (last) {
             if (const size_t dot = p.rfind('.'); dot != std::string::npos && dot > 0 && p.size() - dot <= 6) {
-                for (const auto& t : terms_of(p.substr(dot + 1))) out.push_back({t, 0.8f});
+                for (const auto& t : terms_of(p.substr(dot + 1))) out.push_back({t, 0.8f * scale});
                 p.resize(dot);
             }
         }
-        for (const auto& t : terms_of(p)) out.push_back({t, w});
+        for (const auto& t : terms_of(p)) out.push_back({t, w * scale});
     }
 }
 
@@ -456,6 +460,10 @@ Query Distiller::terms(const std::vector<std::pair<std::string, float>>& pieces,
     std::string text;
     for (const auto& [piece, weight] : pieces) {
         text += (text.empty() ? "" : " ") + piece;
+        if (piece.find('/') != std::string::npos) {   // a path: its project and file, not the folders on the way
+            path_terms(piece, all, weight);
+            continue;
+        }
         for (const auto& t : terms_of(piece)) all.push_back({t, weight});
     }
     return pick(std::move(all), std::move(text), idf);

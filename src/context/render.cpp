@@ -291,6 +291,7 @@ Renderer::Epoch Renderer::epoch(const std::vector<ItemPtr>& items, long current,
             for (const auto& c : m.tool_calls) ids.insert(c.id);
             size_t end = i + 1;
             while (end < work.size() && work[end].m.role == "tool" && ids.count(work[end].m.tool_call_id)) ++end;
+            while (end < work.size() && work[end].src && work[end].src->note) ++end;   // a retrieval note follows its batch and goes with it
             groups.emplace_back(i, end);
             i = end;
         }

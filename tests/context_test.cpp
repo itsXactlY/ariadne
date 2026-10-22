@@ -7,7 +7,11 @@
 #include "dd/context/maze.hpp"
 #include "dd/context/render.hpp"
 #include "dd/context/tape.hpp"
+#include "dd/know/router.hpp"
+#include "dd/know/skills.hpp"
 #include "dd/tools/registry.hpp"
+
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -534,6 +538,140 @@ int main() {
         for (const auto& n : notes) said = said || n.find("refused 61,447 tokens for a window of 61,337") != std::string::npos;
         chk(said, "the refusal is announced with the server's numbers");
         chk(!eng.on_overflow("HTTP 400: invalid tool arguments"), "another error is left to the caller");
+    }
+
+
+    // ---- the router in the engine: a note on the question, a note after a batch, only ever appended ----
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / ("dd_context_test_skills_" + std::to_string(::getpid()));
+        fs::remove_all(dir);
+        auto skill = [&](const std::string& name, const std::string& desc, const std::string& tags) {
+            fs::create_directories(dir / name);
+            std::ofstream(dir / name / "SKILL.md") << "---\nname: " << name << "\ndescription: " << desc << "\ntags: [" << tags << "]\n---\n\nbody of " << name << "\n";
+        };
+        skill("podman-deep-dive", "Debug podman networking, storage and symlink mess in containers", "podman, containers, symlink");
+        skill("git-branch-workflow", "Branch, rebase and merge safely; short commits", "git, branch, rebase");
+        auto cat = std::make_shared<know::SkillCatalogue>(std::vector<std::shared_ptr<know::SkillSource>>{std::make_shared<know::DiskSkills>(std::vector<fs::path>{dir})});
+        cat->refresh();
+        know::Policy pol;
+        pol.skills = know::Confidence{2, 0.5, 0.05, 0.99, 0};   // a two-card catalogue: the rule's shape, not the calibrated numbers
+        pol.auto_open = false;
+        know::Router router({cat, nullptr, nullptr}, pol, nullptr);
+
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, (fs::temp_directory_path() / "dd_context_test_spill_r").string(), &router);
+        std::vector<std::string> notes;
+        eng.on_note = [&](const std::string& n) { notes.push_back(n); };
+
+        eng.begin_turn("the podman symlink container mess needs to stop");
+        const auto p1 = eng.payload();
+        const Message& question = p1.back();
+        chk(question.role == "user" && question.content.find("needs to stop") != std::string::npos &&
+                question.content.find("<retrieval why=\"turn\">") != std::string::npos && question.content.find("podman-deep-dive") != std::string::npos,
+            "router/engine: the question carries the pointers, rendered once");
+        chk(eng.stats().skills == 2, "router/engine: the tape stats count the catalogue");
+
+        // a tool batch that moves the task to git
+        Message a;
+        a.role = "assistant";
+        core::ToolCall c;
+        c.id = "call_1";
+        c.name = "run_terminal";
+        c.arguments = "{\"cmd\":\"git rebase main\",\"intent\":\"Rebasing the branch before the merge\"}";
+        a.tool_calls.push_back(c);
+        eng.on_assistant(a);
+        Message r;
+        r.role = "tool";
+        r.tool_call_id = "call_1";
+        r.content = "{\"cmd\":\"git rebase main\",\"exit\":0,\"stdout\":\"ok\"}";
+        eng.on_tool_results({r});
+        eng.after_tools();
+        const auto p2 = eng.payload();
+        chk(is_prefix(wire(p1), wire(p2)), "router/engine: the request before a note is an exact prefix of the one after: the tape only grows");
+        chk(p2.size() == p1.size() + 3, "router/engine: assistant call, tool result, and one note");
+        const Message& note = p2.back();
+        chk(note.role == "user" && note.content.find("<retrieval why=\"shift") != std::string::npos && note.content.find("git-branch-workflow") != std::string::npos,
+            "router/engine: a hidden note after the results names the skill the task moved to");
+        chk(eng.session().items().back()->note && eng.session().items().back()->hidden, "router/engine: the note is a hidden item, flagged as a note");
+        chk(eng.session().current_user() == 0, "router/engine: a note is not a user turn: the question stays current");
+        bool announced = false;
+        for (const auto& n : notes) announced = announced || n.find("◈") != std::string::npos;
+        chk(announced, "router/engine: the operator sees that something was said");
+
+        // the next round on the same topic, a different call: nothing to add
+        Message a2 = a;
+        a2.tool_calls[0].id = "call_2";
+        a2.tool_calls[0].arguments = "{\"cmd\":\"git rebase --continue\",\"intent\":\"Rebasing the branch before the merge\"}";
+        Message r2 = r;
+        r2.tool_call_id = "call_2";
+        eng.on_assistant(a2);
+        eng.on_tool_results({r2});
+        eng.after_tools();
+        const auto p2b = eng.payload();
+        chk(p2b.size() == p2.size() + 2, "router/engine: the same topic again, another call: no second note");
+
+        // the very same call again: poking, not working: a redirect notice
+        Message a3 = a2;
+        a3.tool_calls[0].id = "call_3";
+        Message r3 = r2;
+        r3.tool_call_id = "call_3";
+        eng.on_assistant(a3);
+        eng.on_tool_results({r3});
+        eng.after_tools();
+        const auto p2c = eng.payload();
+        chk(p2c.size() == p2b.size() + 3 && p2c.back().content.find("<system-notice reason=\"repeated_call\">") != std::string::npos,
+            "router/engine: the same call twice in a row gets the redirect notice");
+
+        // a trivial turn looks nothing up
+        eng.begin_turn("ok");
+        const auto p3 = eng.payload();
+        chk(p3.back().content == "ok", "router/engine: ok is just ok");
+        fs::remove_all(dir);
+    }
+
+    // ---- a retrieval note goes with the batch it follows when that batch ages out ----
+    {
+        RenderPolicy pol;
+        pol.tool_group_ttl = 1;
+        pol.window_turns = -1;
+        Renderer rd(pol, [] { return true; }, nullptr, nullptr);
+        std::vector<ItemPtr> items;
+        auto add = [&](Message m, bool note = false) {
+            auto it = std::make_shared<Item>();
+            it->msg = std::move(m);
+            it->hidden = note;
+            it->note = note;
+            items.push_back(it);
+        };
+        Message q;
+        q.role = "user";
+        q.content = "question";
+        add(q);
+        add(assistant_calls(1, "read_file", "/a", ""));
+        add(tool_result(1, "first result"));
+        Message n1;
+        n1.role = "user";
+        n1.content = "<retrieval why=\"shift: x\">OLD NOTE</retrieval>";
+        add(n1, true);
+        add(assistant_calls(2, "read_file", "/b", ""));
+        add(tool_result(2, "second result"));
+        Message n2 = n1;
+        n2.content = "<retrieval why=\"shift: y\">NEW NOTE</retrieval>";
+        add(n2, true);
+        const auto ep2 = rd.epoch(items, 0, "");
+        std::string all;
+        for (const auto& m : ep2.rendered) all += m.content + "\n";
+        chk(all.find("[aged out of context]") != std::string::npos && all.find("first result") == std::string::npos, "aged notes: the older batch collapsed");
+        chk(all.find("OLD NOTE") == std::string::npos, "aged notes: its note left with it");
+        chk(all.find("NEW NOTE") != std::string::npos && all.find("second result") != std::string::npos, "aged notes: the newest batch keeps its note");
     }
 
     if (g_fail) std::printf("%d FAILED\n", g_fail);

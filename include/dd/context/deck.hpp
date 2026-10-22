@@ -36,6 +36,7 @@ public:
     int deferred() const { return static_cast<int>(deferred_.size()); }
     long deferred_tokens() const { return deferred_tokens_; }
     const std::vector<std::string>& deferred_names() const { return deferred_; }
+    const std::vector<tools::CatalogEntry>& catalog() const { return catalog_; }   // the deferred tools, as searchable entries
 
     std::string search(const core::Json& args) const;
     std::string describe(const core::Json& args) const;

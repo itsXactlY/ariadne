@@ -26,6 +26,7 @@ struct SkillSetup {
     std::vector<std::filesystem::path> roots;     // <home>/skills, then skills.external_dirs
     std::set<std::string> disabled;               // skills.disabled
     Bm25fParams bm25;                             // knowledge.rank.*
+    size_t page_bytes = 4200;                     // knowledge.page_bytes: one page of a skill, ~1.2k tokens
 };
 
 SkillSetup skill_setup(const core::Config& cfg, const core::Home& home);

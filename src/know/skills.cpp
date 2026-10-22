@@ -427,6 +427,10 @@ std::optional<Body> SkillCatalogue::open(const Uri& u) {
     const Owned& o = s->owned[it->second];
     std::optional<std::string> text = u.path.empty() ? o.src->body(o.orig) : o.src->file(o.orig, u.path);
     if (!text) return std::nullopt;
+    if (u.path.empty() && text->rfind("---", 0) == 0) {   // the SKILL.md's own frontmatter is the card's business, not the model's tokens
+        std::string rest = core::body(*text);
+        if (!rest.empty()) text = std::move(rest);
+    }
     return paginate(u, *text, opt_.page_bytes);
 }
 

@@ -195,8 +195,8 @@ static void test_terms() {
     chk(t.empty(), "terms: English stopwords out: " + join(t));
     t = terms_of("the and", true);
     chk(t.size() == 2, "terms: keep_stop keeps them");
-    t = terms_of("╭─alca@alca ❯ 🔴 ⇶ done");
-    chk(has(t, "alca") && has(t, "done") && !has(t, "─"), "terms: box drawing and emoji break words: " + join(t));
+    t = terms_of("╭─dev@box ❯ 🔴 ⇶ done");
+    chk(has(t, "dev") && has(t, "box") && has(t, "done") && !has(t, "─"), "terms: box drawing and emoji break words: " + join(t));
     t = terms_of("5 slots 8080 400");
     chk(!has(t, "5") && has(t, T("slots")) && has(t, "8080") && has(t, "400"), "terms: lone digits out, numbers of 3+ digits in: " + join(t));
     t = terms_of("naïve café ÉCOLE");
@@ -221,7 +221,7 @@ static void test_distiller() {
     // pasted terminal and code are not a question
     const std::string pasted =
         "why does this fail?\n"
-        "╭─alca@alca in ~ via v3.14.7 took 0s [🔴]\n"
+        "╭─dev@box in ~ via v3.14.7 took 0s [🔴]\n"
         "╰─λ sudo ufw status\n"
         "[sudo] Passwort für alca:\n"
         "{\"models\":[{\"name\":\"x\"}]}\n"
@@ -238,10 +238,10 @@ static void test_distiller() {
         "prose: capped, and the end (the ask) survives");
 
     // paths name the project and the file, never the generic folders on the way
-    Query q = d.text("build /home/alca/projects/jrwl-messenger/archives/tor-rework/src/main.cpp now");
+    Query q = d.text("build /home/dev/projects/quark-messenger/archives/tor-rework/src/main.cpp now");
     std::vector<std::string> terms;
     for (const auto& t : q.terms) terms.push_back(t.text);
-    chk(has(terms, "jrwl") && has(terms, "messenger") && has(terms, "tor") && has(terms, "rework") && has(terms, "cpp"), "distill: project folders kept: " + join(terms));
+    chk(has(terms, "quark") && has(terms, "messenger") && has(terms, "tor") && has(terms, "rework") && has(terms, "cpp"), "distill: project folders kept: " + join(terms));
     chk(!has(terms, "home") && !has(terms, "src") && !has(terms, "projects"), "distill: generic folders dropped: " + join(terms));
 
     // a quoted identifier is said on purpose
@@ -457,6 +457,13 @@ static void test_catalogue_merge(const fs::path& tmp) {
     chk(b && b->text == "builtin ascii art\n", "catalogue: the alias opens its own body");
     u.id = "ascii-art";
     chk(cat.open(u) && cat.open(u)->text == "local ascii art\n", "catalogue: the bare name opens the winner's body");
+    u.id = "podman-quadlet-ops";
+    {
+        const auto fm = cat.open(u);
+        chk(fm && fm->text.rfind("---", 0) != 0 && fm->text.find("name: podman-quadlet-ops") == std::string::npos && fm->text.find("# podman-quadlet-ops") != std::string::npos,
+            "catalogue: a SKILL.md opens without its frontmatter");
+    }
+    u.id = "ascii-art";
 
     u.id = "bodyless";
     auto bl = cat.find("bodyless");
@@ -622,11 +629,11 @@ static const std::vector<Case>& replay_cases() {
         {"deploye bitte die site, build und publish", {"site-deploy-ops"}},
         {"wie viel vram braucht der embedder im idle", {"vram-budget-audit"}},
         // the project is only named inside a path
-        {"ok after now we build /home/alca/projects/messenger/archives/tor-rework/ and push it", {"messenger-crypto-audit"}},
-        {"based on last work whats missing here? /home/alca/projects/llama-server/", {"llm-server-flags"}},
+        {"ok after now we build /home/dev/projects/messenger/archives/tor-rework/ and push it", {"messenger-crypto-audit"}},
+        {"based on last work whats missing here? /home/dev/projects/llama-server/", {"llm-server-flags"}},
         // a long message: the ask is buried in filler and pasted terminal
         {"so basically i was looking at all of this for a while and it is not what i expected, but fine\n"
-         "╭─alca@alca in ~ via v3.14.7 took 0s\n╰─λ podman ps\nCONTAINER ID  IMAGE  COMMAND  CREATED  STATUS  PORTS  NAMES\n"
+         "╭─dev@box in ~ via v3.14.7 took 0s\n╰─λ podman ps\nCONTAINER ID  IMAGE  COMMAND  CREATED  STATUS  PORTS  NAMES\n"
          "anyway the podman symlink container mess is back again and i need it gone",
          {"podman-deep-dive", "podman-quadlet-ops"}},
         // nothing in the catalogue is about these: no offer, and never the hub

@@ -26,6 +26,7 @@
 #include "dd/core/config.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
+#include "dd/know/policy.hpp"
 #include "dd/know/skills.hpp"
 #include "dd/know/text.hpp"
 #include "dd/know/wiring.hpp"
@@ -66,6 +67,7 @@ Args parse(int argc, char** argv) {
 
 struct Env {
     core::Home home;
+    Policy policy;
     SkillSetup setup;
     std::shared_ptr<context::Maze> maze;
     std::shared_ptr<SkillCatalogue> cat;
@@ -81,6 +83,7 @@ Env open_env(const Args& a) {
         try { cfg = core::load_config(cfg_path.string()); } catch (const std::exception& ex) { std::cerr << "config: " << ex.what() << "\n"; }
     }
     e.setup = skill_setup(cfg, e.home);
+    e.policy = Policy::from(cfg);
     const std::string url = a.no_maze ? std::string() : !a.maze.empty() ? a.maze : maze_url_of(cfg);
     if (!url.empty() && e.setup.maze) {
         e.maze = std::make_shared<context::Maze>(url);
@@ -90,13 +93,6 @@ Env open_env(const Args& a) {
     e.cat = make_skill_catalogue(e.setup, e.maze);
     e.cat->refresh();
     return e;
-}
-
-// at most n bytes, never inside a UTF-8 sequence
-std::string cut(const std::string& s, size_t n) {
-    if (s.size() <= n) return s;
-    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
-    return s.substr(0, n);
 }
 
 std::string kb(size_t bytes) {
@@ -127,7 +123,7 @@ int cmd_list(const Args& a) {
         if (!category.empty() && card.group != category) continue;
         if (limit > 0 && shown++ >= limit) break;
         std::cout << "  [" << (card.group.empty() ? "-" : card.group) << "] " << card.uri.id;
-        if (!names_only) std::cout << " — " << cut(card.gist, 120);
+        if (!names_only) std::cout << " — " << utf8_head(card.gist, 120);
         std::cout << "\n";
     }
     return 0;
@@ -166,7 +162,7 @@ int cmd_find(const Args& a) {
     const int k = a.k.empty() ? 8 : std::stoi(a.k);
     for (const auto& h : e.cat->search(q, k)) {
         std::printf("%5.2f  %-42s [%s · %s%s]  %s\n", h.score, h.card.uri.id.c_str(), h.card.group.empty() ? "-" : h.card.group.c_str(),
-                    h.card.source.c_str(), h.card.has_body ? (", " + kb(h.card.body_bytes)).c_str() : ", no body", cut(h.card.gist, 90).c_str());
+                    h.card.source.c_str(), h.card.has_body ? (", " + kb(h.card.body_bytes)).c_str() : ", no body", utf8_head(h.card.gist, 90).c_str());
         std::printf("       matched: %s\n", h.why.c_str());
     }
     return 0;
@@ -263,9 +259,33 @@ int cmd_replay(const Args& a) {
         }
         std::printf("%6.2f %7d %9d %7d %8d %8d\n", t, offers, right1, wrong, hitk, falsep);
     }
+    {   // the shipped rule: what the harness would really do with these prompts
+        const size_t n = e.cat->size();
+        const Confidence& c = e.policy.skills;
+        int offers = 0, hit3 = 0, right1 = 0, wrong = 0, falsep = 0, opened = 0, opened_right = 0, with_skill = 0, without = 0;
+        for (const auto& r : rows) {
+            const bool labeled = r.p->labeled;
+            if (labeled) ++(r.p->want.empty() ? without : with_skill);
+            if (r.hits.empty() || !c.offers(r.hits[0], n)) continue;
+            ++offers;
+            auto in_want = [&](const Hit& h) { return std::find(r.p->want.begin(), r.p->want.end(), h.card.uri.id) != r.p->want.end(); };
+            const bool opens = c.opens(r.hits[0], n);
+            if (opens) ++opened;
+            if (!labeled) continue;
+            if (r.p->want.empty()) { ++falsep; continue; }
+            if (in_want(r.hits[0])) { ++right1; if (opens) ++opened_right; } else ++wrong;
+            for (const auto& h : r.hits)
+                if (in_want(h)) { ++hit3; break; }
+        }
+        std::printf("\nthe policy (offer: matched>=%d, mass>=%.1f at %zu skills -> %.1f here, score>=%.2f; open: score>=%.2f):\n", c.min_matched, c.offer_mass,
+                    c.calibrated_at, c.needed(n), c.offer_score, c.open_score);
+        std::printf("  %d offers over %zu prompts: the right skill in the top %d for %d of %d that have one; right at 1: %d, wrong at 1: %d; "
+                    "false offers: %d of %d without one; opened for the model: %d (%d right)\n",
+                    offers, rows.size(), k, hit3, with_skill, right1, wrong, falsep, without, opened, opened_right);
+    }
     if (!a.show.empty())
         for (const auto& r : rows) {
-            std::string head = cut(r.p->text, 100);
+            std::string head = utf8_head(r.p->text, 100);
             std::replace(head.begin(), head.end(), '\n', ' ');
             std::printf("\n\"%s\"\n", head.c_str());
             if (r.p->labeled) {

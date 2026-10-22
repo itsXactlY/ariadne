@@ -26,6 +26,10 @@ std::vector<std::string> terms_of(std::string_view text, bool keep_stop = false)
 bool is_stopword(std::string_view folded);
 bool is_generic_path_word(std::string_view lower);
 
+// the first / last n bytes, never cutting inside a UTF-8 sequence
+std::string utf8_head(const std::string& s, size_t n);
+std::string utf8_tail(const std::string& s, size_t n);
+
 using IdfFn = std::function<float(const std::string&)>;   // 0: the index has no such term
 
 class Distiller {

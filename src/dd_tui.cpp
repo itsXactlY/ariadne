@@ -29,6 +29,11 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
+#include "dd/know/prompt.hpp"
+#include "dd/know/resolver.hpp"
+#include "dd/know/router.hpp"
+#include "dd/know/tripwire.hpp"
+#include "dd/know/wiring.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
@@ -154,9 +159,13 @@ static bool result_failed(const std::string& r) {
 // ---- filesystem tool handlers (real I/O) ----
 // Numbered lines "     N|text" from offset (1-based), limit lines at a time:
 // a result cut for the window says where to continue.
+static dd::know::Resolver* g_resolver = nullptr;   // skill://name, mem://id: one verb reads everything the catalogues hold
+
 static std::string h_read_file(const Json& args) {
     const Json* p = json_get(args, "path");
     if (!p || p->type != Json::Str) return jerr("path required");
+    if (g_resolver)
+        if (auto internal = g_resolver->read(p->str)) return *internal;
     std::ifstream f(p->str, std::ios::binary);
     if (!f) return jerr("cannot open " + p->str);
     long offset = 1, limit = 2000;
@@ -205,6 +214,8 @@ static Json fs_schema(const std::vector<std::string>& props, const std::string& 
                              {"description", jsp(json_str(desc))}});
         obj_set(props_map, k, one);
     }
+    obj_set(props_map, "intent", json_obj({{"type", jsp(json_str("string"))},
+                                           {"description", jsp(json_str("what you are doing, in a few words (optional)"))}}));
     Json req = json_arr();
     for (const auto& k : props) arr_push(req, json_str(k));
     Json parameters = json_obj({{"type", jsp(json_str("object"))},
@@ -626,7 +637,7 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
     std::string home_flag, config_flag, init_from;
-    bool init = false;
+    bool init = false, init_rules = false;
     std::vector<std::string> msg_words;
     bool after_dd = false;
     for (int i = 1; i < argc; ++i) {
@@ -636,6 +647,7 @@ int main(int argc, char** argv) {
         else if (a == "--home" && i + 1 < argc) home_flag = argv[++i];
         else if (a == "--config" && i + 1 < argc) config_flag = argv[++i];
         else if (a == "--init") init = true;
+        else if (a == "--rules") init_rules = true;
         else if (a == "--from" && i + 1 < argc) init_from = argv[++i];
         else config_flag = a;   // a bare path is the config, as it always was
     }
@@ -653,6 +665,18 @@ int main(int argc, char** argv) {
         if (init) {
             const bool wrote = ddcore::init_config(home, init_from, &why);
             std::cout << (wrote ? "wrote " : "kept ") << config_path << (wrote || why.empty() ? "" : "  (" + why + ")") << "\n";
+            if (init_rules) {   // the operator's first tripwires: opt-in, they are one person's habits
+                std::error_code rec;
+                std::filesystem::create_directories(home.rules(), rec);
+                int made = 0;
+                for (const auto& [name, text] : dd::know::Tripwires::starter_rules()) {
+                    const std::filesystem::path f = home.rules() / name;
+                    if (std::filesystem::exists(f, rec)) continue;
+                    std::ofstream(f, std::ios::binary) << text;
+                    ++made;
+                }
+                std::cout << "rules: " << made << " written to " << home.rules().string() << "\n";
+            }
             return wrote || std::filesystem::exists(config_path) ? 0 : 2;
         }
         std::error_code ec;
@@ -717,8 +741,10 @@ int main(int argc, char** argv) {
         ToolEntry e;
         e.name = "read_file";
         const std::string desc = "Read a text file as numbered lines (\"     N|text\"). Long files: page with offset "
-                                 "(first line, 1-based) and limit (lines, default 2000).";
-        Json props = json_obj({{"path", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("file to read"))}}))},
+                                 "(first line, 1-based) and limit (lines, default 2000). Also reads what the harness points to: "
+                                 "skill://name (a page at a time: #2, #all; its files: skill://name/references/x.md) and mem://id.";
+        Json props = json_obj({{"path", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("file to read, or skill://name, mem://id"))}}))},
+                               {"intent", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("what you are doing, in a few words (optional)"))}}))},
                                {"offset", jsp(json_obj({{"type", jsp(json_str("integer"))}, {"description", jsp(json_str("first line, 1-based"))}}))},
                                {"limit", jsp(json_obj({{"type", jsp(json_str("integer"))}, {"description", jsp(json_str("how many lines"))}}))}});
         e.schema = json_obj({{"description", jsp(json_str(desc))},
@@ -738,7 +764,9 @@ int main(int argc, char** argv) {
             arr_push(rt, json_str("cmd"));
             Json cmdp = json_obj({{"type", jsp(json_str("string"))},
                                   {"description", jsp(json_str("command to run"))}});
-            Json props = json_obj({{"cmd", jsp(std::move(cmdp))}});
+            Json props = json_obj({{"cmd", jsp(std::move(cmdp))},
+                                   {"intent", jsp(json_obj({{"type", jsp(json_str("string"))},
+                                                            {"description", jsp(json_str("what you are doing, in a few words (optional)"))}}))}});
             Json params = json_obj({{"type", jsp(json_str("object"))},
                                     {"properties", jsp(std::move(props))},
                                     {"required", jsp(std::move(rt))}});
@@ -755,10 +783,14 @@ int main(int argc, char** argv) {
     std::string system_prompt =
         "Tool use: for LIVE state (VRAM/GPU, RAM, disk, processes, files, the running model and its context "
         "size) call run_terminal or read_file FIRST, e.g. `nvidia-smi --query-gpu=memory.used,memory.total "
-        "--format=csv`, `free -h`, `curl -s http://127.0.0.1:8080/props`. Memory recall is only for past "
-        "decisions and history, never for current measurements.";
+        "--format=csv`, `free -h`, `curl -s http://127.0.0.1:8080/props`.";
     if (std::string cp = cfg.get_string("agent.system_prompt"); !cp.empty()) system_prompt += "\n\n" + cp;
+    std::unique_ptr<dd::know::Refresher> refresher;   // stopped before the catalogues go
     std::vector<std::unique_ptr<MCPClient>> mcps;  // stable addresses
+    struct ServerNote {
+        std::string url, text, mode;   // mode: the server's `instructions:` setting
+    };
+    std::vector<ServerNote> server_notes;
     std::string maze_url;                           // the server that answers mazemaker_recall
     if (const Json* srvs = cfg.get_map("mcp_servers"); srvs && srvs->type == Json::Obj) {
         for (const auto& [srvname, sroot] : srvs->obj) {
@@ -773,10 +805,10 @@ int main(int argc, char** argv) {
             auto mcp = std::make_unique<MCPClient>();
             mcp->url = u->str;
             try {
-                std::string instr = mcp->instructions();
-                if (!instr.empty()) {
-                    if (!system_prompt.empty()) system_prompt += "\n\n";
-                    system_prompt += instr;
+                // what to do with the server's own protocol text depends on whether it is the maze: decided after the loop
+                if (const std::string instr = mcp->instructions(); !instr.empty()) {
+                    const Json* ic = json_get(sv, "instructions");
+                    server_notes.push_back({u->str, instr, ic && ic->type == Json::Str ? ic->str : std::string()});
                 }
                 Json tl = mcp->list_tools();
                 std::size_t registered = 0;
@@ -823,6 +855,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    for (const auto& n : server_notes) {   // verbatim only when asked: the maze's protocol is the harness's contract below
+        const auto mode = dd::know::PromptComposer::instructions_mode(n.mode, n.url == maze_url);
+        if (const std::string text = dd::know::PromptComposer::server_instructions(mode, n.text); !text.empty())
+            system_prompt += (system_prompt.empty() ? "" : "\n\n") + text;
+    }
+
     // ---- the server, and what each request tells it ----
     dd::context::Endpoint ep(base_url);
     ep.probe();
@@ -850,34 +888,44 @@ int main(int argc, char** argv) {
     // ---- the maze: what ages out of the window comes back from here ----
     auto maze = std::make_shared<dd::context::Maze>(maze_url);
     if (maze->configured()) maze->probe();
-    // the skill catalogue lives in the maze: indexed once, matched locally, read back by id
-    dd::context::SkillIndex skills(maze);
-    if (maze->up()) skills.load_async();
+
+    // ---- what the harness looks up for the model: catalogues, one router, one verb to read them ----
+    const dd::know::SkillSetup skill_cfg = dd::know::skill_setup(cfg, home);
+    std::shared_ptr<dd::know::SkillCatalogue> skill_cat;
+    std::shared_ptr<dd::know::MemoryCatalogue> memory_cat;
+    if (skill_cfg.enabled) skill_cat = dd::know::make_skill_catalogue(skill_cfg, maze);
+    if (maze->configured()) memory_cat = std::make_shared<dd::know::MemoryCatalogue>(maze, home.cache() / "memory-cards.jsonl", skill_cfg.page_bytes);
+    auto tool_cat = std::make_shared<dd::know::ToolCatalogue>(deck);
+    dd::know::Router router({skill_cat, memory_cat, tool_cat}, dd::know::Policy::from(cfg), maze);
+    dd::know::Resolver resolver(router);
+    g_resolver = &resolver;
+    {
+        ToolEntry e;
+        e.name = "find";
+        e.schema = dd::know::Resolver::find_schema();
+        e.handler = [&resolver](const Json& a) { return resolver.find(a); };
+        add_tool(e);
+    }
     {
         ToolEntry e;
         e.name = "skill_load";
-        e.schema = json_obj({{"description", jsp(json_str(
-                                 "Read a skill's full instructions (SKILL.md) from mazemaker by name. The turn's memory "
-                                 "context names a fitting skill when there is one; any skill name works."))},
-                             {"parameters", jsp(json_obj({{"type", jsp(json_str("object"))},
-                                                          {"properties", jsp(json_obj({{"name", jsp(json_obj({{"type", jsp(json_str("string"))}}))}}))},
-                                                          {"required", jsp(json_arr({jsp(json_str("name"))}))}}))}});
-        e.handler = [&skills](const Json& a) {
-            const Json* n = json_get(a, "name");
-            if (!n || n->type != Json::Str || n->str.empty()) return jerr("name required");
-            if (!skills.ready()) return jerr("the skill index is still loading; try again in a moment");
-            std::string resolved;
-            const std::string text = skills.load(n->str, &resolved);
-            if (text.empty()) {
-                std::string near;
-                for (const auto& [sk, score] : skills.search(n->str, 3)) near += (near.empty() ? "" : ", ") + sk.name;
-                return jerr("no skill '" + n->str + "'" + (near.empty() ? "" : "; close: " + near));
-            }
-            return json_dump(json_obj({{"name", jsp(json_str(resolved))}, {"text", jsp(json_str(text))}}));
-        };
+        e.schema = dd::know::Resolver::skill_load_schema();
+        e.handler = [&resolver](const Json& a) { return resolver.skill_load(a); };
         add_tool(e);
     }
-    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "skill_load"});
+    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load"});
+    {   // the catalogues refresh on their own thread, again when a source comes back
+        std::vector<std::shared_ptr<dd::know::Catalogue>> cats;
+        if (skill_cat) cats.push_back(skill_cat);
+        if (memory_cat) cats.push_back(memory_cat);
+        cats.push_back(tool_cat);
+        refresher = std::make_unique<dd::know::Refresher>(std::move(cats));
+        refresher->start();
+        // the catalogue map goes into the system prompt, which never changes during a session: give the first look a moment
+        const auto t0 = std::chrono::steady_clock::now();
+        while (skill_cat && !skill_cat->ready() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(4))
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
     const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
 
@@ -916,25 +964,38 @@ int main(int argc, char** argv) {
     ec.turn_recall = !cfg.has("memory.turn_recall") || cfg.get_bool("memory.turn_recall");
     ec.prewarm = !cfg.has("compression.prewarm") || cfg.get_bool("compression.prewarm");
     if (const char* v = std::getenv("DD_FAST_LAYER")) ec.fast_layer_tokens = std::atol(v);   // tests force a rebase
-    if (maze->configured())
-        system_prompt +=
-            "\n\n## This harness and mazemaker are one memory\n"
-            "- Every turn the harness recalls once for your question and attaches the result to it as "
-            "<memory-context>: recalled memories, what the graph connects to them, extracted facts, earlier turns "
-            "of this session when you ask about them, and a fitting skill. That is step [1] RECALL FIRST of the "
-            "memory protocol, already done: when it answers, answer from it. Call mazemaker_recall only for what "
-            "the block lacks. Each memory there carries its id (#123) and is cut to a snippet: "
-            "mazemaker_get(memory_ids=[123]) reads the full text — never guess ids.\n"
-            "- The harness writes every finished turn (auto:turn:<session>) and your reasoning "
-            "(auto:reasoning:<session>) into mazemaker itself and chains them in the graph. Never save turn "
-            "transcripts; use mazemaker_remember only for distilled facts with curated labels (decision:, bug:, "
-            "fact:, invariant:, ops:, status:).\n"
-            "- When the window is rebuilt, the earlier turns are named by memory id: mazemaker_get(memory_ids=[…]) "
-            "reads them back at once, no search needed.\n"
-            "- Skills live in mazemaker: skill_load(name) reads a skill's full instructions.";
+    {   // one voice: the preamble, the operator's text and what a server asked for, then the harness's side of retrieval
+        dd::know::PromptComposer composer;
+        composer.section(system_prompt);
+        dd::know::PromptComposer::Contract contract;
+        contract.memory = maze->configured();
+        contract.skills = skill_cat != nullptr;
+        composer.section(dd::know::PromptComposer::retrieval_contract(contract));
+        composer.section(dd::know::PromptComposer::catalogue_map(router.map()));
+        if (std::ifstream bf(home.root / "brief.md", std::ios::binary); bf) {   // the operator's own standing notes, if there are any
+            std::string brief((std::istreambuf_iterator<char>(bf)), std::istreambuf_iterator<char>());
+            if (brief.size() > 3200) brief.resize(3200);
+            composer.section(brief);
+        }
+        system_prompt = composer.str();
+    }
     const bool soak = maze->configured() && !std::getenv("DD_NO_SOAK");   // test runs: recall, never write
     dd::context::TapeEngine engine(ec, system_prompt, ep, maze, soak ? &soaker : nullptr, deck, llm,
-                                   work + "/spill", &skills);
+                                   work + "/spill", &router);
+    router.set_ratio([&engine] { return engine.ratio(); });   // notes are counted in the server's tokens
+    router.cancelled = [&agent] { return agent.interrupt_requested.load(); };
+    router.on_log = [path = (home.logs() / "knowledge.jsonl").string()](const std::string& line) {   // what was offered, and what was opened
+        std::ofstream(path, std::ios::app) << line << "\n";
+    };
+    // rules that cost nothing until a pattern fires: ./rules/*.md and the maze's rule: rows
+    dd::know::Tripwires tripwires;
+    dd::know::TripwireGate gate(tripwires);
+    if (!cfg.has("knowledge.rules") || cfg.get_bool("knowledge.rules")) {
+        tripwires.load_dir(home.rules());
+        if (maze->up()) tripwires.load_maze(*maze);
+    }
+    tripwires.set_clock([&router] { return router.turn(); });
+    gate.on_fire = [&scene](const std::string& n) { scene.note(n); };
     engine.on_note = [&scene](const std::string& n) { scene.note(n); };
     engine.on_recall = [&scene](bool on) { scene.recall(on); };
     engine.on_prefetch = [&scene](const dd::context::Prefetch& p, const std::string& summary) {
@@ -1001,6 +1062,7 @@ int main(int argc, char** argv) {
     agent.registry = &reg;
     agent.llm = &llm;
     agent.context = &engine;
+    agent.gate = &gate;
 
     const int tool_count = static_cast<int>(reg.get_all_tool_names().size());
     {

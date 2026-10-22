@@ -1,6 +1,7 @@
 // src/know/wiring.cpp — impl of dd/know/wiring.hpp.
 #include "dd/know/wiring.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace dd {
@@ -32,6 +33,7 @@ SkillSetup skill_setup(const core::Config& cfg, const core::Home& home) {
     num("knowledge.rank.group", s.bm25.w_group);
     num("knowledge.rank.gist", s.bm25.w_gist);
     num("knowledge.rank.k1", s.bm25.k1);
+    if (cfg.has("knowledge.page_bytes")) s.page_bytes = static_cast<size_t>(std::max<long long>(1000, cfg.get_int("knowledge.page_bytes")));
     return s;
 }
 
@@ -42,6 +44,7 @@ std::shared_ptr<SkillCatalogue> make_skill_catalogue(const SkillSetup& s, std::s
     SkillCatalogue::Options o;
     o.disabled = s.disabled;
     o.bm25 = s.bm25;
+    o.page_bytes = s.page_bytes;
     return std::make_shared<SkillCatalogue>(std::move(sources), std::move(o));
 }
 

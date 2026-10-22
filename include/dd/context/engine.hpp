@@ -35,6 +35,7 @@
 #include "dd/context/recall.hpp"
 #include "dd/context/render.hpp"
 #include "dd/context/tape.hpp"
+#include "dd/know/router.hpp"
 
 namespace dd {
 namespace context {
@@ -69,7 +70,7 @@ class TapeEngine : public agent::ContextEngine {
 public:
     TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Memory> memory,
                Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root,
-               const SkillIndex* skills = nullptr);
+               know::Router* router = nullptr);
     ~TapeEngine() override;
 
     // ---- agent loop (the worker thread) ----
@@ -97,6 +98,7 @@ public:
     TapeStats stats() const;
     void sync() { drain_ledger(); }              // between turns: take in what the soak worker wrote
     const Session& session() const { return *session_; }
+    double ratio() const { return render_.ratio(); }   // server tokens per chars/4, as measured
 
     std::function<void(const std::string&)> on_note;      // any thread
     std::function<void(const TapeStats&)> on_stats;
@@ -118,8 +120,10 @@ private:
     Endpoint& ep_;
     std::shared_ptr<Memory> mem_;
     Soaker* soaker_;
-    const SkillIndex* skills_;
-    Recaller recaller_;
+    know::Router* router_;   // what to look up, and when; null: the pod's recall at a rebase only
+    Recaller recaller_;      // the rebase's recall when there is no router
+    std::vector<core::ToolCall> pending_calls_;   // the assistant's calls, each to meet its result
+    std::vector<know::CallRecord> records_;       // this round's calls and what came back
     std::vector<LedgerEntry> ledger_;   // this session's nodes in the graph, oldest first
     std::string last_recall_;
     ToolDeck& deck_;
@@ -144,6 +148,8 @@ private:
     long high_at() const;
     std::string level(long pool) const;
     void soak(Item& item);
+    void append_note(const std::string& text);   // a hidden user item after the tool results, rendered once
+    void speak_after_tools();                    // the router's notes for a finished batch
     void note(const std::string& s) const;
     void emit() const;
     void watermark(bool turn_start);

@@ -1,5 +1,5 @@
 // dd::context × mazemaker — the session as a chain in the graph, the turn
-// recall enriched from it, skills from the catalogue, resume from the chain.
+// recall enriched from it, resume from the chain (the skill catalogue: know_test.cpp).
 // A fake graph stands in for the pod; it is called from the soak worker and
 // the recall branches at once, so it holds nothing but atomics and queues.
 #include "dd/agent/http_llm.hpp"
@@ -128,19 +128,13 @@ int main() {
         g->rows[20] = Hit{20, "auto:turn:dd-x:0", "session:dd-x\n\n=== USER ===\nearlier question", 0};
         g->activations[1] = {Hit{2, "auto:turn:dd-x:1", "", 0.4}, Hit{11, "skill:local:x", "", 0.3}, Hit{10, "invariant:prefix", "", 0.2}};
         g->extracted[1] = {Hit{30, "afe", "tape freezes bytes", 0.9}};
-        SkillIndex skills(g);
-        skills.load_rows({Hit{50, "skill:local:context-tape-debugging",
-                              "Skill: context-tape-debugging\nCategory: daedalus\n\nDebug prefix breaks in the context tape and KV reuse.\n\nFull text in mazemaker: …", 0}});
-        Recaller r(g, &skills);
-        r.skill_min = 0.1;   // a one-skill corpus scores low; the real cutoff is measured on 503
+        Recaller r(g);
         const Prefetch p = r.run("why does the context tape break the KV prefix", {2}, {20});
         chk(p.dropped == 1 && p.hits == 2, "a hit already in the window is dropped");
         chk(p.linked == 1 && p.block.find("hygiene only at a rebase") != std::string::npos, "the graph adds a neighbour by id");
         chk(p.block.find("skill:local:x") == std::string::npos, "skill rows are not neighbours");
         chk(p.facts == 1 && p.block.find("tape freezes bytes") != std::string::npos, "facts of the top hit");
         chk(p.earlier == 0, "earlier turns only for a temporal question");
-        chk(p.skill == "context-tape-debugging" && p.block.find("skill_load(\"context-tape-debugging\")") != std::string::npos,
-            "a fitting skill, matched locally");
         chk(g->recalls.load() == 1, "one recall per turn");
         chk(p.block.find("- #1 [decision:tape]") != std::string::npos && p.block.find("#10 [invariant:prefix]") != std::string::npos,
             "every row names its id for mazemaker_get");
@@ -151,22 +145,6 @@ int main() {
         chk(t.earlier == 1 && t.block.find("earlier question") != std::string::npos, "temporal: this session's turns by id");
         const Prefetch small = r.run("x", {}, {}, 120);
         chk(small.block.size() < 600, "the budget holds");
-    }
-
-    // ---- skills: catalogue in the maze, parts reassembled in order ----
-    {
-        auto g = std::make_shared<FakeGraph>();
-        g->rows[60] = Hit{60, "skillsrc:local:alpha#001", "second half", 0};
-        g->rows[61] = Hit{61, "skillsrc:local:alpha#000", "first half, ", 0};
-        SkillIndex s(g);
-        s.load_rows({Hit{70, "skill:builtin:alpha", "Skill: alpha\n\nbuiltin copy", 0},
-                     Hit{71, "skill:local:alpha", "Skill: alpha\n\nthe operator's copy", 0},
-                     Hit{72, "skill:local:beta", "Skill: beta\n\ndescription: \"brews coffee\"\n", 0}});
-        chk(s.size() == 2, "one skill per name");
-        std::string name;
-        chk(s.load("alpha", &name) == "first half, second half" && name == "alpha", "parts joined in label order");
-        chk(s.search("coffee", 1).size() == 1 && s.search("coffee", 1)[0].first.name == "beta", "description searched");
-        chk(!s.match("list_dir /srv/alpha/beta/coffee and say what is there", 0.1), "paths do not pull skills");
     }
 
     // ---- the engine: rebase names ids; resume rebuilds the session from its chain ----

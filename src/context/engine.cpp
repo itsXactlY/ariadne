@@ -159,9 +159,9 @@ std::string turn_so_far(const std::vector<ItemPtr>& dropped) {
 
 TapeEngine::TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep, std::shared_ptr<Memory> memory,
                        Soaker* soaker, ToolDeck& deck, agent::HttpLLM& llm, std::string spill_root,
-                       const SkillIndex* skills)
-    : cfg_(cfg), system_(std::move(system_prompt)), ep_(ep), mem_(std::move(memory)), soaker_(soaker), skills_(skills),
-      recaller_(mem_, skills), deck_(deck),
+                       know::Router* router)
+    : cfg_(cfg), system_(std::move(system_prompt)), ep_(ep), mem_(std::move(memory)), soaker_(soaker), router_(router),
+      recaller_(mem_), deck_(deck),
       llm_(llm), spill_root_(std::move(spill_root)), session_(std::make_unique<Session>(Session::new_id())),
       spill_(std::make_unique<Spill>(spill_root_ + "/" + session_->id())),
       render_(cfg.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get()) {}
@@ -241,7 +241,7 @@ TapeStats TapeEngine::stats() const {
     s.main_slot = ep_.main_slot();
     s.maze = mem_ && mem_->up();
     s.ledger = ledger_.size();
-    s.skills = skills_ ? skills_->size() : 0;
+    s.skills = router_ ? router_->skills() : 0;
     s.recall = last_recall_;
     if (soaker_) {
         const auto st = soaker_->stats();
@@ -301,24 +301,28 @@ void TapeEngine::begin_turn(const std::string& user_message) {
     watermark(true);
     const bool rebased = session_->generation() != gen;
 
-    // One recall for the turn, rendered onto the question once (it rides the
-    // tape from there). A rebase that just recalled for this question
-    // already carries it in turn 0.
-    if (cfg_.turn_recall && mem_ && mem_->configured() && !trivial_prompt(user_message) && !rebased) {
-        if (!mem_->up()) mem_->probe();
-        if (mem_->up()) {
-            if (on_recall) on_recall(true);
-            const Prefetch p = recaller_.run(anchored_query(session_->items(), session_->current_user()), in_window(),
-                                             turn_ids(true));
-            if (on_recall) on_recall(false);
-            injection_ = p.block;
-            char ms[16];
-            std::snprintf(ms, sizeof ms, "%.1fs", p.ms / 1000.0);
-            last_recall_ = std::to_string(p.hits) + " recalled · " + std::to_string(p.linked) + " linked · " +
-                           std::to_string(p.facts) + " facts" + (p.earlier ? " · " + std::to_string(p.earlier) + " earlier" : "") +
-                           (p.skill.empty() ? "" : " · skill " + p.skill) +
-                           (p.dropped ? " · " + std::to_string(p.dropped) + " already in the window" : "") + " · " +
-                           (p.intent.empty() ? "" : p.intent + " · ") + ms;
+    // What to look up for this turn is the router's call: pointers from the catalogues at once, the
+    // pod's recall within its deadline. The note is rendered onto the question once and rides the tape
+    // from there. A rebase that just recalled for this question already carries the pod's answer.
+    records_.clear();
+    pending_calls_.clear();
+    if (router_) {
+        know::TurnStarted t;
+        t.text = user_message;
+        t.anchored = anchored_query(session_->items(), session_->current_user());
+        t.trivial = !cfg_.turn_recall || trivial_prompt(user_message);   // the catalogues need no pod: the router asks it for the deep leg only
+        t.skip_deep = rebased;
+        t.epoch = session_->generation();
+        t.in_window = in_window();
+        t.earlier = turn_ids(true);
+        if (on_recall) on_recall(true);
+        const know::Delivery d = router_->on(t);
+        if (on_recall) on_recall(false);
+        injection_ = d.note;
+        last_recall_ = d.summary;
+        if (!d.note.empty() || d.deep_late) {
+            Prefetch p = d.deep;
+            p.skill = d.skill;
             if (on_prefetch) on_prefetch(p, last_recall_);
             else note("◈ " + last_recall_);
         }
@@ -373,6 +377,7 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
         note("main moved to the prewarmed slot " + std::to_string(p->slot) + (erased ? ", old epoch erased" : ""));
     }
     drop_pending_ = ep_.single_sequence();
+    if (router_) router_->on(know::Rebased{session_->generation(), question_});
     note("⟲ rebase (prewarmed" + std::string(p->warmed ? "" : ", not warmed") + "): epoch " +
          std::to_string(session_->generation()) + " · " + thousands(pool) + " tokens · " + std::to_string(before) +
          " → " + std::to_string(session_->items().size()) + " messages");
@@ -400,6 +405,7 @@ bool TapeEngine::rebase(const char* why) {
     }
     session_->replace(std::move(base));
     drop_pending_ = ep_.single_sequence();
+    if (router_) router_->on(know::Rebased{session_->generation(), question_});
     note(std::string("⟲ rebase (") + why + "): epoch " + std::to_string(session_->generation()) + " · " +
          thousands(tokens) + " → ~" + thousands(after) + " tokens · " + std::to_string(before) + " → " +
          std::to_string(session_->items().size()) + " messages · " + (recalled ? "recall in turn 0" : "no recall"));
@@ -490,10 +496,12 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
     std::string block;
     if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
-        for (int attempt = 0; attempt < 2 && block.empty(); ++attempt)
-            block = recaller_.run(query, {}, turn_ids).block;   // the whole epoch leaves the window: nothing is in it
+        for (int attempt = 0; attempt < 2 && block.empty(); ++attempt)   // the whole epoch leaves the window: nothing is in it
+            block = (router_ ? router_->recall_now(query, {}, turn_ids) : recaller_.run(query, {}, turn_ids)).block;
     }
     if (recalled) *recalled = !block.empty();
+    if (router_)   // the skills the model was working from: their text left with the epoch
+        if (const std::string r = router_->reattach(); !r.empty()) blocks.push_back(r);
     if (!block.empty()) {
         blocks.push_back(block);
     } else if (mem_ && mem_->up()) {
@@ -582,17 +590,51 @@ void TapeEngine::on_call(const agent::CallStats& st) {
     emit();
 }
 
-void TapeEngine::on_assistant(const Message& m) { session_->append(m); }
+void TapeEngine::on_assistant(const Message& m) {
+    session_->append(m);
+    pending_calls_ = m.tool_calls;   // each meets its result in on_tool_results
+}
 
 void TapeEngine::on_tool_results(const std::vector<Message>& results) {
     for (const auto& r : results) {
         tool_chars_ += r.content.size();
         session_->append(r);
+        if (router_)
+            for (const auto& c : pending_calls_)
+                if (c.id == r.tool_call_id) {
+                    records_.push_back(know::make_record(c, r.content));
+                    break;
+                }
+    }
+}
+
+void TapeEngine::append_note(const std::string& text) {
+    Message m;
+    m.role = "user";
+    m.content = text;
+    session_->append(std::move(m), true)->note = true;
+    tool_chars_ += text.size();   // the next watermark counts it
+}
+
+void TapeEngine::speak_after_tools() {
+    if (!router_) return;
+    know::CallsFinished f;
+    f.calls = std::move(records_);
+    records_.clear();
+    const know::Delivery d = router_->on(f);
+    if (!d.note.empty()) {
+        append_note(d.note);
+        note("◈ " + d.summary);
+    }
+    if (const auto late = router_->late()) {   // the pod's recall for this turn, after its deadline
+        append_note(late->note);
+        note("◈ " + late->summary);
     }
 }
 
 void TapeEngine::after_tools() {
     watermark(false);
+    speak_after_tools();
     emit();
 }
 
@@ -685,6 +727,7 @@ void TapeEngine::reset() {
     question_.clear();
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
+    if (router_) router_->on(know::SessionStarted{});
     emit();
 }
 
@@ -756,6 +799,7 @@ bool TapeEngine::resume(const std::string& session_id, std::string* why) {
     question_.clear();
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
+    if (router_) router_->on(know::SessionStarted{});
     std::string last;
     for (const auto& b : bodies) {   // "session:… @ …\n\n=== USER ===\n<u>\n\n=== ASSISTANT ===\n<a>"
         static const std::string kUser = "=== USER ===\n", kAsst = "\n\n=== ASSISTANT ===\n";
