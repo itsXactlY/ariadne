@@ -23,6 +23,8 @@ struct CuratorParams {
     double step = 0.05;              // the most a prior may move, relative, per pass
     double move = 0.01;              // a pass publishes when a prior moved this much from the published one
     double shadow_boost = 0.1;       // the most a card with near misses and no efficacy evidence gains
+    double shrink = 2;               // the prior is the efficacy shrunk toward 0.5 by this many pseudo-observations (not a lower bound: see curator.cpp)
+    double explore = 1.0;            // optimism: this many standard errors added to the efficacy, so a thinly sampled card is tried again
     double probation_cap = 0.7, dormant_cap = 0.8;
     size_t par_cards = 256;          // fewer cards than this never open a parallel region
     AffinityParams affinity;

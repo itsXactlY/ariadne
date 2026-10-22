@@ -23,7 +23,15 @@ double target_prior(const CardStats& c, int64_t now, const CuratorParams& p) {
     const double evidence = c.helped.at(now, kHlEfficacy) + c.failed.at(now, kHlEfficacy);
     double t = 1.0;
     if (evidence >= 0.5) {
-        t = p.lo + c.efficacy_lcb(now) * (p.hi - p.lo);
+        // A shrunk mean, not a Wilson lower bound: the bound grows with the number of draws, so a card offered
+        // early out-ranks an equal one offered late and takes every offer (found by the 180-day soak: twenty equally
+        // good cards ended with thirteen holding 99% of the offers and seven starved). Two pseudo-observations
+        // still keep a card with three lucky wins under one with fifty.
+        const double h = c.helped.at(now, kHlEfficacy);
+        const double est = (h + 0.5 * p.shrink) / (evidence + p.shrink);
+        // ... plus an error bar, so a card that had bad luck early is tried again instead of being buried by one that had good luck
+        const double sigma = std::sqrt(std::max(0.0, est * (1.0 - est)) / (evidence + p.shrink));
+        t = p.lo + std::clamp(est + p.explore * sigma, 0.0, 1.0) * (p.hi - p.lo);
     } else {   // never exposed enough to judge: near misses say it was under-offered
         const double s = c.shadow.at(now, kHlConversion);
         t = 1.0 + p.shadow_boost * s / (s + 3.0);
