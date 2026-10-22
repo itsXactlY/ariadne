@@ -24,6 +24,7 @@
 #include "dd/core/snap_cell.hpp"
 #include "dd/know/bm25.hpp"
 #include "dd/know/catalogue.hpp"
+#include "dd/know/event.hpp"
 
 namespace dd {
 namespace know {
@@ -103,6 +104,9 @@ public:
     }
     float idf(const std::string& term) const override;
 
+    // Priors and learned terms folded in while a snapshot builds; a moved version() rebuilds at the next refresh. Set before the first refresh.
+    void set_overlay(std::shared_ptr<Overlay> o) { overlay_ = std::move(o); }
+
     std::optional<Card> find(const std::string& name) const;   // by uri id
     std::vector<Card> cards() const;
     struct Census {
@@ -127,6 +131,7 @@ private:
     std::vector<std::shared_ptr<SkillSource>> sources_;
     Options opt_;
     core::SnapCell<Snapshot> snap_;
+    std::shared_ptr<Overlay> overlay_;
     std::atomic<bool> healthy_{false};
     std::atomic<uint64_t> gen_{0};
     std::vector<std::vector<Card>> last_good_;   // per source, what it last gave (the refresh thread's alone)

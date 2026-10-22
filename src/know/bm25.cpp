@@ -16,7 +16,7 @@ namespace know {
 
 namespace {
 
-constexpr int kFields = 4;   // name, tags, group, gist
+constexpr int kFields = 5;   // name, tags, group, gist, learned
 constexpr size_t kShards = 16;   // postings built in parallel: one map per shard, a term in hash % kShards
 
 size_t shard_of(const std::string& term, size_t shards) { return std::hash<std::string>{}(term) % shards; }
@@ -29,7 +29,7 @@ struct Weighted {
 
 struct DocFields {
     std::unordered_map<std::string, int> tf[kFields];
-    int len[kFields] = {0, 0, 0, 0};
+    int len[kFields] = {0, 0, 0, 0, 0};
 };
 
 void count(DocFields& d, int field, const std::vector<std::string>& terms) {
@@ -40,8 +40,8 @@ void count(DocFields& d, int field, const std::vector<std::string>& terms) {
 }  // namespace
 
 Bm25f::Bm25f(std::vector<Card> cards, Bm25fParams p) : p_(p), cards_(std::move(cards)) {
-    const float w[kFields] = {p_.w_name, p_.w_tags, p_.w_group, p_.w_gist};
-    const float b[kFields] = {p_.b_name, p_.b_tags, p_.b_group, p_.b_gist};
+    const float w[kFields] = {p_.w_name, p_.w_tags, p_.w_group, p_.w_gist, p_.w_learned};
+    const float b[kFields] = {p_.b_name, p_.b_tags, p_.b_group, p_.b_gist, p_.b_learned};
     const long n = static_cast<long>(cards_.size());
     const bool par = cards_.size() >= p_.par_docs;
     [[maybe_unused]] const int threads = par ? core::par_threads() : 1;   // only the OpenMP clauses read it
@@ -49,7 +49,7 @@ Bm25f::Bm25f(std::vector<Card> cards, Bm25fParams p) : p_(p), cards_(std::move(c
 
     // each card on its own: its terms per field. The loops are independent, so they run on all cores.
     std::vector<DocFields> docs(cards_.size());
-    double total_len[kFields] = {0, 0, 0, 0};
+    double total_len[kFields] = {0, 0, 0, 0, 0};
 #pragma omp parallel for schedule(dynamic, 16) num_threads(threads) if (par) reduction(+ : total_len[:kFields])
     for (long i = 0; i < n; ++i) {
         try {
@@ -61,6 +61,11 @@ Bm25f::Bm25f(std::vector<Card> cards, Bm25fParams p) : p_(p), cards_(std::move(c
             count(d, 1, terms_of(tags));
             count(d, 2, terms_of(c.group, true));
             count(d, 3, terms_of(c.gist));
+            if (!c.learned.empty()) {
+                std::string learned;
+                for (const auto& t : c.learned) learned += t.text + " ";
+                count(d, 4, terms_of(learned));
+            }
             for (int f = 0; f < kFields; ++f) total_len[f] += d.len[f];
         } catch (...) {
             failed.store(true);

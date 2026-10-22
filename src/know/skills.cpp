@@ -350,8 +350,13 @@ void SkillCatalogue::refresh() {
     // makes a snapshot of what the sources have given so far searchable (unless it is the one already published)
     auto publish = [&](std::vector<Card> cards, std::vector<Owned> own, Census cen) {
         uint64_t fp = 1469598103934665603ull;
+        if (overlay_) fp = fnv(fp, "overlay|" + std::to_string(overlay_->version()));
         for (auto& c : cards) {
             if (const auto p = opt_.priors.find(c.uri.id); p != opt_.priors.end()) c.prior = p->second;
+            if (overlay_) {
+                c.prior *= overlay_->prior(c.uri);
+                overlay_->learned_terms(c.uri, c.learned);
+            }
             fp = fnv(fp, c.uri.id + "|" + c.rev + "|" + c.source + "|" + (c.has_body ? "1" : "0") + "|" + c.gist);
         }
         if (const auto old = snap_.read(); old && old->fingerprint == fp) return;   // nothing changed: same generation

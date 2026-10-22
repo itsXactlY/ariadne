@@ -34,6 +34,11 @@ struct Uri {
     }
 };
 
+struct Term {
+    std::string text;
+    float weight = 1.0f;
+};
+
 struct Card {
     Uri uri;
     std::string title;    // skill name / memory label / tool name
@@ -45,11 +50,7 @@ struct Card {
     size_t body_bytes = 0;
     bool has_body = true;
     double prior = 1.0;   // a curated weight on the final score
-};
-
-struct Term {
-    std::string text;
-    float weight = 1.0f;
+    std::vector<Term> learned;   // terms the harness learned for this card (Overlay); the Bm25f `learned` field
 };
 
 struct Query {

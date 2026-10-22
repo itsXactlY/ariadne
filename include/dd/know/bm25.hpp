@@ -1,5 +1,5 @@
 #pragma once
-// dd/know/bm25.hpp — BM25F over cards: name, tags, group and gist are fields
+// dd/know/bm25.hpp — BM25F over cards: name, tags, group, gist and learned are fields
 // with their own weight and length normalisation. Built once per catalogue
 // generation (an inverted index: a search touches only the postings of the
 // query's terms), read lock-free from any thread.
@@ -20,8 +20,8 @@ namespace dd {
 namespace know {
 
 struct Bm25fParams {
-    float w_name = 8.0f, w_tags = 3.0f, w_group = 1.5f, w_gist = 1.0f;
-    float b_name = 0.2f, b_tags = 0.2f, b_group = 0.0f, b_gist = 0.75f;
+    float w_name = 8.0f, w_tags = 3.0f, w_group = 1.5f, w_gist = 1.0f, w_learned = 2.0f;
+    float b_name = 0.2f, b_tags = 0.2f, b_group = 0.0f, b_gist = 0.75f, b_learned = 0.0f;
     float k1 = 2.0f;
     size_t par_docs = 512;   // a catalogue of at least this many cards is indexed in parallel (OpenMP); smaller ones never wake a thread
 };
