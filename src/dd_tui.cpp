@@ -1209,7 +1209,8 @@ int main(int argc, char** argv) {
         });
     };
 
-    std::function<void()> learn_pin;   // /learn: set where the learn service lives; null while learning is off
+    std::function<void()> learn_pin;   // /learn: null while learning is off
+    if (learner) learn_pin = [&learner] { learner->pin(); };
     auto effort_cmd = [&](const std::string& arg) {
         std::string levels;
         for (const auto& e : efforts) levels += (levels.empty() ? "" : " ") + e;
