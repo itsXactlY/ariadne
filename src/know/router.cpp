@@ -61,11 +61,33 @@ bool Router::seen(const Uri& u, Placement where) const {
     return where == Placement::QuestionNote ? ws_.offered_this_turn(u) : ws_.offered_this_epoch(u);
 }
 
+Event Router::ev(Event::Type t, const Uri& u, const std::string& reason) const {
+    Event e;
+    e.type = t;
+    e.ts_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    e.turn = static_cast<uint32_t>(ws_.turn());
+    e.round = static_cast<uint32_t>(ws_.round());
+    e.epoch = static_cast<uint32_t>(ws_.epoch());
+    e.uri = u;
+    e.reason = reason;
+    return e;
+}
+
+void Router::end_turn() { sink_->emit(ev(Event::Type::TurnEnd)); }
+
+void Router::note_tripwire(const std::string& rule) {
+    Uri u;
+    u.kind = Kind::Rule;
+    u.id = rule;
+    sink_->emit(ev(Event::Type::Tripwire, u));
+}
+
 void Router::drain_opened() {
     Opened o;
     bool any = false;
     while (opened_q_.pop(o)) {
         ws_.opened(o.uri, o.title, o.bytes / 4);
+        sink_->emit(ev(Event::Type::OpenedByModel, o.uri));
         any = true;
     }
     if (any) publish_reattach();
@@ -146,6 +168,13 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
             std::vector<Hit>& bucket = k == Kind::Skill ? shown.skills : k == Kind::Memory ? shown.memory : shown.tools;
             for (auto& h : cat->search(in.query, policy_.top_k + 4)) {
                 if (bucket.size() >= cap) break;
+                if (h.matched >= 2 && !conf.offers(h, cat->size())) {   // a near miss: the counterfactual
+                    Event e = ev(Event::Type::Shadow, h.card.uri, in.reason);
+                    e.score = static_cast<float>(h.score);
+                    e.mass = static_cast<float>(h.mass);
+                    e.matched = h.matched;
+                    sink_->emit(std::move(e));
+                }
                 if (!conf.offers(h, cat->size()) || seen(h.card.uri, in.where)) continue;
                 if (k == Kind::Skill && !h.card.has_body) continue;   // a pointer to nothing
                 bucket.push_back(std::move(h));
@@ -175,12 +204,28 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
     if (in.notice) {
         notice = Deliverer::notice(in.reason.rfind("stall: same", 0) == 0 ? "repeated_call" : "blind_exploration", StallTrigger::notice_text(ws_, policy_));
         ws_.set_stalled();
+        sink_->emit(ev(Event::Type::Stall, Uri(), in.reason));
     }
     if (!text.empty()) {
         ws_.spend(deliver_.tokens(text));
         for (const auto& u : offered) {
             std::string title = u.id;
             ws_.offered(u, title, 40);
+            {
+                Event e = ev(Event::Type::Offered, u, in.reason);
+                e.where = in.where;
+                e.key = in.key;
+                for (const auto& t : in.query.terms) e.terms.push_back(t.text);
+                const auto& pool = u.kind == Kind::Memory ? shown.memory : u.kind == Kind::Tool ? shown.tools : shown.skills;
+                for (const auto& h : pool)
+                    if (h.card.uri == u) {
+                        e.score = static_cast<float>(h.score);
+                        e.mass = static_cast<float>(h.mass);
+                        e.matched = h.matched;
+                        break;
+                    }
+                sink_->emit(std::move(e));
+            }
             d.offered.push_back(u);
             ++stats_.offered;
         }
@@ -188,6 +233,7 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
             Uri u = shown.skills.front().card.uri;
             ws_.opened(u, shown.head_title, deliver_.tokens(shown.head->text));
             d.opened.push_back(u);
+            sink_->emit(ev(Event::Type::OpenedByRouter, u, in.reason));
             ++stats_.opened_for;
             publish_reattach();
         }
@@ -208,6 +254,7 @@ Delivery Router::on(const Signal& s) {
 
     if (const auto* r = std::get_if<Rebased>(&s)) {
         ws_.new_epoch(r->epoch);
+        sink_->emit(ev(Event::Type::Rebase));
         publish_reattach();
         return d;
     }
@@ -225,9 +272,18 @@ Delivery Router::on(const Signal& s) {
         ws_.new_epoch(t->epoch);
         last_in_window_ = t->in_window;
         last_earlier_ = t->earlier;
+        Event e = ev(Event::Type::TurnStart);
+        e.key = t->anchored.empty() ? t->text.substr(0, 200) : t->anchored.substr(0, 200);
+        sink_->emit(std::move(e));
     } else if (const auto* f = std::get_if<CallsFinished>(&s)) {
         ws_.new_round();
         ws_.record(f->calls);
+        for (const auto& c : f->calls) {
+            Event e = ev(Event::Type::Calls);
+            e.call = c;
+            e.key = c.error;
+            sink_->emit(std::move(e));
+        }
     }
 
     Plan plan;

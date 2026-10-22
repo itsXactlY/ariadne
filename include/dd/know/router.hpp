@@ -24,6 +24,7 @@
 #include "dd/core/mpsc.hpp"
 #include "dd/core/snap_cell.hpp"
 #include "dd/know/deliver.hpp"
+#include "dd/know/event.hpp"
 #include "dd/know/memory_catalogue.hpp"
 #include "dd/know/policy.hpp"
 #include "dd/know/skills.hpp"
@@ -58,6 +59,9 @@ public:
     Delivery on(const Signal& s);
     std::optional<Delivery> late();                 // a deep answer that missed its deadline and has landed since
     void set_ratio(Deliverer::Ratio r) { deliver_ = Deliverer(std::move(r)); }
+    void end_turn();                                // the turn is over: learning closes its exposures
+    void note_tripwire(const std::string& rule);   // a rule held a call
+    void set_sink(std::shared_ptr<EventSink> s) { sink_ = s ? std::move(s) : std::make_shared<NullSink>(); }   // before the first signal
 
     // ---- any thread ----
     std::string reattach() const;                   // the skills the model was working from, as pointers; "" if none
@@ -108,7 +112,9 @@ private:
     std::vector<long> last_earlier_;
     core::SnapCell<std::string> reattach_;
     Stats stats_;
+    std::shared_ptr<EventSink> sink_ = std::make_shared<NullSink>();
 
+    Event ev(Event::Type t, const Uri& u = Uri(), const std::string& reason = std::string()) const;
     void drain_opened();
     void publish_reattach();
     IdfFn idf_fn() const;
