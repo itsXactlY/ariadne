@@ -8,7 +8,7 @@
 ```
 make build/dd_agent          # agent binary (links -lcurl)
 make                         # build/dd (CLI entry)
-make test                    # 64 test suites
+make test                    # 78 test suites
 ```
 
 ## Build
@@ -17,18 +17,19 @@ make test                    # 64 test suites
 - **System:** CMake is **4.4.3 and broken** here. The `Makefile` is the source of truth. A `CMakeLists.txt` exists but is not the working path.
 - `-Werror` is strict, including `-Werror=unused-function`: every non-`inline` `static` helper must be referenced in its TU. Prefer `inline`/`constexpr`.
 - `std::regex` here gets no lookaround; `\w`/`\d` are ASCII-only.
+- **OpenMP:** every target that links `bm25.cpp`, `skills.cpp` or `memory_catalogue.cpp` (`dd`, `dd_tui`, `dd_know_tests`, `dd_know_router_tests`, `dd_know_rules_tests`, `dd_know_bm25_tests`, `dd_context_tests`, `dd_maze_tests`) is built with `-fopenmp` (GCC libgomp); an unknown `#pragma omp` is an error under `-Wall -Werror`, so a new target that links them needs the flag too.
 
-Layout: `src/` (port TUs) · `include/dd/` (headers) · `tests/` (64 `_test.cpp` suites) · `build/` (outputs).
+Layout: `src/` (port TUs) · `include/dd/` (headers) · `tests/` (`_test.cpp` suites) · `build/` (outputs).
 
 ## Run the agent
 
 ```
-build/dd_agent                                  # msg on stdin, config from ~/.daedalus/config.yaml
+build/dd_agent                                  # msg on stdin, config.yaml beside the binary
 build/dd_agent path/to/config.yaml -- hello     # config arg, then -- , then message words
 echo "list files in /tmp/ using list_dir" | build/dd_agent
 ```
 
-Config path resolves from `HOME` (→ `~/.daedalus/config.yaml`) unless given as the first argv. No Python Daedalus on the box? `mkdir -p ~/.daedalus/logs && cp examples/daedalus/config.yaml ~/.daedalus/` — that file is the whole config (model, turns, skin, MCP, denylist). The message is stdin, or the words after `--`.
+**Everything lives beside the binary.** `build/dd_tui --init` writes `config.yaml` (the embedded copy of `examples/daedalus/config.yaml`: model, turns, skin, MCP, denylist, knowledge) and `state/ cache/ logs/` next to it; `--init --from FILE` starts from an existing config, `--init --rules` also installs a starter set of tripwires. `skills/`, `rules/`, `skins/` and an optional `brief.md` sit there too. Nothing is read from `~/.daedalus` (the Python Daedalus's home): `dd import-daedalus` copies skills and skins over once, on request. Resolution: `--home DIR` → the folder of `--config FILE` (or a bare path argument) → `$DD_HOME` (or `$DAEDALUS_HOME`) → the folder of the binary. The message is stdin, or the words after `--`.
 
 | Env | Overrides |
 |---|---|
@@ -45,7 +46,7 @@ Output: `[base=... model=... turns=...]` header, then `=== final (N LLM calls) =
 
 ```
 make build/dd_tui
-build/dd_tui                                   # interactive REPL (you> ), config from ~/.daedalus
+build/dd_tui                                   # interactive REPL (you> ), config.yaml beside the binary
 build/dd_tui path/to/config.yaml -- "msg"      # single-shot
 ```
 
@@ -53,7 +54,7 @@ build/dd_tui path/to/config.yaml -- "msg"      # single-shot
 
 - **Layout, fixed geometry:** transcript panel | 34-col sidebar (`session`, `engine`, `tools`) over a 3-row prompt box and a status row. Panels are rounded boxes with their titles set into the border. The sidebar drops under 100 cols; under 60×14 the screen says so. Cards are at most 112 cols wide.
 - **Cards:** user = gold bar; answer = rounded `⟁ DAEDALUS ⟁` box with the call latency; tool = square card of **fixed height** (name, status `queued`/spinner/`✓ 1.2s`/`✗`, flattened args, two-line result preview); notes; errors; a rule closing each turn (`turn 3 · 4 calls · 2 tools · 41.2s`).
-- **Skin:** colours, spinner wings, thinking verbs and branding come from `~/.daedalus/skins/<display.skin>.yaml` (neural defaults built in). Truecolor when `COLORTERM=truecolor|24bit`, else xterm-256.
+- **Skin:** colours, spinner wings, thinking verbs and branding come from `skins/<display.skin>.yaml` beside the binary (neural defaults built in). Truecolor when `COLORTERM=truecolor|24bit`, else xterm-256.
 - **Reasoning, live:** calls stream (`stream: true`, `dd/agent/chat_stream`); `delta.reasoning_content` fills a dashed `◈ thinking` card (fixed-height live tail, so nothing below it jumps), the answer streams into its card. `/reasoning show|full|hide` picks tail / every line / one row (`display.show_reasoning: false` starts hidden).
 - **Effort:** `/effort` or `/reasoning` + `off low medium high xhigh max ultra`, sent as `reasoning_effort` (`off` → `"none"`, thinking disabled). Only levels the model's chat template names (read from `/props`) are offered — anything else makes the template raise, a 500 — so `xhigh/max/ultra` appear only on templates that go that deep. The start level is `agent.reasoning_effort`, rounded down to the template's ceiling.
 - **Engine stats are real:** each call reports llama-server `timings` (gen/prefill t/s, `cache_n`) and `usage`; `n_ctx` comes from `/props` once at start (the ctx meter).
@@ -85,17 +86,30 @@ The harness forgets on purpose; mazemaker is where everything it drops lives —
 - **The session is a chain in the graph.** Labels are unique per session; every soak hands its memory id back (the engine's *ledger*, lock-free from the soak worker); edges chain the nodes as they are written — turn → next turn (`session_next`), reasoning → the turn it served (`reasoned_in`), via `connections_import`. The dream cycles and later traversals see a session's shape, not loose rows.
 - **One recall per turn, the graph around it.** Measured on the pod: a recall is ~7 s and the pod serialises them; `think` 0.9 s, `get` 0.08 s, `afe_facts` 0.08 s, `classify_intent` 0.04 s. So a turn spends exactly one recall and enriches it in parallel: spreading activation from the best hit read back by id, the facts extracted from the top hits, and — for a temporal question — this session's own out-of-window turns by id. Nothing already on the tape comes back (the ledger knows which ids were written this epoch), and the block fits a budget.
 - **A rebase names ids.** Turn 0 of a new epoch lists this session's turn ids: `mazemaker_get(memory_ids=[…])` reads them back in ~0.1 s instead of a search.
-- **Skills from the catalogue.** The 503 skills in the maze are indexed once in the background (3.2 s) and matched locally with BM25 — a fitting skill costs the turn no recall (cutoff measured: fitting skills score 14.5–35, unrelated text ≤ 7.8; paths are ignored). `skill_load(name)` reassembles the full SKILL.md from its `skillsrc` parts (0.2 s).
+- **Skills and every other lookup are the router's** (next section): the catalogue of skills is read from `./skills` and the maze together and kept fresh, not indexed once at launch.
 - **Resume from the maze.** `/resume` lists sessions, `/resume <id>` or `/resume last` rebuilds one from its `auto:turn` chain — the maze is the session store; a resumed session continues its chain. Any session soaked under `auto:turn:<id>` resumes, the Python harness's included.
-- **The model knows the contract.** The system prompt says what the harness already does (recall first, soak every turn, ids after a rebase, skills by name), so the model recalls only for what is missing and saves only distilled facts.
+- **The model knows the contract.** One composed system prompt (`PromptComposer`): the tool preamble, the operator's text, a short **retrieval contract** (pointers MUST be opened before acting on them; never guess a path or a name, `find` first; live state is a command, memory is history; save only distilled facts), a **catalogue map**, and `brief.md` if there is one. The pod's own protocol text ("RECALL FIRST, NO EXCEPTIONS", save every turn, `session_search`) is not pasted: `mcp_servers.<name>.instructions: harness` (the default for the maze), `verbatim` or `off`.
+
+### Knowledge: when, what and how to look something up (`dd/know`, plan in `docs/KNOWLEDGE.md`)
+
+One router decides; the engine only tells it what happened. Cards (skills, curated memory rows, deferred tools) are searched locally in microseconds; the pod's recall is the slow leg and always has a deadline.
+
+- **Catalogues.** `SkillCatalogue` merges `./skills`, `skills.external_dirs` and the maze's `skill:`/`skillsrc:` rows: the first source keeps the bare name, an identical copy collapses (sha256), the maze's older snapshot of a disk skill yields to the disk, a differing copy stays as `name@source`, notes and fragments filed under `skill:` are not skills, a card with no body borrows an identical copy's or reads its `Path:`. It refreshes in the background (every 10 min, every 15 s while a source is down), so a pod that was down at launch is picked up. `MemoryCatalogue` holds the ~3.7k curated rows (`decision: bug: invariant: ops: fact: …`) as cards cached in `cache/`, synced by id.
+- **Ranking.** BM25F (name ×8, tags ×3, group ×1.5, gist ×1, k1 2) over folded, stemmed, EN+DE-stopworded terms; the query is *distilled* (pasted terminals and code dropped, paths reduced to the project and file they name, at most 12 of the rarest terms), and a score is the share of what the query could have reached. Calibrated on 77 real prompts against the real 568-skill catalogue (`dd replay`): a pointer needs ≥2 matched terms, enough evidence (idf mass 6.5, scaled by ln catalogue size) and a 0.15 share — 21 offers, the right skill in the top 3 for 17 of the 33 prompts that have one, 3 false offers of 44 that have none (the old matcher: about 8 right of 23 offers, 15 wrong). At a 0.25 share the head of the skill is opened for the model.
+- **Triggers** (pure functions of a signal and the working set): *turn start* (pointers + the pod's recall, waiting `knowledge.deep_ms`, or 30 s for a question about the past), *shift* (a batch of tool calls moved to terms the turn has not covered), *failure* (what the maze knows about that error), *stall* (the same call twice, or three looks around that found nothing: a redirect notice). A late recall rides the next tool result. Notes are appended as hidden items after the tool results, so the tape only grows, and they age out with the batch they follow. Budgets: 600 tokens for a question's note, 250 mid-turn, 1500 per turn.
+- **One verb to read it all.** `read_file("skill://name")` (a page at a time: `#2`, `#all`; its own files: `skill://name/references/x.md`), `read_file("mem://id")`, `find(query)` (scores, `strong`/`weak`, how to open each hit), `skill_load` as the old alias; the local tools take an optional `intent` the router uses as a free query. Every open is remembered: after a rebase the skills the model was working from are pointed to again.
+- **Tripwires** (`rules/*.md` and the maze's `rule:` rows, oh-my-pi's TTSR as a gate): a regex on what a tool call is about to do; a matching call is not run, its result is the rule's text, and the retry passes (told once; `repeat_gap`, `once: false` for hard ones). Zero tokens until one fires. `dd_tui --init --rules` installs six starters (podman-not-docker, no AI commit trailers, no `commit -a`/`--no-verify`, no force-push to main, live pods and postgres off limits, ask before heavy launches).
+- **Concurrency and speed.** No mutex in `dd::know`: a hand-off is single-owner state fed by the MPSC queue, a `core::SnapCell<T>` snapshot (wait-free reads, epoch reclamation: `std::atomic<std::shared_ptr>` is spin-locked in libstdc++, so it is not used), or one atomic word parked on a futex (`core::park`) and never polled. A half-done catalogue sync is cancelled on quit, not waited for.
+- **SIMD and OpenMP.** `dd/know/scan.hpp` classifies bytes as AVX-512 / AVX2 / scalar kernels picked by CPUID and feeds the tokenizer; the AVX-512 set compiles but has never run (no AVX-512 hardware here). Index builds use all cores (`par_threads()` is at most 8, every region behind a size `if()`), and the parallel build is bit-identical to the serial one. Measured on a Ryzen 7 3800X: tokenizer 33 → 80 MB/s, memory index (3.7k cards) 80 → 20 ms, skills (467) 112 → 40 ms, the rest being a serial directory walk. A search is 2–5 µs and stays scalar: sparse postings, nothing to vectorize.
+- **Tools to keep it honest.** `dd find QUERY`, `dd skills check` (bodyless, duplicate, note-like cards), `dd replay corpus.jsonl` (offers, hits, misses and the shipped policy's numbers against your own labeled prompts), `dd import-daedalus`. A line per signal that said something goes to `logs/knowledge.jsonl` (what was offered, what was opened).
 
 What it wires in, all **real**:
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
 - `run_terminal` — everything is allowed except a denylist (`sudo`, `su`, recursive `rm` on `/`·`~`·`*`, `mkfs`, `dd`, shutdown/reboot, curl-pipe-shell, force-push, …); extra words via config `command_denylist`. It is a guard, **not** a jail — do not treat it as sandboxing.
 - **Every enabled MCP tool, discovered live**: `dd_tui` reads `mcp_servers.*` from config, speaks Streamable-HTTP MCP (JSON-RPC 2.0 over one POST, SSE `data:` responses, session-less), calls `tools/list`, and registers each enabled tool with its real `inputSchema`. The running mazemaker pod yields 34 tools.
-- The MCP server's `initialize` **`instructions`** (the MAZEMAKER MEMORY PROTOCOL — recall-first, persist-after-turn) are appended to `agent.system_prompt`. That is what makes recall-first behavior real, not simulated.
+- The MCP server's `initialize` **`instructions`** are kept or dropped per server (`instructions: verbatim|harness|off`); for the maze the harness's retrieval contract replaces them (see above).
 
-Continuity across REPL turns rides on the external memory graph (the agent re-recalls each turn), which is the protocol's own design — not a persistent in-process transcript.
+Continuity across REPL turns rides on the external memory graph (the router looks up for each turn), which is the design — not a persistent in-process transcript.
 
 Verified smoke (`DD_MAX_TURNS=4`, local IQ1 model ~17s/turn + ~22s/recall → wall ≥300s): registers 34 mazemaker tools, the model answers "as required by the memory protocol", issues `mazemaker_recall`, and the round-trip returns live memory (top hit sim 0.54). See `src/tools/mcp.hpp` / `src/tools/mcp_client.cpp` for the transport.
 

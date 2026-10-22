@@ -1,7 +1,8 @@
 # Knowledge: one retrieval path for skills, memory and tools
 
-Status: plan, 2026-10-22. Nothing here is implemented. Branch `feat/knowledge` (worktree
-`~/projects/daedalus-cpp-knowledge`), cut from `main` 006a752.
+Status: 2026-10-22. P0-P4 are implemented on `feat/knowledge` (worktree `~/projects/daedalus-cpp-knowledge`, on top of
+`fix/window-clamp`); P5 (learning) is not started and needs a different architecture. Section 15 says what was built,
+what was measured and where it deviates from this plan; 15.1 is the concurrency, SIMD and OpenMP pass that followed.
 
 ## 1. Verdict
 
@@ -27,13 +28,13 @@ model; we have 498 skills and a 54.6k rebase mark.
 |---|---|---|
 | F1 | Two retrieval moments only: turn start and rebase. After the first tool call nothing looks anything up. | `engine.cpp:263`, `engine.cpp:429` |
 | F2 | The system prompt has three voices that contradict each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). | `dd_tui.cpp:727`, `:750`, `:893`; `initialize` reply |
-| F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../jrwl-messenger/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
+| F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../my-project/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
 | F4 | The catalogue is read once: `if (maze->up()) skills.load_async()`. Pod down at launch means empty for the whole session while 467 SKILL.md lie on disk. `skills::Scanner/Registry` (disk) feed only the `dd` CLI; `dd_tui` uses only `SkillIndex` (maze). | `dd_tui.cpp:827`, `cli_main.cpp` |
 | F5 | Catalogue quality. 611 `skill:` rows are 498 skills + 5 notes posing as skills (`fix-i3-services-not-starting` was *offered* as one) + 1 AFE fragment. 107 names exist in both `builtin` and `local` (95 identical sha, 4 differ, 8 unknown). 101 cards have no body slices (`load()` then returns the 650-char card as "the skill"). 96 legacy cards carry raw frontmatter in the text. Only 134 cards have tags. | maze census |
 | F6 | A loaded skill is a tool result: it ages out (`tool_group_ttl`, rebase) and nothing re-attaches it, so the model forgets the procedure it was following. Bodies: median 6 KB (~1.7k tokens), p90 16.8 KB (~4.7k), max 55 KB (~15k), against a rebase mark of ~54.6k. | maze census |
 | F7 | Nothing is measured: no offered-to-opened counter. | |
 | F8 | Dead config: `skills.auto_route`, `skills.external_dirs`, `skills.disabled` are in the schema, nothing reads them. | `harness_config.hpp:289` |
-| F9 | The deep recall blocks the turn start: 6-8 s scoped to `skill:*`, 12-17 s for the pod's `lean`/`semantic` modes. The scope leaks (`auto:reasoning`, `skillsrc` rows come back) and one card (`dlm-verschluesselungsschicht-diagnose`) is a hub: 6 of 8 queries. Unscoped, the top 8 held zero skills. | probes |
+| F9 | The deep recall blocks the turn start: 6-8 s scoped to `skill:*`, 12-17 s for the pod's `lean`/`semantic` modes. The scope leaks (`auto:reasoning`, `skillsrc` rows come back) and one card (a security-diagnosis skill with a long description) is a hub: 6 of 8 queries. Unscoped, the top 8 held zero skills. | probes |
 | F10 | Home: the binary reads `~/.daedalus/{config.yaml,skins,logs}` (shared with the Python Daedalus) and writes spill and the soak spool to `<cwd>/.daedalus`, so state depends on where it was launched. | `dd_tui.cpp:374,628,667,854`, `dd_agent_main.cpp:176`, `cli_main.cpp:16`, `core/home.cpp` |
 
 ### Replay: the current matcher on real prompts
@@ -88,8 +89,11 @@ lists every skill. That part is ours.
 4. **The harness decides, the model confirms.** Offer ladder by confidence: silent, pointer,
    head-open, open. Measured by opened/offered.
 5. **Triggers are pure.** `plan(signal, working_set) -> Plan` does no I/O: unit-testable.
-6. **Lock-free reads.** Catalogues publish an immutable snapshot (`shared_ptr<const Index>`, atomic
-   swap, as `SkillIndex::Slot` does now); one single-slot mailbox carries the deep leg back.
+6. **No lock in `dd::know`.** Every cross-thread hand-off is one of three things: single-owner state fed by a Vyukov
+   MPSC queue (the working set stays on the router thread; tool threads report opens through the queue), an immutable
+   snapshot in a `core::SnapCell<T>` (wait-free reads, epoch reclamation), or one atomic flag or word (`done`,
+   `cancel`, `wake`) that a thread parks on with a futex and never polls. No mutex, no condition variable, and no
+   `std::atomic<std::shared_ptr>`: libstdc++ spin-locks it (`is_lock_free()` is false). See 15.1.
 
 ## 5. Architecture
 
@@ -245,7 +249,7 @@ find("...") or read a skill, then act.</system-notice>
   corpus** (grid search; the numbers ship with the test that pins them).
 - **`Distiller`** turns a signal into `Query`: drops pasted blocks (> N lines of terminal output,
   continuation summaries), keeps identifiers, error codes, versions, binaries; keeps project names
-  *inside paths* (`jrwl-messenger`, `llama.cpp-strata`) and drops only generic path words (`src`,
+  *inside paths* (`my-project`, `llama.cpp-strata`) and drops only generic path words (`src`,
   `include`, `home`); uses the model's own `intent` when present; <= 12 weighted terms.
 - **Hub penalty**: `prior = 1 / (1 + log(1 + wins/expected))` from the corpus replay, so
   `jack-in-a-box` stops winning on length. Fixes the symptom; the cause is cards that say too much,
@@ -373,3 +377,156 @@ card snapshot (name, group, tags, gist, sha; no bodies). The raw replay inputs s
    `match`, `search`), 11 s to build, ~9 ms per search.
 
 All read-only; no engine or harness was started for any of it.
+
+## 15. What was built, and where it differs from the plan
+
+| Phase | State | Where |
+|---|---|---|
+| P0 home | done | `core/home*`, `dd_tui --init/--home`, `dd import-daedalus`; HOME-clean verified end to end with the real binary |
+| P1 catalogue + ranking | done | `know/{types,text,bm25,catalogue,skills,wiring}`, `dd find/skills check/replay` |
+| P2 router | done | `know/{router,working_set,deliver,prompt,resolver,memory_catalogue,tool_catalogue,policy}`, engine and `dd_tui` wired, `SkillIndex` removed |
+| P3 mid-turn | done | `know/{signal,trigger}`, `Item::note`, `intent` on the local tools |
+| P4 tripwires | done | `know/tripwire`, `agent::ToolGate`, starter rules via `--init --rules` |
+| P5 learn | not started | needs a different architecture |
+
+**Measured acceptance (real prompts, real catalogue, `dd replay`).** The P1 target in section 12 (recall >= 85% at <= 10%
+false offers) was a guess before there was data, and the data does not support it for a lexical leg on terse, project-specific
+prompts. 77 real prompts (33 with a fitting skill, labeled by me) against the live 568-skill catalogue:
+
+| Rule | Offers | Right skill in the top 3 | False offers (of 44 with none) |
+|---|---|---|---|
+| the old matcher (BM25 on the whole message, absolute 12.0) | 23 | about 8 | about 15 wrong |
+| a score threshold alone, 0.35 | 20 | 8 | 8 |
+| a score threshold alone, 0.45 | 16 | 6 | 6 |
+| **shipped: matched >= 2, mass >= 6.5, share >= 0.15** | 21 | **17 of 33** | **3** |
+| shipped, head opened at share >= 0.25 | 12 | 9 right at 1 | |
+
+The score alone cannot work: a single generic word ("python", "claude", "parallel") reaches 0.85 on share alone and carries no
+evidence, while the right skill for a long prompt scores 0.07 because one term of twelve matched. Evidence (idf mass) and the
+number of matched terms separate them. The other half of the answer is that the mid-turn signals (tool arguments, paths,
+errors, the model's own `intent`) are far more specific than the user's message, so shift, failure and stall carry most of the
+"stop poking blind" weight, and `find` exists for what the router does not volunteer. The semantic leg (P6) is still the way
+to the missing half; its cost is the pod's 6-17 s, so it stays asynchronous.
+
+**Deviations.**
+- `Confidence` scales its evidence bar with `ln(catalogue size)`: the calibrated 6.5 is "at 568 skills"; a catalogue of twenty
+  needs about 3. Without it a new user's catalogue would never offer anything.
+- The maze's `skill:local:` cards are snapshots of this host's disk skills: when the disk has the skill, the disk wins and the
+  snapshot is counted as `superseded` (411 of them today), not kept as a differing variant (it made 94 phantom variants).
+- Legacy pointer cards (`Hermes skill:` with `Path:` and a capital-D `Description:`) read their body from that path.
+- Opened skills lose their YAML frontmatter; pages are 4200 bytes (~1.2k tokens).
+- `MemoryCatalogue` is local and cached in `cache/memory-cards.jsonl` (synced by id); `SessionCatalogue` was not built: the
+  engine's ledger already does that job. The operator brief is `brief.md` beside the binary; deriving pins from the maze's
+  `user:`/`feedback:` rows is not done.
+- A deep recall that outlives its deadline is delivered with the next tool result (`Router::late`), and a question about the past
+  waits for it (`knowledge.deep_recall_ms`).
+- Rules are one regex on the arguments of a call, checked before it runs (no stream abort); `scope: tool:<name>` narrows it.
+- The contract of 5.3 as built: `open(const Uri&)` (the page rides in the Uri), `refresh()` is blocking and the owner
+  (`Refresher`) picks the thread, and `cancel(bool)` was added so `Refresher::stop()` can ask a sync in progress to stop.
+
+### 15.1 Concurrency, SIMD and OpenMP
+
+The first build of `dd::know` called its snapshot cells lock-free and used no SIMD or OpenMP. Both were wrong for the
+operator's standing rule (atomic lock-free, no mutex unless 100% needed, OpenMP and AVX as real tools). An audit found no
+mutex, but six `std::atomic<std::shared_ptr<...>>` cells (the router's `reattach_`, the skills' `places_`, `paths_` and
+`snap_`, the memory and tool catalogues' `snap_`): `is_lock_free()` is 0 for it on GCC 16.2.1, because libstdc++ packs a lock
+bit into the pointer and spins. They sat on the per-turn search path. What replaced them, and what else changed:
+
+**The rule.** `dd::know` holds no mutex and no condition variable. A hand-off between threads is single-owner state plus
+`core::MpscQueue`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls.
+
+**`core::SnapCell<T>`** (`include/dd/core/snap_cell.hpp`). A reader pins the current epoch (one store into its thread's
+record), loads one pointer and unpins when its `Read` ends (one store): wait-free. The publisher swaps with one exchange,
+retires the old snapshot under the current epoch, bumps the epoch, and frees retired snapshots whose epoch is below the
+oldest epoch any reader is pinned to. It never waits for a reader: a slow reader only delays the freeing. Nested reads on a
+thread pin once; thread records are leased by CAS, handed back at thread exit and never freed. A `Read` stays on its thread
+and ends before its cell; one publisher at a time. Readers do not hold a pin across blocking I/O: `SkillCatalogue::open` and
+the disk and maze body reads copy out what they need first. Rejected: hazard pointers (a validation loop and a record per
+guard for the same result), left-right double buffering (the writer blocks on a slow reader), keeping every snapshot alive
+(unbounded), `atomic<shared_ptr>` (above).
+
+**`core::park` / `core::unpark`** (`include/dd/core/park.hpp`). A futex wait and wake on an `atomic<uint32_t>`; the kernel
+compares the word with `expected` itself, so a change made just before the call is not slept through. The `Refresher` used to
+poll every 50 ms forever and the router's deep-recall wait every 2 ms; both now sleep in the kernel until woken. The deep wait
+still takes 20 ms slices, only to look for a user cancel; the recall landing wakes it at once. Off Linux `park` degrades to
+2 ms sleeps. `Catalogue::cancel(bool)` is checked inside the memory sync's page and batch loops and the maze's skill listing,
+and `Refresher::stop()` calls it: quitting no longer waits out a sync (a cold-cache first launch used to keep the process
+alive about 15 s after the answer; what was fetched is kept and saved).
+
+**SIMD** (`include/dd/know/scan.hpp`, `src/know/scan.cpp`). `classify` turns 64 bytes into bit masks (alnum, upper, lower,
+space, non-ASCII) and `classify32` does one word; each exists as scalar, AVX2 and AVX-512 kernels behind `target`
+attributes, picked once per process by CPUID, with `level()` and `force()` for tests, as `ui_simd` does. The tokenizer
+(`src/know/text.cpp`) uses them: pass 1 finds blank-delimited words from the space mask 64 bytes at a time (trim tables, no
+per-word copies); pass 2 emits a clean ASCII word with no camelCase seam straight from the text, and everything else falls to
+the old per-character state machine, so the semantics are those of the old code by construction. `stem` works on views and
+the stopword check is a (first byte, length) bucket table instead of a hash.
+
+**OpenMP** (`include/dd/core/par.hpp`). `par_threads()` is `min(8, omp_get_max_threads())`, and every region sits behind a size
+`if()` so small catalogues never wake a thread: `Bm25fParams::par_docs` 512, 64 skills, 512 cached memory rows. `Bm25f` builds on
+all cores in three loops (each card's terms per field, each card's weight per term in field order, then 16 postings shards, each
+built by one thread, the shard of a term computed once; every list stays in doc order). `DiskSkills::list` reads and hashes
+skills in parallel and gathers them in order; the memory catalogue's cache is parsed in parallel. The search path looks each
+query term up once, not again for every hit; its arithmetic is unchanged. `-fopenmp` is on every Makefile target that links
+`bm25.cpp`, `skills.cpp` or `memory_catalogue.cpp` (an unknown pragma is an error under `-Wall -Werror`).
+
+**Review.** An independent read of this code (a fork, read-only, with proof programs) found three real defects and four small ones; all
+are fixed. (1) The catalogue map in the system prompt lacked the memory and tools lines: one refresher thread went through skills,
+memory and tools in turn, and startup only waited for skills, polling every 20 ms. Now `tool_cat->refresh()` runs at once (it is
+local), each catalogue fed by the maze has its own refresher thread, and startup sleeps on each catalogue's first snapshot
+(`SnapCell::wait`, `Catalogue::wait_ready`: woken by `publish()`, bounded to 4 s, no polling). (2) A use after free at exit: the
+refresher thread could still be inside `ToolCatalogue::refresh()` reading the deck after the deck was gone (shown with ASAN); the
+refreshers are now declared after the deck and the router, so they stop first, and the tool catalogue is not on a thread at all.
+(3) A stale recall reached the next turn: `submit_deep` skipped while any older recall ran, and `on()` then delivered whatever was in
+flight. A recall belongs to its turn: an older turn's is let go and a fresh one is asked, and a landed recall nobody has taken
+is handed over by the next trigger instead of being replaced. Small ones: `seq_cst` on the record link and the head load in the
+epoch scan (the Dekker argument had a formal gap on weak memory models, none seen on x86), `reserve` before the exchange in
+`publish()` so an allocation failure cannot leak the old snapshot, and the "wait-free" wording (a thread's first read allocates its
+record).
+
+**Measured** (this box, a Ryzen 7 3800X, real data; throwaway benchmarks linking the know sources, not committed;
+`OMP_NUM_THREADS=n` reproduces the scaling row):
+
+| What | Before | After | Note |
+|---|---|---|---|
+| Tokenizer, 1.2 MB of card text (159k terms), one thread | 35.9 ms (33 MB/s) | 14.9 ms (80 MB/s) | same output, bit for bit |
+| Memory index, 3,745 cards, parse cache + build | 79.7 ms | about 20 ms | 62 / 37 / 25 / 20 / 20 ms at 1 / 2 / 4 / 8 / 16 threads; capped at 8 |
+| Skills, 467 disk cards, scan + build | 112 ms | about 40 ms | `Scanner::scan` is 31.7 ms of it, 27.4 ms of that the serial directory walk in `core::walk` |
+| One search, skills / memory | 2.5 us / 5 us | 2.5 us / 5 us | unchanged |
+| Local retrieval per turn (router, three catalogues) | about 0.06 ms | about 0.06 ms | the searches did not change; not re-timed end to end |
+
+A search stays scalar: it touches a few hundred sparse postings, so there is nothing for SIMD or OpenMP to do, and saying so
+beats a vector loop that wins nothing. The directory walk is syscalls in a generic helper, not compute, and was left alone.
+
+**Verified.**
+- Tokenizer: `tests/know_tokenizer_test.cpp` keeps the old per-character tokenizer verbatim as the reference and compares 560,392
+  cases (structured words at every offset across the 32- and 64-byte windows, long runs around the limits, umlauts next to runs,
+  UTF-8, broken bytes, 120k random texts) at every kernel level the CPU has. Three planted bugs (a dropped camelCase seam rule, a
+  non-ASCII byte treated as a clean end, a missing trailing trim) are each caught at once.
+- Real data: a 5,774-line dump (every card's tokens for the 467 skills and 3,745 memory rows, and the hits, scores to nine digits,
+  matched terms and mass of 88 queries) has the same md5 (`6a02ce3e1461f2521a4c1b15a4d6e602`) before the work and after every step.
+- Kernels: `tests/know_scan_test.cpp` checks scalar and AVX2 against a plain reference for all 256 byte values at the lengths that
+  straddle a vector, 60,000 random windows, and a guard page after the text (a read past it faults).
+- `Bm25f`: `tests/know_bm25_test.cpp` builds 2,600 cards serially (one shard) and in parallel at 1, 2, 4 and 8 threads and requires
+  exactly equal hits (every field) and idf for 300 queries.
+- `SnapCell`: `tests/core_snap_cell_test.cpp` (20,000 publishes against six readers with poisoned destructors, thread churn,
+  pinned-read lifetime) is clean under ThreadSanitizer and under AddressSanitizer with UBSan. ThreadSanitizer does not understand
+  libgomp, so the parallel regions are guarded by the exact-equality tests instead.
+- Old against new: the committed code of the first build (old tokenizer, serial index, `atomic<shared_ptr>`) and the final code
+  produce byte-identical output on the same frozen inputs: the tokens of every card of the 467 skills and 3,753 memory rows and
+  the hits (scores to nine digits, matched terms, mass) of 88 queries, 5,782 lines. All eleven sanitizer builds (ASAN+UBSan for
+  `snap`, `park`, `scan`, `tokenizer`, `bm25`, `router`, `know`; TSAN for `snap`, `park`, `router`, `context`) report nothing.
+- `park` and the `Refresher`: `tests/core_park_test.cpp` (timeout, immediate return, wake latency, 60,000 hand-offs without a lost
+  wakeup) and `test_refresher_parks` in `tests/know_router_test.cpp` (idle: no refresh, a poke is heard in under 30 ms, `stop()`
+  returns in under 30 ms from a ten-minute park).
+
+**Not run.** The AVX-512 kernels (`classify_avx512`, `classify32_avx512`, and the ones in `ui_simd`) are written and compile, and
+have never executed: this box has AVX2 and no AVX-512, QEMU TCG hides AVX-512 even with `-cpu max`, and Intel SDE is not installed.
+They use the patterns `ui_simd` already uses (masked tail loads, `_mm512_cmple_epu8_mask`, `_bzhi_u64`). Before relying on them run
+`build/dd_know_scan_tests` and `build/dd_know_tokenizer_tests` on an AVX-512 machine; each forces every level the CPU has and
+prints `skip avx512 (cpu lacks it)` for the rest.
+
+### 15.2 Test failures that are not this branch's
+
+Seen in the full suite and reproduced with main's own binaries (built 10-21, same result), so none comes from `feat/knowledge`:
+- `dd_config_tests` loads the live `~/.daedalus/config.yaml`; its `mcp_servers.pulse.description` no longer contains "arXiv".
+- `dd_cc_tests` and `dd_trajectory_compressor_tests` abort with `json: eof`.
