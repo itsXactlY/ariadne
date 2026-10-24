@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include "dd/core/path.hpp"
+#include "learn_tmp.hpp"
 #include "dd/learn/inspect.hpp"
 #include "dd/learn/ledger.hpp"
 
@@ -39,7 +40,7 @@ static size_t visible_skills(const fs::path& root) {
 }
 
 int main() {
-    const fs::path base = fs::path("build") / ("learn_inspect_tmp_" + std::to_string(::getpid()));
+    const fs::path base = learn_test_dir("learn_inspect_tmp");
     fs::remove_all(base);
     InspectPaths p{base / "learn", base / "skills"};
     const int64_t t0 = 1700000000, day = 86400;
@@ -99,6 +100,24 @@ int main() {
     chk(size_before() == before, "the views write nothing");
     chk(!status(InspectPaths{base / "nowhere", p.skills_root}, now).ok, "no ledger: an error, and no directory created");
     chk(!fs::exists(base / "nowhere"), "... and nothing was created");
+
+    // ---- a failed sync of the last run is not silent ----
+    std::ofstream(p.learn_dir / "HEALTH") << "sync_errors 2\nwrite_errors 1\n";
+    const Result hs = status(p, now);
+    chk(hs.ok && has(hs.text, "WARNING") && has(hs.text, "2 failed sync") && has(hs.text, "1 failed write"), "status warns about failed syncs: " + hs.text);
+    fs::remove(p.learn_dir / "HEALTH");
+    chk(!has(status(p, now).text, "WARNING"), "... and says nothing when the run was clean");
+
+    // ---- forget beside a live writer: refused, the skill folder stays ----
+    {
+        std::string lerr;
+        auto live = Ledger::open(p.learn_dir, {}, &lerr);
+        chk(live != nullptr, "a writer can take the ledger: " + lerr);
+        const Result busy = forget(p, "fix-quadlet", now);
+        chk(!busy.ok && has(busy.text, "in use by another dd process"), "forget is refused while another process writes: " + busy.text);
+        chk(fs::exists(p.skills_root / "ops" / "fix-quadlet" / "SKILL.md") && !fs::exists(p.skills_root / ".retired"), "... and the skill folder is untouched");
+        chk(status(p, now).ok && why(p, "fix-quadlet", now).ok, "the views still work beside the writer");
+    }
 
     // ---- forget ----
     const Result refuse = forget(p, "human-made", now);

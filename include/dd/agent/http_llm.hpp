@@ -35,6 +35,7 @@ public:
     std::function<void(const std::string&)> on_reasoning, on_content;
     std::function<void(const CallStats&)> on_stats;
     bool streamed = false;   // the last call's answer went out through on_content
+    long stall_timeout_s = 900;   // no bytes for this long ends a call (a long prefill on a slow box must survive)
 
     core::Message chat(const std::vector<core::Message>& messages, const core::Json& tools) override;
 

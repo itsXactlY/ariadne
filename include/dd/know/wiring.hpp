@@ -31,6 +31,11 @@ struct SkillSetup {
 
 SkillSetup skill_setup(const core::Config& cfg, const core::Home& home);
 
+// Process-wide settings of the know module from the config, once at startup before any catalogue is built:
+//   knowledge.stopword_languages  [en, de]  which languages' stopwords are out (replaces the default: list en/de too)
+// A scalar "en, de, sv" is read as a list; an empty list switches stopwords off.
+void configure(const core::Config& cfg);
+
 // mem may be null: the catalogue is then the disk's alone.
 std::shared_ptr<SkillCatalogue> make_skill_catalogue(const SkillSetup& s, std::shared_ptr<context::Memory> mem);
 

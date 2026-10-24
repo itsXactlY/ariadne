@@ -10,12 +10,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <variant>
 #include <vector>
 
 #include "dd/core/crc32c.hpp"
+#include "learn_tmp.hpp"
 #include "dd/learn/codec.hpp"
 #include "dd/learn/compactor.hpp"
 #include "dd/learn/fsutil.hpp"
@@ -64,8 +66,8 @@ static void chk(bool ok, const std::string& label) {
 }
 
 static fs::path base_dir() {
-    const char* e = std::getenv("DD_TEST_DIR");
-    return e ? fs::path(e) : fs::path("build/learn_ledger_tmp");
+    static const fs::path p = std::getenv("DD_TEST_DIR") ? fs::path(std::getenv("DD_TEST_DIR")) : learn_test_dir("learn_ledger_tmp");
+    return p;
 }
 static fs::path fresh(const std::string& name) {
     const fs::path p = base_dir() / name;
@@ -498,6 +500,53 @@ static void test_million() {
     chk(l && l->health().recovered < N / 5 + 10000, "million: recovery replays only the tail");
 }
 
+static void test_lock_and_health() {
+    const fs::path d = fresh("lock");
+    std::string err;
+    {
+        auto a = Ledger::open(d, opts_fast(), &err);
+        chk(a != nullptr, "lock: the first writer opens: " + err);
+        std::string err2;
+        auto b = Ledger::open(d, opts_fast(), &err2);
+        chk(!b, "lock: a second writer on the same directory is refused");
+        chk(err2.find("in use by another dd process") != std::string::npos && err2.find("pid " + std::to_string(::getpid())) != std::string::npos,
+            "lock: the refusal names the holder's pid: " + err2);
+        struct stat st {};
+        chk(::stat((d / "LOCK").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "lock: LOCK is private (0600)");
+        std::ifstream in(d / "LOCK");
+        long pid = 0;
+        in >> pid;
+        chk(pid == ::getpid(), "lock: LOCK holds the pid");
+        a->record(make_record(1));
+        a->sync();
+        Stats s;
+        Ledger::Health h;
+        chk(Ledger::load_readonly(d, s, &h) && s.records == 1, "lock: the read-only load works beside the writer");
+        chk(h.sync_errors == 0 && h.write_errors == 0, "lock: a clean run reports no errors");
+        // a refused open touched nothing the holder owns
+        chk(a->record(make_record(2)), "lock: the holder still writes after a refused open");
+    }
+    auto c = Ledger::open(d, opts_fast(), &err);
+    chk(c != nullptr, "lock: released with the ledger: " + err);
+    chk(c && c->live().records == 2, "lock: the new holder sees both records");
+
+    // a refused open must not clear another run's temp file or its HEALTH
+    auto e = Ledger::open(d, opts_fast());
+    chk(!e, "lock: still refused while c lives");
+    std::ofstream(d / "snap.tmp") << "x";
+    chk(!Ledger::open(d, opts_fast()) && fs::exists(d / "snap.tmp"), "lock: the loser of the race does not remove the holder's temp file");
+    c.reset();
+
+    // HEALTH: what a run that could not sync leaves for `dd learn status`; a fresh run starts clean
+    std::ofstream(d / "HEALTH") << "sync_errors 3\nwrite_errors 2\n";
+    Stats s;
+    Ledger::Health h;
+    chk(Ledger::load_readonly(d, s, &h) && h.sync_errors == 3 && h.write_errors == 2, "health: the read-only load reports the last run's errors");
+    auto f = Ledger::open(d, opts_fast(), &err);
+    chk(f && !fs::exists(d / "HEALTH") && !fs::exists(d / "snap.tmp"), "health: a fresh holder clears HEALTH and stale temp files");
+    chk(f && f->health().sync_errors == 0, "health: counters start at zero");
+}
+
 int main() {
     std::error_code ec;
     fs::create_directories(base_dir(), ec);
@@ -507,6 +556,7 @@ int main() {
     test_newer_and_refusal();
     test_compaction_kills();
     test_rotation_and_threads();
+    test_lock_and_health();
     test_million();
     fs::remove_all(base_dir(), ec);
     if (g_fail) {

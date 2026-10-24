@@ -57,12 +57,15 @@ void LearnService::curate_now() {
 }
 
 bool LearnService::wait_idle(std::chrono::milliseconds timeout) const {
+    // real sync: run() notes a drain pass on the sink and we park on its futex word
     const auto end = std::chrono::steady_clock::now() + timeout;
-    while (processed_.load(std::memory_order_acquire) < sink_->pushed()) {
-        if (std::chrono::steady_clock::now() > end) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    for (;;) {
+        const uint64_t want = sink_->pushed();
+        if (processed_.load(std::memory_order_acquire) >= want) return true;
+        const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(end - std::chrono::steady_clock::now());
+        if (left <= std::chrono::nanoseconds(0)) return false;
+        sink_->wait_drain(left);   // parks until the next drain note or the timeout
     }
-    return true;
 }
 
 LearnService::Status LearnService::status() const {
@@ -152,7 +155,7 @@ void LearnService::run() {
             processed_.fetch_add(1, std::memory_order_release);
             any = true;
         }
-        if (any) ledger_->tick();
+        if (any) { ledger_->tick(); sink_->note_drain(); }   // wakes any wait_idle park
         if (curate_.exchange(false) || now() >= next_curate_) curate();
         const int64_t wait_s = std::max<int64_t>(1, next_curate_ - now());
         sink_->wait(std::chrono::seconds(std::min<int64_t>(wait_s, 30)));
@@ -161,6 +164,7 @@ void LearnService::run() {
         handle(e);
         processed_.fetch_add(1, std::memory_order_release);
     }
+    sink_->note_drain();   // the shutdown drain counts too
     observer_->flush();
     curate();
     ledger_->sync();

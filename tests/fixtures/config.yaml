@@ -1,0 +1,65 @@
+# tests/fixtures/config.yaml — a neutral, realistic config: the YAML shapes the loader supports (no block scalars: it drops them).
+# No hostnames, tokens or personal paths; tests/config_test.cpp asserts on exactly this file.
+_config_version: 16
+
+model:
+  name: example-model-q4          # sent as "model"
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+  api_key: ""
+
+toolsets: []
+fallback_providers: []
+honcho: {}
+timezone: ''
+
+agent:
+  max_turns: 400
+  tool_use_enforcement: true
+  system_prompt: ""
+
+compression:
+  threshold: 0.83
+  watermarks:
+    low: 0.7
+    high: 0.88          # prewarm the next epoch
+    hard: 0.95
+
+tool_search:
+  enabled: true
+  always_load:
+    - memory_recall
+    - memory_think
+    - memory_get
+    - memory_remember
+
+skills:
+  enabled: true
+  external_dirs:
+    - /opt/skills/extra
+  disabled: [alpha, "beta", 'gamma']
+
+providers:
+  custom:
+    kind: openai
+    options: {timeout: 30, retries: 2}
+
+terminal:
+  backend: local
+
+# the mcp_servers shapes: a per-tool switch, a multi-line quoted description with \u escapes and a
+# line continuation, and a single-line description
+mcp_servers:
+  memory:
+    enabled: true
+    transport: http
+    url: http://127.0.0.1:8765/mcp
+    tools:
+      memory_prune: {enabled: false}
+  search:
+    enabled: true
+    description: "SEARCH — web and paper tools: news, arXiv, \
+      reports and more"
+  quant:
+    enabled: false
+    description: "QUANT — backtests and factor reports"

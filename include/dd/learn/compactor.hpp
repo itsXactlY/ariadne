@@ -42,6 +42,7 @@ public:
         uint64_t covered_segment = 0, last_seq = 0;
         size_t segments_removed = 0, snapshots_removed = 0;
         uint64_t bad_segments = 0;   // folded segments that ended on a bad frame: what followed it is gone
+        uint64_t sync_errors = 0;    // fsync calls that failed (snapshot file, directory)
     };
 
     explicit Compactor(std::filesystem::path dir, Hook hook = {}) : dir_(std::move(dir)), hook_(std::move(hook)) {}

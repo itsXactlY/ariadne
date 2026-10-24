@@ -77,7 +77,7 @@ int main() {
     CHK(score_task("status", &ms_tools) == 4);
     CHK(score_task("please build a website for my startup") == 4);
     CHK(score_task("audit audit audit audit") == 8);
-    CHK(score_task("/home/alca/x.py") == 2);
+    CHK(score_task("/home/someone/x.py") == 2);
     CHK(score_task("refactor the whole project and add tests and docs and be thorough please and comprehensive") == 6);
     CHK(score_task("") == 0);
     CHK(score_task("hi") == 0);
@@ -122,7 +122,7 @@ int main() {
     CHK(estimate_level("danke", &ms_tools) == "low");
     CHK(estimate_level("ultra") == "max");
     CHK(estimate_level("audit audit audit audit") == "high");
-    CHK(estimate_level("/home/alca/x.py") == "low");
+    CHK(estimate_level("/home/someone/x.py") == "low");
     CHK(estimate_level("fix", nullptr, "high") == "high");
 
     if (failures == 0) std::printf("task_intensity: %d checks: PASS\n", checks);

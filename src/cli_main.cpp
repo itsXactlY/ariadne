@@ -12,6 +12,7 @@
 //
 // flags: --home DIR  --config FILE  --maze URL  --no-maze  (config.yaml sits beside the binary)
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -78,7 +79,9 @@ struct Env {
 
 Env open_env(const Args& a) {
     Env e;
-    e.home = core::resolve_home(a.home, a.config);
+    std::string why;
+    e.home = core::resolve_home(a.home, a.config, &why);
+    if (e.home.root.empty()) { std::cerr << why << "\n"; std::exit(2); }
     core::Config cfg{core::Json{}};
     const fs::path cfg_path = a.config.empty() ? e.home.config() : fs::path(a.config);
     std::error_code ec;
@@ -98,6 +101,22 @@ Env open_env(const Args& a) {
     return e;
 }
 
+// A whole decimal number in [lo, hi]; false for anything else (empty, trailing junk, out of range).
+bool parse_int(const std::string& text, int lo, int hi, int& out) {
+    if (text.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    const long v = std::strtol(text.c_str(), &end, 10);
+    if (errno != 0 || end == text.c_str() || *end != '\0' || v < lo || v > hi) return false;
+    out = static_cast<int>(v);
+    return true;
+}
+
+int bad_number(const char* flag, const std::string& got) {
+    std::cerr << "dd: " << flag << " takes a whole number, got '" << got << "'\n";
+    return 1;
+}
+
 std::string kb(size_t bytes) {
     char b[32];
     std::snprintf(b, sizeof b, bytes >= 10240 ? "%.0f KB" : "%.1f KB", static_cast<double>(bytes) / 1024.0);
@@ -109,15 +128,17 @@ Query query_of(const Env& e, const std::string& text) {
 }
 
 int cmd_list(const Args& a) {
-    Env e = open_env(a);
     std::string category;
     int limit = 20;
     bool names_only = false;
     for (size_t i = 0; i < a.pos.size(); ++i) {
         if (a.pos[i] == "--category" && i + 1 < a.pos.size()) category = a.pos[++i];
-        else if (a.pos[i] == "--limit" && i + 1 < a.pos.size()) limit = std::stoi(a.pos[++i]);
-        else if (a.pos[i] == "--names-only") names_only = true;
+        else if (a.pos[i] == "--limit" && i + 1 < a.pos.size()) {
+            if (!parse_int(a.pos[i + 1], 0, 1000000, limit)) return bad_number("--limit", a.pos[i + 1]);
+            ++i;
+        } else if (a.pos[i] == "--names-only") names_only = true;
     }
+    Env e = open_env(a);
     const auto c = e.cat->census();
     std::cout << "total=" << c.cards << " groups=" << c.by_group.size() << "\n";
     for (const auto& [g, n] : c.by_group) std::cout << "  " << g << ": " << n << "\n";
@@ -155,6 +176,8 @@ int cmd_view(const std::string& uri_text, const Args& a) {
 
 int cmd_find(const Args& a) {
     if (a.pos.empty()) { std::cerr << "usage: dd find QUERY...\n"; return 1; }
+    int k = 8;
+    if (!a.k.empty() && !parse_int(a.k, 1, 1000, k)) return bad_number("--k", a.k);
     Env e = open_env(a);
     std::string text;
     for (const auto& w : a.pos) text += (text.empty() ? "" : " ") + w;
@@ -162,7 +185,6 @@ int cmd_find(const Args& a) {
     std::cout << "terms:";
     for (const auto& t : q.terms) std::cout << " " << t.text;
     std::cout << "\n";
-    const int k = a.k.empty() ? 8 : std::stoi(a.k);
     for (const auto& h : e.cat->search(q, k)) {
         std::printf("%5.2f  %-42s [%s · %s%s]  %s\n", h.score, h.card.uri.id.c_str(), h.card.group.empty() ? "-" : h.card.group.c_str(),
                     h.card.source.c_str(), h.card.has_body ? (", " + kb(h.card.body_bytes)).c_str() : ", no body", utf8_head(h.card.gist, 90).c_str());
@@ -190,9 +212,10 @@ int cmd_check(const Args& a) {
     std::cout << "  identical copies collapsed: " << c.collapsed << "   maze snapshots older than their disk skill: " << c.superseded << "\n";
     std::cout << "  differing copies kept as name@source: " << c.aliased << "\n";
     std::cout << "  rows that are not skills (notes, fragments): " << c.skipped << "\n";
+    std::cout << "  listings that hit their cap (more behind them): " << c.truncated << "\n";
     std::cout << "  no body: " << bodyless.size() << (bodyless.empty() ? "" : "   " + list(bodyless)) << "\n";
     std::cout << "  no gist: " << nogist.size() << (nogist.empty() ? "" : "   " + list(nogist)) << "\n";
-    const bool problems = !bodyless.empty() || !nogist.empty() || c.skipped > 0;
+    const bool problems = !bodyless.empty() || !nogist.empty() || c.skipped > 0 || c.truncated > 0;
     return (a.strict.empty() || !problems) ? 0 : 1;
 }
 
@@ -232,9 +255,10 @@ std::vector<Prompt> read_corpus(const std::string& path) {
 
 int cmd_replay(const Args& a) {
     if (a.pos.empty()) { std::cerr << "usage: dd replay FILE [--k N] [--show]\n"; return 1; }
+    int k = 3;
+    if (!a.k.empty() && !parse_int(a.k, 1, 1000, k)) return bad_number("--k", a.k);
     Env e = open_env(a);
     const auto corpus = read_corpus(a.pos[0]);
-    const int k = a.k.empty() ? 3 : std::stoi(a.k);
     struct Row {
         const Prompt* p;
         std::vector<Hit> hits;
@@ -323,12 +347,13 @@ size_t copy_tree(const fs::path& from, const fs::path& to, std::set<fs::path>& s
 }
 
 int cmd_import(const Args& a) {
-    const core::Home home = core::resolve_home(a.home, a.config);
+    std::string why;
+    const core::Home home = core::resolve_home(a.home, a.config, &why);
+    if (home.root.empty()) { std::cerr << why << "\n"; return 1; }
     const fs::path from = a.from.empty() ? core::platform_default_daedalus_home() : fs::path(a.from);
     std::error_code ec;
     if (!fs::is_directory(from, ec)) { std::cerr << "dd: no " << from << "\n"; return 1; }
     if (fs::weakly_canonical(from, ec) == fs::weakly_canonical(home.root, ec)) { std::cerr << "dd: " << from << " is this home already\n"; return 1; }
-    std::string why;
     core::ensure_home(home, &why);
     const bool all = !a.skills && !a.skins && !a.cfg;
     std::set<fs::path> seen;
@@ -350,7 +375,9 @@ int cmd_import(const Args& a) {
 int cmd_learn(const Args& a) {
     const char* usage = "usage: dd learn status | why SKILL | report | forget SKILL | export\n";
     if (a.pos.empty()) { std::cerr << usage; return 1; }
-    const core::Home home = core::resolve_home(a.home, a.config);
+    std::string why;
+    const core::Home home = core::resolve_home(a.home, a.config, &why);
+    if (home.root.empty()) { std::cerr << why << "\n"; return 1; }
     const learn::InspectPaths p{home.learn(), home.skills()};
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     const std::string& sub = a.pos[0];

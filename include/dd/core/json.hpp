@@ -22,7 +22,12 @@ struct Json {
 
 using JsonSP = std::shared_ptr<Json>;
 
-// Parse a JSON document; throws std::runtime_error on malformed input.
+// Containers nest at most this deep: the parser refuses more, dump and deep copy cut a deeper tree to null.
+constexpr int kJsonMaxDepth = 256;
+
+// Parse a JSON document (RFC 8259 numbers and strings); throws std::runtime_error on malformed input, on nesting
+// past kJsonMaxDepth and on a number that overflows a double. Whatever follows the first value is ignored (SSE
+// lines and tool-call arguments arrive with trailing text); inside a container the grammar is strict.
 Json json_parse(const std::string& text);
 // Serialize to compact JSON (UTF-8 passes through, ensure_ascii=false; an
 // ill-formed byte goes out as U+FFFD, so a strict server always parses it).
@@ -31,7 +36,7 @@ std::string json_dump(const Json& v);
 // budget stops mid-value, leaving a string unterminated and containers open.
 // Salvage the members that finished (close the containers they sat in) and set
 // `repaired`; a document that parses as-is leaves it false. Never throws:
-// Null + repaired=true means nothing was salvageable.
+// Null + repaired=true means nothing was salvageable (nesting past kJsonMaxDepth included).
 Json json_parse_args(const std::string& text, bool& repaired);
 
 // Builders.

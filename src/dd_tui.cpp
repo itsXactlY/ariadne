@@ -14,9 +14,10 @@
 //   build/dd_tui --init [--from FILE]            # write config.yaml + folders beside the binary
 //   build/dd_tui --home DIR                      # another home: config.yaml, skills/, rules/, state/, logs/
 //   build/dd_tui path/to/config.yaml -- "msg"    # explicit config (its folder is the home), single-shot msg
+//   build/dd_tui --help | --version
 //   env: DD_HOME, DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
-//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /clear /interrupt /quit
+//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
@@ -35,15 +36,19 @@
 #include "dd/know/tripwire.hpp"
 #include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
+#include "dd/tools/fs_tools.hpp"
 #include "dd/tools/mcp.hpp"
+#include "dd/tools/shell.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
 #include "dd/tools/tool_search.hpp"
 #include "dd/ui.hpp"
+#include "dd/ui_keys.hpp"
 #include "dd/ui_simd.hpp"
 
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <curl/curl.h>
@@ -60,12 +65,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -76,6 +83,10 @@ namespace ddcore = ::dd::core;
 using namespace dd::core;
 using dd::tools::ToolEntry;
 using dd::tools::MCPClient;
+using dd::ui::Editor;
+using dd::ui::K;
+using dd::ui::Key;
+using dd::ui::KeyReader;
 
 using JsonSP = ddcore::JsonSP;
 
@@ -158,182 +169,70 @@ static bool result_failed(const std::string& r) {
     return false;
 }
 
-// ---- filesystem tool handlers (real I/O) ----
-// Numbered lines "     N|text" from offset (1-based), limit lines at a time:
-// a result cut for the window says where to continue.
+// ---- file and shell tools: dd/tools/fs_tools.hpp, dd/tools/shell.hpp ----
 static dd::know::Resolver* g_resolver = nullptr;   // skill://name, mem://id: one verb reads everything the catalogues hold
 
 static std::string h_read_file(const Json& args) {
-    const Json* p = json_get(args, "path");
-    if (!p || p->type != Json::Str) return jerr("path required");
-    if (g_resolver)
+    if (const Json* p = json_get(args, "path"); p && p->type == Json::Str && g_resolver)
         if (auto internal = g_resolver->read(p->str)) return *internal;
-    std::ifstream f(p->str, std::ios::binary);
-    if (!f) return jerr("cannot open " + p->str);
-    long offset = 1, limit = 2000;
-    if (const Json* o = json_get(args, "offset"); o && o->type == Json::Num) offset = std::max(1L, static_cast<long>(o->num));
-    if (const Json* l = json_get(args, "limit"); l && l->type == Json::Num) limit = std::max(1L, static_cast<long>(l->num));
-    std::string out, line;
-    long n = 0, shown = 0;
-    char num[24];
-    while (std::getline(f, line)) {
-        ++n;
-        if (n < offset || shown >= limit) continue;
-        std::snprintf(num, sizeof num, "%6ld|", n);
-        out += num + line + "\n";
-        ++shown;
-    }
-    return json_dump(json_obj({{"path", jsp(json_str(p->str))},
-                               {"content", jsp(json_str(out))},
-                               {"total_lines", jsp(json_num(static_cast<double>(n)))},
-                               {"offset", jsp(json_num(static_cast<double>(offset)))},
-                               {"lines", jsp(json_num(static_cast<double>(shown)))}}));
+    return dd::tools::fs_read(args);
 }
-static std::string h_write_file(const Json& args) {
-    const Json* p = json_get(args, "path");
-    const Json* c = json_get(args, "content");
-    if (!p || p->type != Json::Str || !c || c->type != Json::Str) return jerr("path+content required");
-    std::ofstream o(p->str, std::ios::binary);
-    if (!o) return jerr("cannot open " + p->str);
-    o << c->str;
-    return json_dump(json_obj({{"path", jsp(json_str(p->str))},
-                               {"bytes", jsp(json_num((double)c->str.size()))}}));
-}
-static std::string h_list_dir(const Json& args) {
-    const Json* p = json_get(args, "path");
-    std::string dir = (p && p->type == Json::Str) ? p->str : std::string(".");
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) return jerr("not a dir: " + dir);
-    Json arr = json_arr();
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
-        arr_push(arr, json_str(e.path().string()));
-    return json_dump(json_obj({{"path", jsp(json_str(dir))}, {"entries", jsp(std::move(arr))}}));
-}
-static Json fs_schema(const std::vector<std::string>& props, const std::string& desc) {
-    Json props_map = json_obj();
-    for (const auto& k : props) {
-        Json one = json_obj({{"type", jsp(json_str("string"))},
-                             {"description", jsp(json_str(desc))}});
-        obj_set(props_map, k, one);
-    }
-    obj_set(props_map, "intent", json_obj({{"type", jsp(json_str("string"))},
-                                           {"description", jsp(json_str("what you are doing, in a few words (optional)"))}}));
-    Json req = json_arr();
-    for (const auto& k : props) arr_push(req, json_str(k));
-    Json parameters = json_obj({{"type", jsp(json_str("object"))},
-                                {"properties", jsp(std::move(props_map))},
-                                {"required", jsp(std::move(req))}});
-    return json_obj({{"description", jsp(json_str(desc))},
-                     {"parameters", jsp(std::move(parameters))}});
+static std::string h_write_file(const Json& args) { return dd::tools::fs_write(args); }
+static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args); }
+
+// the agent's interrupt flag: Esc, and a SIGINT/SIGTERM/SIGHUP, reach a running shell command through it
+static std::atomic<std::atomic<bool>*> g_cancel{nullptr};
+static std::atomic<int> g_sig{0};
+
+static void on_term(int sig) {   // async-signal-safe: two atomic stores, the loops do the rest
+    g_sig.store(sig, std::memory_order_relaxed);
+    if (std::atomic<bool>* c = g_cancel.load(std::memory_order_relaxed)) c->store(true, std::memory_order_relaxed);
 }
 
-// ---- guarded shell tool: everything allowed except a denylist of dangerous commands ----
-static bool has_recursive_flag(const std::vector<std::string>& t) {
-    for (const auto& a : t) {
-        if (a == "--recursive") return true;
-        if (a.size() > 1 && a[0] == '-' && a[1] != '-' && a.find_first_of("rR") != std::string::npos) return true;
-    }
-    return false;
-}
-
-static bool is_broad_target(const std::string& a) {
-    static const char* const kBroad[] = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "*", ".", "..", "./*",
-        "/home", "/etc", "/usr", "/var", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/root", "/dev", "/sys", "/proc"};
-    for (const char* b : kBroad) if (a == b) return true;
-    return false;
-}
-
-// Returns the reason a command is refused, or "" when it may run.
-static std::string danger_reason(const std::string& cmd, const ddcore::Config& cfg) {
-    for (const char* bad : {":(){", "> /dev/sd", ">/dev/sd", "> /dev/nvme", ">/dev/nvme", "of=/dev/", "--no-preserve-root"})
-        if (cmd.find(bad) != std::string::npos) return std::string("forbidden pattern '") + bad + "'";
-    if ((cmd.find("curl") != std::string::npos || cmd.find("wget") != std::string::npos) &&
-        (cmd.find("| sh") != std::string::npos || cmd.find("|sh") != std::string::npos ||
-         cmd.find("| bash") != std::string::npos || cmd.find("|bash") != std::string::npos))
-        return "piping a download into a shell";
-
-    static const std::set<std::string> kDeny = {
-        "sudo", "su", "doas", "pkexec", "mkswap", "fdisk", "sfdisk", "parted", "wipefs", "shred", "dd",
-        "shutdown", "reboot", "poweroff", "halt", "init", "telinit", "killall5", "passwd", "chpasswd",
-        "visudo", "useradd", "userdel", "usermod", "docker"};
-    static const std::set<std::string> kWrap = {"env", "command", "nohup", "exec", "time", "nice", "xargs",
-        "timeout", "setsid", "stdbuf", "builtin"};
-    std::set<std::string> extra;
-    if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
-        for (const auto& sp : d->arr) if (sp && sp->type == Json::Str) extra.insert(sp->str);
-
-    std::string flat = cmd;
-    for (char& ch : flat)
-        if (ch == ';' || ch == '&' || ch == '|' || ch == '(' || ch == ')' || ch == '`' || ch == '\n') ch = '\n';
-    std::istringstream segs(flat);
-    std::string seg;
-    while (std::getline(segs, seg)) {
-        std::vector<std::string> t;
-        std::istringstream ts(seg);
-        for (std::string w; ts >> w;) t.push_back(w);
-        std::size_t i = 0;
-        while (i < t.size()) {  // skip VAR=val and wrappers (plus their flags/numbers)
-            const std::string& w = t[i];
-            auto eq = w.find('=');
-            if (eq != std::string::npos && eq > 0 && w.find('/') > eq) { ++i; continue; }
-            if (kWrap.count(w)) {
-                ++i;
-                while (i < t.size() && (t[i][0] == '-' || std::isdigit((unsigned char)t[i][0]))) ++i;
-                continue;
-            }
-            break;
-        }
-        if (i >= t.size()) continue;
-        std::string word = t[i];
-        if (auto s = word.rfind('/'); s != std::string::npos) word = word.substr(s + 1);
-        std::vector<std::string> args(t.begin() + i + 1, t.end());
-
-        if (kDeny.count(word) || extra.count(word) || word.rfind("mkfs", 0) == 0)
-            return "command '" + word + "' is blocked";
-        auto any_broad = [&] { for (const auto& a : args) if (is_broad_target(a)) return true; return false; };
-        if (word == "rm" && has_recursive_flag(args) && any_broad()) return "recursive rm on a broad path";
-        if ((word == "chmod" || word == "chown" || word == "chgrp") && has_recursive_flag(args) && any_broad())
-            return "recursive " + word + " on a broad path";
-        if (word == "kill" || word == "pkill")
-            for (const auto& a : args) if (a == "-1" || a == "1") return "signalling pid 1 / all processes";
-        if (word == "systemctl")
-            for (const auto& a : args)
-                if (a == "poweroff" || a == "reboot" || a == "halt" || a == "suspend" || a == "hibernate" || a == "kexec")
-                    return "systemctl " + a;
-        if (word == "podman" && args.size() >= 2 && args[0] == "system" && args[1] == "reset") return "podman system reset";
-        if (word == "git") {
-            bool push = false;
-            for (const auto& a : args) {
-                if (a == "push") push = true;
-                if (a == "--no-verify") return "git --no-verify";
-                if (push && (a == "--force" || a == "-f" || a == "--force-with-lease")) return "git force-push";
-            }
-        }
-    }
-    return "";
+static void install_term_handlers() {   // no SA_RESTART: a blocking poll/read wakes and sees g_sig
+    struct sigaction sa {};
+    sa.sa_handler = on_term;
+    sigemptyset(&sa.sa_mask);
+    for (int s : {SIGINT, SIGTERM, SIGHUP}) sigaction(s, &sa, nullptr);
 }
 
 static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     const Json* c = json_get(args, "cmd");
     if (!c || c->type != Json::Str || c->str.empty()) return jerr("cmd required");
-    std::string cmd = c->str;
-
-    if (std::string why = danger_reason(cmd, cfg); !why.empty()) return jerr("refused: " + why);
-
-    // a group: stdin and stderr apply to every command in it, and the child
-    // never reads the tty the TUI holds in raw mode
-    std::string full = "{ " + cmd + "\n} </dev/null 2>&1";
-    FILE* fp = popen(full.c_str(), "r");
-    if (!fp) return jerr("popen failed");
-    std::string out;
-    char buf[4096];
-    while (size_t n = fread(buf, 1, sizeof buf, fp)) out.append(buf, n);
-    int rc = pclose(fp);
-    if (out.size() > 8000) out = out.substr(0, 8000) + "...(truncated)";
-    return json_dump(json_obj({{"cmd", jsp(json_str(cmd))},
-                               {"exit", jsp(json_num((double)rc))},
-                               {"stdout", jsp(json_str(out))}}));
+    dd::tools::ShellPolicy policy;
+    if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
+        for (const auto& sp : d->arr)
+            if (sp && sp->type == Json::Str) policy.extra_deny.push_back(sp->str);
+    dd::tools::ShellOptions opt;
+    opt.cancel = g_cancel.load(std::memory_order_relaxed);
+    return dd::tools::run_shell(c->str, opt, policy);
 }
+
+// cut at n bytes, never inside a UTF-8 sequence
+static void utf8_trunc(std::string& s, size_t n) {
+    if (s.size() <= n) return;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+    s.resize(n);
+}
+
+static const char* const kVersion = "0.1.0";
+
+static void usage(FILE* f) {
+    std::fputs(
+        "usage: dd_tui [--home DIR | --config FILE | FILE] [-- message words...]\n"
+        "       dd_tui --init [--from FILE] [--rules]     write config.yaml and the folders beside the binary\n"
+        "       dd_tui --help | --version\n"
+        "\n"
+        "  --home DIR      run from another folder (config.yaml, skills/, rules/, state/, logs/)\n"
+        "  --config FILE   an explicit config; its folder is the home (a bare path argument does the same)\n"
+        "  --init          write config.yaml (the embedded reference, or a copy of --from FILE) and the folders\n"
+        "  --rules         with --init: also install the starter tripwires\n"
+        "  -- words...     one message, cards printed inline; with no words and a tty: the interactive screen\n"
+        "\n"
+        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n",
+        f);
+}
+
 
 // ---- terminal: raw mode on the alternate screen, restored on every exit ----
 namespace term {
@@ -379,7 +278,7 @@ bool enter(bool mouse) {
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return false;
     g_active = true;
-    for (int s : {SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE}) std::signal(s, on_fatal);
+    for (int s : {SIGQUIT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE}) std::signal(s, on_fatal);   // INT/TERM/HUP: on_term, see main
     put(kEnter, sizeof kEnter - 1);
     if (mouse) put(kMouseOn, sizeof kMouseOn - 1);
     return true;
@@ -417,190 +316,9 @@ void size(int& cols, int& rows) {
 
 }  // namespace term
 
-// ---- keys: raw bytes -> key events (CSI/SS3, SGR mouse, bracketed paste, UTF-8) ----
-enum class K { Char, Paste, Enter, Backspace, Delete, Left, Right, WordLeft, WordRight, Up, Down, Home, End,
-               PgUp, PgDn, WheelUp, WheelDown, Tab, Esc, CtrlC, CtrlD, CtrlK, CtrlL, CtrlU, CtrlW };
-struct Key {
-    K k;
-    std::u32string text;
-};
-
-class KeyReader {
-public:
-    // Complete keys from what has arrived; a split sequence waits for the rest.
-    std::vector<Key> feed(const char* p, size_t n) {
-        buf_.append(p, n);
-        std::vector<Key> out;
-        auto key = [&](K k) { out.push_back(Key{k, {}}); };
-        size_t i = 0;
-        while (i < buf_.size()) {
-            if (in_paste_) {
-                const size_t e = buf_.find("\x1b[201~", i);
-                if (e == std::string::npos) {
-                    const size_t keep = std::min<size_t>(5, buf_.size() - i);   // maybe half a terminator
-                    paste_.append(buf_, i, buf_.size() - i - keep);
-                    i = buf_.size() - keep;
-                    break;
-                }
-                paste_.append(buf_, i, e - i);
-                std::string t;
-                for (size_t k = 0; k < paste_.size(); ++k) {
-                    if (paste_[k] == '\r') {
-                        t.push_back('\n');
-                        if (k + 1 < paste_.size() && paste_[k + 1] == '\n') ++k;
-                    } else {
-                        t.push_back(paste_[k]);
-                    }
-                }
-                paste_.clear();
-                out.push_back(Key{K::Paste, dd::ui::from_utf8(t)});
-                in_paste_ = false;
-                i = e + 6;
-                continue;
-            }
-            const unsigned char c = static_cast<unsigned char>(buf_[i]);
-            if (c == 0x1b) {
-                if (i + 1 >= buf_.size()) { key(K::Esc); ++i; continue; }
-                const char n1 = buf_[i + 1];
-                if (n1 == '[') {
-                    size_t j = i + 2;
-                    while (j < buf_.size() && (static_cast<unsigned char>(buf_[j]) < 0x40 || static_cast<unsigned char>(buf_[j]) > 0x7E)) ++j;
-                    if (j >= buf_.size()) break;
-                    const std::string par = buf_.substr(i + 2, j - i - 2);
-                    const char fin = buf_[j];
-                    i = j + 1;
-                    if (!par.empty() && par[0] == '<') {
-                        const int b = std::atoi(par.c_str() + 1);
-                        if (fin == 'M' && b == 64) key(K::WheelUp);
-                        if (fin == 'M' && b == 65) key(K::WheelDown);
-                        continue;
-                    }
-                    const bool ctrl = par.find(";5") != std::string::npos;
-                    switch (fin) {
-                    case 'A': key(K::Up); break;
-                    case 'B': key(K::Down); break;
-                    case 'C': key(ctrl ? K::WordRight : K::Right); break;
-                    case 'D': key(ctrl ? K::WordLeft : K::Left); break;
-                    case 'H': key(K::Home); break;
-                    case 'F': key(K::End); break;
-                    case '~': {
-                        const int code = std::atoi(par.c_str());
-                        if (code == 1 || code == 7) key(K::Home);
-                        else if (code == 4 || code == 8) key(K::End);
-                        else if (code == 3) key(K::Delete);
-                        else if (code == 5) key(K::PgUp);
-                        else if (code == 6) key(K::PgDn);
-                        else if (code == 200) in_paste_ = true;
-                        break;
-                    }
-                    default: break;
-                    }
-                    continue;
-                }
-                if (n1 == 'O') {
-                    if (i + 2 >= buf_.size()) break;
-                    switch (buf_[i + 2]) {
-                    case 'A': key(K::Up); break;
-                    case 'B': key(K::Down); break;
-                    case 'C': key(K::Right); break;
-                    case 'D': key(K::Left); break;
-                    case 'H': key(K::Home); break;
-                    case 'F': key(K::End); break;
-                    default: break;
-                    }
-                    i += 3;
-                    continue;
-                }
-                if (n1 == 0x7f || n1 == 0x08) key(K::CtrlW);   // alt-backspace
-                else if (n1 == 'b') key(K::WordLeft);
-                else if (n1 == 'f') key(K::WordRight);
-                i += 2;
-                continue;
-            }
-            if (c == '\r' || c == '\n') { key(K::Enter); ++i; continue; }
-            if (c == 0x7f || c == 0x08) { key(K::Backspace); ++i; continue; }
-            if (c < 0x20) {
-                switch (c) {
-                case '\t': key(K::Tab); break;
-                case 0x01: key(K::Home); break;
-                case 0x02: key(K::Left); break;
-                case 0x03: key(K::CtrlC); break;
-                case 0x04: key(K::CtrlD); break;
-                case 0x05: key(K::End); break;
-                case 0x06: key(K::Right); break;
-                case 0x0b: key(K::CtrlK); break;
-                case 0x0c: key(K::CtrlL); break;
-                case 0x0e: key(K::Down); break;
-                case 0x10: key(K::Up); break;
-                case 0x15: key(K::CtrlU); break;
-                case 0x17: key(K::CtrlW); break;
-                default: break;
-                }
-                ++i;
-                continue;
-            }
-            const size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
-            if (i + len > buf_.size()) break;
-            out.push_back(Key{K::Char, dd::ui::from_utf8(buf_.substr(i, len))});
-            i += len;
-        }
-        buf_.erase(0, i);
-        return out;
-    }
-
-private:
-    std::string buf_, paste_;
-    bool in_paste_ = false;
-};
-
-// ---- the prompt line: UTF-8 aware editing + history ----
-struct Editor {
-    std::u32string buf;
-    size_t cur = 0;
-    std::vector<std::u32string> hist;
-    size_t hpos = 0;
-    std::u32string draft;
-
-    void insert(const std::u32string& s) { buf.insert(cur, s); cur += s.size(); }
-    void backspace() { if (cur) buf.erase(--cur, 1); }
-    void del() { if (cur < buf.size()) buf.erase(cur, 1); }
-    void word_left() {
-        while (cur && buf[cur - 1] == U' ') --cur;
-        while (cur && buf[cur - 1] != U' ') --cur;
-    }
-    void word_right() {
-        while (cur < buf.size() && buf[cur] == U' ') ++cur;
-        while (cur < buf.size() && buf[cur] != U' ') ++cur;
-    }
-    void kill_word() {
-        const size_t e = cur;
-        word_left();
-        buf.erase(cur, e - cur);
-    }
-    void clear() {
-        buf.clear();
-        cur = 0;
-        hpos = hist.size();
-    }
-    void recall(int dir) {
-        if (hist.empty()) return;
-        if (hpos == hist.size()) draft = buf;
-        if (dir < 0 && hpos > 0) --hpos;
-        else if (dir > 0 && hpos < hist.size()) ++hpos;
-        else return;
-        buf = hpos == hist.size() ? draft : hist[hpos];
-        cur = buf.size();
-    }
-    std::u32string take() {
-        std::u32string s = buf;
-        if (!s.empty() && (hist.empty() || hist.back() != s)) hist.push_back(s);
-        clear();
-        return s;
-    }
-};
-
 static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/context", "/rebase",
-                                        "/resume", "/clear", "/new", "/learn", "/interrupt", "/quit"};
+                                        "/resume", "/clear", "/new", "/learn", "/interrupt", "/quit",
+                                        "/mcp"};   // every live MCP server adds its own "/<server>" at boot
 
 static std::string trim_ws(const std::string& s) {
     const size_t b = s.find_first_not_of(" \t\r\n");
@@ -615,9 +333,15 @@ static bool is_command(const std::string& p) {
     return first.find('/', 1) == std::string::npos;
 }
 
+// filled at boot with "/<server>" for every live MCP server, so a registered server
+// completes as a slash command all by itself.
+static std::vector<std::string> g_dynamic_commands;
+
 static std::vector<std::string> command_matches(const std::string& typed) {
     std::vector<std::string> m;
     for (const char* c : kCommands)
+        if (std::string(c).rfind(typed, 0) == 0) m.emplace_back(c);
+    for (const auto& c : g_dynamic_commands)
         if (std::string(c).rfind(typed, 0) == 0) m.emplace_back(c);
     return m;
 }
@@ -644,54 +368,77 @@ int main(int argc, char** argv) {
     bool after_dd = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        auto value = [&](const char* flag) -> std::string {
+            if (i + 1 >= argc) {
+                std::cerr << "dd_tui: " << flag << " needs a value\n";
+                usage(stderr);
+                std::exit(2);
+            }
+            return argv[++i];
+        };
         if (after_dd) msg_words.push_back(a);
         else if (a == "--") after_dd = true;
-        else if (a == "--home" && i + 1 < argc) home_flag = argv[++i];
-        else if (a == "--config" && i + 1 < argc) config_flag = argv[++i];
+        else if (a == "--help" || a == "-h") { usage(stdout); return 0; }
+        else if (a == "--version") { std::printf("dd_tui %s\n", kVersion); return 0; }
+        else if (a == "--home") home_flag = value("--home");
+        else if (a == "--config") config_flag = value("--config");
         else if (a == "--init") init = true;
         else if (a == "--rules") init_rules = true;
-        else if (a == "--from" && i + 1 < argc) init_from = argv[++i];
+        else if (a == "--from") init_from = value("--from");
+        else if (a.size() > 1 && a[0] == '-') { std::cerr << "dd_tui: unknown option " << a << "\n"; usage(stderr); return 2; }
         else config_flag = a;   // a bare path is the config, as it always was
     }
 
-    // Beside the binary unless told otherwise; never the Python Daedalus's ~/.daedalus.
-    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag);
+    // Config and state follow the folder dd was started from; the install is
+    // where the binary sits. Never the Python Daedalus's ~/.daedalus.
+    std::string why;
+    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag, &why);
+    if (home.root.empty()) { std::cerr << why << "\n"; return 2; }
     ddcore::set_daedalus_home_override(home.root.string());   // the ported modules agree on it
     const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
-    {
-        std::string why;
-        if (!ddcore::ensure_home(home, &why)) {
-            std::cerr << "dd_tui: " << why << "\n  pass --home DIR for a folder you can write\n";
-            return 2;
-        }
-        if (init) {
-            const bool wrote = ddcore::init_config(home, init_from, &why);
-            std::cout << (wrote ? "wrote " : "kept ") << config_path << (wrote || why.empty() ? "" : "  (" + why + ")") << "\n";
-            if (init_rules) {   // the operator's first tripwires: opt-in, they are one person's habits
-                std::error_code rec;
-                std::filesystem::create_directories(home.rules(), rec);
-                int made = 0;
-                for (const auto& [name, text] : dd::know::Tripwires::starter_rules()) {
-                    const std::filesystem::path f = home.rules() / name;
-                    if (std::filesystem::exists(f, rec)) continue;
-                    std::ofstream(f, std::ios::binary) << text;
-                    ++made;
-                }
-                std::cout << "rules: " << made << " written to " << home.rules().string() << "\n";
+
+    // Config first: an install with no config.yaml runs on defaults with a warning,
+    // not on another install's config. A home dd has never written in is not
+    // created on a plain start — --init is the only path that may make one.
+    std::error_code boot_ec;
+    if (init) {
+        std::filesystem::create_directories(home.root, boot_ec);
+    } else if (!std::filesystem::exists(config_path, boot_ec) && !std::getenv("DD_BASE_URL")) {
+        std::cerr << "dd_tui: no config at " << config_path << "\n"
+                  << "  " << home.root.string() << " is the home dd picked and it has no config.yaml, so dd\n"
+                  << "  has never been configured there. Start dd from the project folder that owns the\n"
+                  << "  config.yaml, name one with --config FILE / --home DIR, or run dd_tui --init to\n"
+                  << "  write one (dd_tui --init --from FILE copies an existing config, once). Nothing was\n"
+                  << "  created.\n";
+        return 2;   // the home was never configured: stop before it is built
+    }
+    if (!ddcore::ensure_home(home, &why)) {
+        std::cerr << "dd_tui: " << why << "\n  pass --home DIR for a folder you can write\n";
+        return 2;
+    }
+    if (init) {
+        const bool wrote = ddcore::init_config(home, init_from, &why);
+        std::cout << (wrote ? "wrote " : "kept ") << config_path
+                  << (wrote || why.empty() ? "" : "  (" + why + ")") << "\n";
+        if (init_rules) {   // the operator's first tripwires: opt-in, they are one person's habits
+            std::error_code rec;
+            std::filesystem::create_directories(home.rules(), rec);
+            int made = 0;
+            for (const auto& [name, text] : dd::know::Tripwires::starter_rules()) {
+                const std::filesystem::path f = home.rules() / name;
+                if (std::filesystem::exists(f, rec)) continue;
+                std::ofstream(f, std::ios::binary) << text;
+                ++made;
             }
-            return wrote || std::filesystem::exists(config_path) ? 0 : 2;
+            std::cout << "rules: " << made << " written to " << home.rules().string() << "\n";
         }
-        std::error_code ec;
-        if (!std::filesystem::exists(config_path, ec) && !std::getenv("DD_BASE_URL")) {
-            std::cerr << "dd_tui: no config at " << config_path << "\n  create one: dd_tui --init [--from FILE]   "
-                      << "(or --config FILE, --home DIR)\n";
-            return 2;
-        }
+        return wrote || std::filesystem::exists(config_path) ? 0 : 2;
     }
 
     ddcore::Config cfg{ddcore::Json{}};
     try { cfg = ddcore::load_config(config_path); }
     catch (const std::exception& ex) { std::cerr << "config: " << ex.what() << "\n"; }
+    dd::know::configure(cfg);
 
     auto env_or = [](const char* k, const std::string& def) -> std::string {
         const char* v = std::getenv(k);
@@ -701,8 +448,14 @@ int main(int argc, char** argv) {
     std::string model = env_or("DD_MODEL", cfg.get_string("model.name"));
     std::string api_key = env_or("DD_API_KEY", cfg.get_string("model.api_key"));
     long long mt = 0;
-    if (const char* v = std::getenv("DD_MAX_TURNS")) mt = std::stoll(v);
-    else {
+    if (const char* v = std::getenv("DD_MAX_TURNS"); v && *v) {
+        char* end = nullptr;
+        errno = 0;
+        const long long n = std::strtoll(v, &end, 10);
+        if (errno == 0 && end && *end == '\0' && n > 0) mt = n;
+        else std::cerr << "dd_tui: DD_MAX_TURNS='" << v << "' is not a positive number: ignored\n";
+    }
+    if (mt <= 0) {
         long long it = cfg.get_int("agent.max_iterations");
         if (it <= 0) it = cfg.get_int("agent.max_turns");
         mt = it;
@@ -756,8 +509,8 @@ int main(int argc, char** argv) {
         e.handler = h_read_file;
         add_tool(e);
     }
-    { ToolEntry e; e.name = "write_file"; e.schema = fs_schema({"path", "content"}, "Write text content to a file."); e.handler = h_write_file; add_tool(e); }
-    { ToolEntry e; e.name = "list_dir"; e.schema = fs_schema({"path"}, "List entries of a directory."); e.handler = h_list_dir; add_tool(e); }
+    { ToolEntry e; e.name = "write_file"; e.schema = dd::tools::fs_tool_schema({"path", "content"}, "Write text content to a file."); e.handler = h_write_file; add_tool(e); }
+    { ToolEntry e; e.name = "list_dir"; e.schema = dd::tools::fs_tool_schema({"path"}, "List entries of a directory."); e.handler = h_list_dir; add_tool(e); }
     {
         ToolEntry e;
         e.name = "run_terminal";
@@ -772,7 +525,7 @@ int main(int argc, char** argv) {
             Json params = json_obj({{"type", jsp(json_str("object"))},
                                     {"properties", jsp(std::move(props))},
                                     {"required", jsp(std::move(rt))}});
-            e.schema = json_obj({{"description", jsp(json_str("Run a shell command. Dangerous commands (sudo, su, rm -rf /, mkfs, dd, shutdown, force-push, ...) are refused. Returns exit code + stdout."))},
+            e.schema = json_obj({{"description", jsp(json_str("Run a shell command. A guard refuses obviously destructive commands (sudo, recursive rm on broad paths, force-push, ...); it is not a sandbox. Returns exit code + stdout."))},
                                  {"parameters", jsp(std::move(params))}});
         }
         e.handler = [&cfg](const Json& a) { return run_terminal(a, cfg); };
@@ -788,6 +541,17 @@ int main(int argc, char** argv) {
         "--format=csv`, `free -h`, `curl -s http://127.0.0.1:8080/props`.";
     if (std::string cp = cfg.get_string("agent.system_prompt"); !cp.empty()) system_prompt += "\n\n" + cp;
     std::vector<std::unique_ptr<MCPClient>> mcps;  // stable addresses
+    struct CmdServ {                   // one live MCP server as a slash command
+        std::string cmd, url;          // "/pulse", its endpoint
+        std::vector<std::string> tools;  // the names it answers with: every wire name + bare alias
+        std::set<std::string> wire;      // the wire names alone: a bare alias maps back to "<server>_<alias>"
+    };
+    std::vector<CmdServ> cmd_servs;
+    auto find_cmd_serv = [&](const std::string& c) -> CmdServ* {
+        for (auto& sv : cmd_servs)
+            if (sv.cmd == c) return &sv;
+        return nullptr;
+    };
     struct ServerNote {
         std::string url, text, mode;   // mode: the server's `instructions:` setting
     };
@@ -805,6 +569,9 @@ int main(int argc, char** argv) {
 
             auto mcp = std::make_unique<MCPClient>();
             mcp->url = u->str;
+            if (const Json* hs = json_get(sv, "headers"); hs && hs->type == Json::Obj)
+                for (const auto& [hk, hv] : hs->obj)
+                    if (hv && hv->type == Json::Str) mcp->headers.emplace_back(hk, hv->str);   // ${ENV} is expanded per request
             try {
                 // what to do with the server's own protocol text depends on whether it is the maze: decided after the loop
                 if (const std::string instr = mcp->instructions(); !instr.empty()) {
@@ -813,6 +580,8 @@ int main(int argc, char** argv) {
                 }
                 Json tl = mcp->list_tools();
                 std::size_t registered = 0;
+                std::vector<std::string> registered_tools;   // feeds the server's own slash command
+                std::set<std::string> wire_names;
                 if (tl.type == Json::Arr) {
                     const Json* tmap = json_get(sv, "tools");  // name -> {enabled}
                     for (const auto& tsp : tl.arr) {
@@ -845,10 +614,24 @@ int main(int argc, char** argv) {
                             return ro ? jerr("DD_NO_SOAK: this run writes nothing to the maze") : m->call(tname, a);
                         };
                         add_tool(e);
+                        wire_names.insert(tname);
+                        registered_tools.push_back(tname);
+                        if (const size_t d = tname.size(); srvname.size() + 1 < d &&
+                            tname.rfind(srvname + "_", 0) == 0)
+                            registered_tools.push_back(tname.substr(srvname.size() + 1));  // bare alias: pulse_search -> "search" under /pulse
                         ++registered;
                     }
                 }
                 sources.push_back(srvname + "  " + std::to_string(registered));
+                {   // the server drives itself from the input line, unless the name is a built-in command
+                    const std::string cmdname = "/" + srvname;
+                    const bool taken = std::any_of(std::begin(kCommands), std::end(kCommands), [&](const char* c) { return cmdname == c; });
+                    if (!taken) {
+                        cmd_servs.push_back({cmdname, u->str, registered_tools, wire_names});
+                        g_dynamic_commands.push_back(cmdname);
+                    }
+                }
+
                 mcps.push_back(std::move(mcp));
             } catch (const std::exception& ex) {
                 boot_errors.push_back("mcp server '" + srvname + "' unavailable: " + ex.what());
@@ -945,7 +728,7 @@ int main(int argc, char** argv) {
         lo.project_dir = std::filesystem::current_path().string();
         if (const char* h = std::getenv("HOME")) lo.home_dir = h;
         lo.feedback = !cfg.has("learn.feedback") || cfg.get_bool("learn.feedback");
-        lo.author = !cfg.has("learn.author") || cfg.get_bool("learn.author");
+        lo.author = cfg.has("learn.author") && cfg.get_bool("learn.author");   // drafting skills is opt-in
         if (cfg.has("learn.max_drafts_per_day")) lo.max_drafts_per_day = static_cast<int>(cfg.get_int("learn.max_drafts_per_day"));
         lo.search = [&router](const dd::know::Query& q) {   // the duplicate check asks the catalogue
             std::string text;
@@ -962,6 +745,7 @@ int main(int argc, char** argv) {
 
     // ---- the transport ----
     dd::agent::Agent agent;
+    g_cancel.store(&agent.interrupt_requested);
     dd::agent::HttpLLM llm;
     llm.base_url = base_url;
     llm.model = model;
@@ -1005,7 +789,7 @@ int main(int argc, char** argv) {
         composer.section(dd::know::PromptComposer::catalogue_map(router.map()));
         if (std::ifstream bf(home.root / "brief.md", std::ios::binary); bf) {   // the operator's own standing notes, if there are any
             std::string brief((std::istreambuf_iterator<char>(bf)), std::istreambuf_iterator<char>());
-            if (brief.size() > 3200) brief.resize(3200);
+            utf8_trunc(brief, 3200);
             composer.section(brief);
         }
         system_prompt = composer.str();
@@ -1140,13 +924,18 @@ int main(int argc, char** argv) {
             const std::string s = c.to_ansi(color, truecolor);
             std::fwrite(s.data(), 1, s.size(), stdout);
         }
+        install_term_handlers();
+        bool failed = false;   // a run that threw makes the exit status non-zero
         auto turn = [&](const std::string& msg) {
             scene.user(msg);
             scene.turn_begin();
             flush_inline();
             agent.interrupt_requested = false;
             try { agent.run(msg); }
-            catch (const std::exception& ex) { scene.error(std::string("agent: ") + ex.what()); }
+            catch (const std::exception& ex) {
+                if (!g_sig.load()) scene.error(std::string("agent: ") + ex.what());
+                failed = true;
+            }
             scene.turn_end();
             flush_inline();
         };
@@ -1157,14 +946,16 @@ int main(int argc, char** argv) {
         } else {
             flush_inline();
             std::string line;
-            while (std::getline(std::cin, line)) {
+            while (!g_sig.load() && std::getline(std::cin, line)) {
                 line = trim_ws(line);
                 if (line.empty()) continue;
                 if (line == "/quit" || line == "/exit" || line == ":q") break;
                 turn(line);
             }
         }
-        return 0;
+        dd::tools::shell_kill_all();
+        if (const int sig = g_sig.load()) return 128 + sig;
+        return failed ? 1 : 0;
     }
 
     // ---- interactive: keys + frames on main, agent.run on a worker ----
@@ -1177,13 +968,39 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    install_term_handlers();   // after raw mode: INT/TERM/HUP end the loop below, not the process mid-frame
+
     std::atomic<bool> running{false};
     std::thread worker;
-    std::string queued;
+    std::deque<std::string> queued;   // typed while a turn or a command runs; sent in order
     bool quit = false;
     int cols = 80, rows = 24;
     Editor ed;
     KeyReader keys;
+
+    // A slow command (a recall, a rebase, a server call) runs here so the screen and the keys stay live. One at a time,
+    // and no turn starts beside it: the engine belongs to whichever runs.
+    std::thread cmd_thread;
+    std::atomic<bool> cmd_busy{false};
+    std::string cmd_label;   // the UI thread's
+    auto run_cmd = [&](const std::string& label, std::function<void()> fn) {
+        if (cmd_busy.load()) {
+            scene.note("still running: " + cmd_label);
+            return;
+        }
+        if (cmd_thread.joinable()) cmd_thread.join();   // finished: cmd_busy is already false
+        cmd_label = label;
+        cmd_busy = true;
+        scene.note("… " + label);
+        cmd_thread = std::thread([&scene, &cmd_busy, label, fn = std::move(fn)] {
+            try {
+                fn();
+            } catch (const std::exception& ex) {
+                scene.error(label + ": " + ex.what());
+            }
+            cmd_busy = false;
+        });
+    };
 
     auto interrupt = [&] {
         if (!running.load()) return;
@@ -1234,24 +1051,91 @@ int main(int argc, char** argv) {
         }
     };
 
+    // ---- /<server>: every live MCP server drives itself straight from the input line ----
+    // A server that answered at boot has "/<name>" in autocomplete and runs through here: no model turn needed.
+    // Runs on the command thread (a call can take seconds); anything it throws is reported by run_cmd.
+    auto mcp_invoke = [&](const CmdServ& sv, const std::string& tool, const std::string& args) {
+        MCPClient* m = nullptr;
+        for (const auto& c : mcps)
+            if (c->url == sv.url) { m = c.get(); break; }
+        if (!m) {
+            scene.error("server " + sv.cmd + " went down since boot");
+            return;
+        }
+        if (tool.empty()) {
+            const Json tl = m->list_tools();
+            std::string names;
+            int n = 0;
+            if (tl.type == Json::Arr)
+                for (const auto& tsp : tl.arr)
+                    if (tsp && tsp->type == Json::Obj)
+                        if (const Json* nm = json_get(*tsp, "name"); nm && nm->type == Json::Str) {
+                            names += (names.empty() ? "" : ", ") + nm->str;
+                            ++n;
+                        }
+            scene.note(sv.cmd + " · " + std::to_string(n) + " tools:\n  " + names);
+            return;
+        }
+        const std::string wire = sv.wire.count(tool) ? tool : sv.cmd.substr(1) + "_" + tool;   // a bare alias -> its wire name
+        if (std::getenv("DD_NO_SOAK") && maze_write(wire)) {
+            scene.error(sv.cmd + " " + tool + ": DD_NO_SOAK: this run writes nothing to the maze");
+            return;
+        }
+        bool repaired = false;
+        Json ja = dd::core::json_parse_args(args.empty() ? "{}" : args, repaired);
+        if (ja.type != dd::core::Json::Obj && !args.empty())
+            ja = json_obj({{"query", jsp(json_str(args))}});  // a bare word: the usual one-arg shape
+        if (ja.type != dd::core::Json::Obj) ja = json_obj();
+        std::string shown = m->call(wire, ja);
+        bool failed = false;
+        try {   // a failed call comes back as {"error": ...}
+            const Json j = json_parse(shown);
+            if (j.type == Json::Obj)
+                if (const Json* e = json_get(j, "error")) {
+                    failed = true;
+                    shown = e->type == Json::Str ? e->str : json_dump(*e);
+                }
+        } catch (...) {
+        }
+        if (shown.empty()) shown = "(no output)";
+        if (shown.size() > 6000) {
+            utf8_trunc(shown, 6000);
+            shown += " …[truncated]";
+        }
+        if (failed) scene.error(sv.cmd + " " + tool + ": " + shown);
+        else scene.note(shown);
+    };
+    auto invoke = [&](const CmdServ& sv, const std::string& tool, const std::string& args) {
+        run_cmd(sv.cmd, [&, sv, tool, args] { mcp_invoke(sv, tool, args); });
+    };
+
     auto submit = [&](std::string p) {
         p = trim_ws(p);
         if (p.empty()) return;
         if (is_command(p)) {
             const std::string cmd = p.substr(0, p.find(' '));
+            const CmdServ* serv = find_cmd_serv(cmd);
+            // every live MCP server registered its own command at boot; also take a unique
+            // prefix of one, so the typed verb works while autocomplete lags.
+            if (!serv && cmd.size() > 1) {
+                const CmdServ* hit = nullptr;
+                int n = 0;
+                for (const auto& sv : cmd_servs)
+                    if (sv.cmd.rfind(cmd, 0) == 0) { hit = &sv; ++n; }
+                if (n == 1) serv = hit;
+            }
             if (cmd == "/quit" || cmd == "/exit") {
                 quit = true;
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
                            "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /context  /rebase  "
-                           "/tools  /turns N  /clear (new session)  /learn  /interrupt  /quit");
+                           "/resume  /tools  /turns N  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
             } else if (cmd == "/learn") {
-                if (learn_pin) {
+                if (learn_pin) run_cmd("learn", [&] {
                     learn_pin();
                     scene.note("learn: the recent work becomes a skill when this turn ends");
-                } else {
-                    scene.note("learning is off");
-                }
+                });
+                else scene.note("learning is off");
             } else if (cmd == "/tools") {
                 std::string all;
                 for (const auto& n : reg.get_all_tool_names()) all += (all.empty() ? "" : "  ") + n;
@@ -1269,50 +1153,62 @@ int main(int argc, char** argv) {
             } else if (cmd == "/clear" || cmd == "/new") {
                 if (running.load()) {
                     scene.note(cmd + " applies between turns");
+                } else if (cmd_busy.load()) {
+                    scene.note("still running: " + cmd_label);
                 } else {
                     engine.reset();
                     scene.clear();
                     scene.note("new session " + engine.session().id() + " · the maze still has the last one");
                 }
             } else if (cmd == "/context") {
-                if (!running.load()) engine.sync();
-                const auto t = engine.stats();
-                const int reuse = t.prompt > 0 ? static_cast<int>(100.0 * static_cast<double>(t.reused) / static_cast<double>(t.prompt) + 0.5) : -1;
-                scene.note("session " + t.session + " · epoch " + std::to_string(t.epoch) + " · history " +
-                           std::to_string(t.history) + " msgs, tape " + std::to_string(t.tape) + "\nwindow " +
-                           std::to_string(t.tokens) + " tokens (" + t.level + ") · rebase at " + std::to_string(t.rebase_at) +
-                           " · prewarm at " + std::to_string(t.high_at) + (t.prep.empty() ? "" : " · next epoch " + t.prep) +
-                           "\nlast call reused " + (reuse >= 0 ? std::to_string(reuse) + "% of " + std::to_string(t.prompt) : std::string("—")) +
-                           " · tools " + std::to_string(t.visible) + " in window, " + std::to_string(t.deferred) +
-                           " deferred · server " + t.server + ", main slot " + std::to_string(t.main_slot) +
-                           "\nmaze " + (t.maze ? "up" : "down") + " · " + std::to_string(t.soaked) + " soaked, " +
-                           std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled · ledger " +
-                           std::to_string(t.ledger) + " nodes, " + std::to_string(t.edges) + " edges · " +
-                           std::to_string(t.skills) + " skills indexed" + (t.recall.empty() ? "" : "\nlast recall: " + t.recall));
+                auto report = [&scene, &engine] {
+                    const auto t = engine.stats();
+                    const int reuse = t.prompt > 0 ? static_cast<int>(100.0 * static_cast<double>(t.reused) / static_cast<double>(t.prompt) + 0.5) : -1;
+                    scene.note("session " + t.session + " · epoch " + std::to_string(t.epoch) + " · history " +
+                               std::to_string(t.history) + " msgs, tape " + std::to_string(t.tape) + "\nwindow " +
+                               std::to_string(t.tokens) + " tokens (" + t.level + ") · rebase at " + std::to_string(t.rebase_at) +
+                               " · prewarm at " + std::to_string(t.high_at) + (t.prep.empty() ? "" : " · next epoch " + t.prep) +
+                               "\nlast call reused " + (reuse >= 0 ? std::to_string(reuse) + "% of " + std::to_string(t.prompt) : std::string("—")) +
+                               " · tools " + std::to_string(t.visible) + " in window, " + std::to_string(t.deferred) +
+                               " deferred · server " + t.server + ", main slot " + std::to_string(t.main_slot) +
+                               "\nmaze " + (t.maze ? "up" : "down") + " · " + std::to_string(t.soaked) + " soaked, " +
+                               std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled · ledger " +
+                               std::to_string(t.ledger) + " nodes, " + std::to_string(t.edges) + " edges · " +
+                               std::to_string(t.skills) + " skills indexed" + (t.recall.empty() ? "" : "\nlast recall: " + t.recall));
+                };
+                if (running.load()) report();   // mid-turn: the published numbers, nothing is drained
+                else run_cmd("context", [&engine, report] {
+                    engine.sync();
+                    report();
+                });
             } else if (cmd == "/resume") {
                 const std::string arg = trim_ws(p.substr(cmd.size()));
                 if (running.load()) {
                     scene.note("/resume applies between turns");
-                } else if (arg.empty()) {
-                    std::string list;
-                    for (const auto& r : engine.recent_sessions("dd-", 8))
-                        list += "\n  " + r.id + " · " + std::to_string(r.turns) + " turns · " + r.last;
-                    scene.note(list.empty() ? std::string("no dd sessions in the maze yet")
-                                            : "sessions in the maze (/resume <id>, any auto:turn session works):" + list);
                 } else {
-                    std::string why, sid = arg;
-                    if (arg == "last")   // the newest session that is not this one
-                        for (const auto& r : engine.recent_sessions("dd-", 3))
-                            if (r.id != engine.session().id()) {
-                                sid = r.id;
-                                break;
-                            }
-                    scene.clear();
-                    if (!engine.resume(sid, &why)) scene.error("resume " + sid + ": " + why);
+                    run_cmd("resume", [&, arg] {
+                        if (arg.empty()) {
+                            std::string list;
+                            for (const auto& r : engine.recent_sessions("dd-", 8))
+                                list += "\n  " + r.id + " · " + std::to_string(r.turns) + " turns · " + r.last;
+                            scene.note(list.empty() ? std::string("no dd sessions in the maze yet")
+                                                    : "sessions in the maze (/resume <id>, any auto:turn session works):" + list);
+                            return;
+                        }
+                        std::string why, sid = arg;
+                        if (arg == "last")   // the newest session that is not this one
+                            for (const auto& r : engine.recent_sessions("dd-", 3))
+                                if (r.id != engine.session().id()) {
+                                    sid = r.id;
+                                    break;
+                                }
+                        scene.clear();
+                        if (!engine.resume(sid, &why)) scene.error("resume " + sid + ": " + why);
+                    });
                 }
             } else if (cmd == "/rebase") {
                 if (running.load()) scene.note("/rebase applies between turns");
-                else engine.rebase_now();
+                else run_cmd("rebase", [&engine] { engine.rebase_now(); });
             } else if (cmd == "/interrupt") {
                 interrupt();
             } else if (cmd == "/turns") {
@@ -1323,14 +1219,56 @@ int main(int argc, char** argv) {
                     scene.set_max_turns(agent.max_iterations);
                     scene.note("max turns = " + std::to_string(agent.max_iterations));
                 }
+            } else if (serv) {
+                const std::string rest = trim_ws(p.substr(cmd.size()));
+                std::string tool, args;
+                if (!rest.empty()) {
+                    const size_t sp = rest.find(' ');
+                    const std::string head = sp == std::string::npos ? rest : rest.substr(0, sp);
+                    args = sp == std::string::npos ? "" : trim_ws(rest.substr(sp + 1));
+                    for (const auto& t : serv->tools)
+                        if (t == head) { tool = t; break; }
+                    if (tool.empty()) {           // unique prefix of exactly one registered tool wins
+                        int n = 0;
+                        for (const auto& t : serv->tools)
+                            if (t.rfind(head, 0) == 0) { tool = t; ++n; }
+                        if (n != 1) { tool.clear(); args.clear(); }  // not a verb: treat all of rest as a query
+                    }
+                }
+                if (!tool.empty()) invoke(*serv, tool, args);
+                else if (!rest.empty()) {
+                    // "/pulse bitcoin" — the server's own default verb, straight through: no model, no search detour
+                    std::string def = "search";
+                    bool has = false;
+                    for (const auto& t : serv->tools)
+                        if (t == def || t == serv->cmd.substr(1) + "_search") { has = true; break; }
+                    if (!has) {
+                        for (const auto& t : serv->tools)
+                            if (t.rfind("research", 0) == 0 || t.rfind(serv->cmd.substr(1) + "_research", 0) == 0) { def = t; break; }
+                    }
+                    bool found = false;
+                    for (const auto& t : serv->tools)
+                        if (t == def || t == serv->cmd.substr(1) + "_" + def) { found = true; break; }
+                    if (!found) { scene.note(serv->cmd + " has no default verb · " + serv->cmd + " lists its tools"); return; }
+                    invoke(*serv, def, rest);
+                } else invoke(*serv, "", "");
+            } else if (cmd == "/mcp") {   // what is registered: every server that answered at boot
+                std::string l = "live MCP servers — each drives itself with /<name> [tool] [json]:";
+                if (cmd_servs.empty()) l += " none";
+                for (const auto& sv : cmd_servs) {
+                    l += " " + sv.cmd;
+                    for (const auto& m : mcps)
+                        if (m->url == sv.url) { l += " (" + m->url + ", " + std::to_string(sv.wire.size()) + " tools)"; break; }
+                }
+                scene.note(l);
             } else {
-                scene.note("unknown command " + cmd + " · /help");
+                scene.note("unknown command " + cmd + " · /help — /mcp lists the live servers");
             }
             return;
         }
-        if (running.load()) {
-            queued = p;
-            scene.note("queued — sends when this turn ends");
+        if (running.load() || cmd_busy.load()) {
+            queued.push_back(p);
+            scene.note("queued (" + std::to_string(queued.size()) + ") — sends when the " + (running.load() ? "turn" : "command") + " ends");
             return;
         }
         start_turn(p);
@@ -1369,7 +1307,11 @@ int main(int argc, char** argv) {
             }
             break;
         }
-        case K::Esc: if (running.load()) interrupt(); else ed.clear(); break;
+        case K::Esc:
+            if (running.load()) interrupt();
+            else if (cmd_busy.load()) scene.note("a command is running (" + cmd_label + "): it cannot be interrupted");
+            else ed.clear();
+            break;
         case K::CtrlC:
             if (running.load()) interrupt();
             else if (!ed.buf.empty()) ed.clear();
@@ -1386,11 +1328,20 @@ int main(int argc, char** argv) {
         }
     };
 
+    using Clock = std::chrono::steady_clock;
+    constexpr auto kEscWait = std::chrono::milliseconds(25);      // silence after a lone Esc: it was the key
+    constexpr auto kPartialWait = std::chrono::milliseconds(250); // a sequence that never finished
+    std::optional<Clock::time_point> held_since;                  // when the reader began holding an Esc
     char rbuf[4096];
     while (!quit) {
+        if (g_sig.load()) {   // INT/TERM/HUP: leave the way Ctrl-C does
+            quit = true;
+            break;
+        }
         pollfd pfd{STDIN_FILENO, POLLIN, 0};
-        // 20 fps while the spinner turns, ~8 fps idle (frames with no change write nothing)
-        const int pr = ::poll(&pfd, 1, running.load() ? 50 : 120);
+        // 20 fps while the spinner turns, ~8 fps idle (frames with no change write nothing); 25 ms while an Esc is held
+        const int wait_ms = keys.esc_pending() ? static_cast<int>(kEscWait.count()) : running.load() ? 50 : 120;
+        const int pr = ::poll(&pfd, 1, wait_ms);
         if (pr > 0) {
             const ssize_t n = ::read(STDIN_FILENO, rbuf, sizeof rbuf);
             if (n > 0) {
@@ -1399,10 +1350,25 @@ int main(int argc, char** argv) {
                 quit = true;   // the terminal went away
             }
         }
+        if (keys.esc_pending() || keys.partial_pending()) {
+            const auto now = Clock::now();
+            if (!held_since) held_since = now;
+            if (keys.esc_pending() && (pr == 0 || now - *held_since >= kEscWait)) {
+                for (const Key& k : keys.flush_esc()) handle(k);
+                held_since.reset();
+            } else if (keys.partial_pending() && now - *held_since >= kPartialWait) {
+                keys.drop_partial();
+                held_since.reset();
+            }
+        } else {
+            held_since.reset();
+        }
         if (!running.load() && worker.joinable()) worker.join();
-        if (!running.load() && !queued.empty() && !quit) {
-            std::string q;
-            q.swap(queued);
+        if (!cmd_busy.load() && cmd_thread.joinable()) cmd_thread.join();
+        if (!running.load() && !cmd_busy.load() && !queued.empty() && !quit) {
+            const std::string q = std::move(queued.front());
+            queued.pop_front();
+            if (!queued.empty()) scene.note("still queued (" + std::to_string(queued.size()) + ") — the rest follow this turn");
             start_turn(q);
         }
         term::size(cols, rows);
@@ -1418,9 +1384,14 @@ int main(int argc, char** argv) {
         term::put(scene.present(cols, rows, truecolor));
     }
 
-    if (running.load()) {   // give the loop a moment to stop at a step boundary
-        agent.interrupt_requested = true;
-        for (int i = 0; i < 40 && running.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Quit: the turn stops at its next step (and a running command's process group with it), a command gets the same
+    // two seconds; whatever still holds on is killed, then the process leaves.
+    auto busy = [&] { return running.load() || cmd_busy.load(); };
+    agent.interrupt_requested = true;
+    for (int i = 0; i < 40 && busy(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (busy()) {
+        dd::tools::shell_kill_all();
+        for (int i = 0; i < 10 && busy(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     term::leave();
     term::show_stderr(saved_err);
@@ -1432,7 +1403,10 @@ int main(int argc, char** argv) {
         std::fwrite(s.data(), 1, s.size(), stdout);
         std::fflush(stdout);
     }
-    if (running.load()) std::_Exit(0);   // a tool still holds the worker
+    const int exit_sig = g_sig.load();
+    dd::tools::shell_kill_all();
+    if (busy()) std::_Exit(exit_sig ? 128 + exit_sig : 0);   // a call that would not stop still holds a thread
     if (worker.joinable()) worker.join();
-    return 0;
+    if (cmd_thread.joinable()) cmd_thread.join();
+    return exit_sig ? 128 + exit_sig : 0;
 }

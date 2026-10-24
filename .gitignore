@@ -1,5 +1,6 @@
-build/
+build*/
 src/core/default_config.cpp
 cache/
 learn/
 logs/
+state/

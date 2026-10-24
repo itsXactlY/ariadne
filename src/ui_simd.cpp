@@ -182,9 +182,13 @@ const Kernels* best() {
     return &kScalar;
 }
 
-std::atomic<const Kernels*> g_k{best()};
+// First use, not static init: another TU's static initializer may measure text (see know/scan.cpp).
+std::atomic<const Kernels*>& slot() {
+    static std::atomic<const Kernels*> g{best()};
+    return g;
+}
 
-inline const Kernels& k() { return *g_k.load(std::memory_order_relaxed); }
+inline const Kernels& k() { return *slot().load(std::memory_order_relaxed); }
 
 }  // namespace
 
@@ -193,7 +197,7 @@ const char* level() { return k().name; }
 bool force(const char* name) {
     for (const Kernels* c : {&kAvx512, &kAvx2, &kScalar})
         if (std::strcmp(c->name, name) == 0 && has(*c)) {
-            g_k.store(c, std::memory_order_relaxed);
+            slot().store(c, std::memory_order_relaxed);
             return true;
         }
     return false;

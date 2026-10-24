@@ -7,6 +7,10 @@
 // bit. One thread (the learn thread) calls everything except snapshot() and health(), which any
 // thread may: snapshot() is a lock-free read of an immutable copy published every `publish_every`
 // records, on tick() and on publish().
+//
+// One process at a time writes a ledger: open() holds an exclusive flock on <dir>/LOCK (the holder's pid
+// inside) until the Ledger is gone; a second writer is refused with the pid. load_readonly() needs no
+// lock. A run that saw failed syncs or writes leaves <dir>/HEALTH behind for `dd learn status`.
 
 #include <atomic>
 #include <cstdint>
@@ -35,6 +39,7 @@ public:
         uint64_t appended = 0, write_errors = 0, recovered = 0, replay_newer = 0, replay_undecodable = 0;
         uint64_t torn_bytes = 0, bad_segments = 0, snapshots_corrupt = 0, compactions = 0, compaction_failures = 0;
         uint64_t last_seq = 0;
+        uint64_t sync_errors = 0;   // failed fsync/fdatasync: the newest records may not be durable
     };
 
     // nullptr (and *err) when the directory cannot be used, or holds a snapshot from a newer version
@@ -49,7 +54,7 @@ public:
     // ---- the learn thread ----
     bool record(const Record& r);       // false: the journal write failed and nothing was folded
     void tick();                        // sync by interval, compact when due, publish if the copy is stale
-    void sync() { journal_->sync(); }
+    void sync();
     void publish();
     void compact_now();                 // fold every sealed segment
     const Stats& live() const { return live_; }
@@ -62,7 +67,16 @@ public:
 private:
     Ledger() = default;
     void maybe_compact();
+    void note_health();   // writes <dir>/HEALTH when the error counters moved
 
+    // the first member, so it is released last: nothing of this ledger is open when another process may take over
+    struct FileLock {
+        int fd = -1;
+        FileLock() = default;
+        FileLock(const FileLock&) = delete;
+        FileLock& operator=(const FileLock&) = delete;
+        ~FileLock();
+    } lock_;
     std::filesystem::path dir_;
     LedgerOptions opt_;
     std::unique_ptr<Journal> journal_;
@@ -70,7 +84,9 @@ private:
     core::SnapCell<Stats> cell_;
     uint64_t covered_ = 0, rotations_seen_ = 0;
     size_t unpublished_ = 0;
-    std::atomic<uint64_t> recovered_{0}, replay_newer_{0}, replay_undecodable_{0}, snapshots_corrupt_{0}, compactions_{0}, compaction_failures_{0};
+    std::atomic<uint64_t> recovered_{0}, replay_newer_{0}, replay_undecodable_{0}, snapshots_corrupt_{0}, compactions_{0}, compaction_failures_{0},
+        compaction_sync_errors_{0};
+    uint64_t health_sync_ = 0, health_write_ = 0;   // what HEALTH last said
 };
 
 }  // namespace learn

@@ -35,6 +35,7 @@
 #include "dd/context/recall.hpp"
 #include "dd/context/render.hpp"
 #include "dd/context/tape.hpp"
+#include "dd/core/snap_cell.hpp"
 #include "dd/know/router.hpp"
 
 namespace dd {
@@ -95,8 +96,9 @@ public:
         int turns = 0;
     };
     std::vector<SessionRef> recent_sessions(const std::string& prefix = "dd-", int limit = 8) const;
+    // Any thread: the last snapshot the owning thread published (every emit()); a default one before the first.
     TapeStats stats() const;
-    void sync() { drain_ledger(); }              // between turns: take in what the soak worker wrote
+    void sync();                                 // between turns: take in what the soak worker wrote
     const Session& session() const { return *session_; }
     double ratio() const { return render_.ratio(); }   // server tokens per chars/4, as measured
 
@@ -136,6 +138,8 @@ private:
     std::string injection_, question_;
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
+    bool turn_open_ = false;  // begin_turn ran and end_turn has not: end_turn is idempotent
+    mutable core::SnapCell<TapeStats> snap_;
     bool drop_pending_ = false;   // a rebase left the old epoch parked: drop it after the next answer
 
     std::atomic<Prep*> ready_{nullptr};
@@ -151,6 +155,8 @@ private:
     void append_note(const std::string& text);   // a hidden user item after the tool results, rendered once
     void speak_after_tools();                    // the router's notes for a finished batch
     void note(const std::string& s) const;
+    TapeStats compute_stats() const;             // the owning thread's
+    void publish() const;                        // one publisher at a time: the worker in a turn, the caller between turns
     void emit() const;
     void watermark(bool turn_start);
     bool rebase(const char* why);   // false: no room could be made, the history stands
@@ -165,7 +171,7 @@ private:
     std::vector<long> turn_ids(bool earlier_only) const;
     long prefix_tokens(double ratio) const;   // system prompt + tools array
     long epoch_tokens(const std::vector<ItemPtr>& base, double ratio) const;   // a new epoch, as the server counts it
-    long window_seen_ = 0;   // the window a refusal named, for a server that does not report it
+    std::atomic<long> window_seen_{0};   // the window a refusal named, for a server that does not report it
     int skipped_gen_ = -1;   // the epoch whose rebase could not make room (said once)
 };
 

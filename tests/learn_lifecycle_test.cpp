@@ -9,6 +9,7 @@
 
 #include "dd/core/yaml.hpp"
 #include "dd/know/skills.hpp"
+#include "learn_tmp.hpp"
 #include "dd/learn/curator.hpp"
 #include "dd/learn/lifecycle.hpp"
 #include "dd/learn/service.hpp"
@@ -331,13 +332,36 @@ static void test_service_clock(const fs::path& base) {
     for (int i = 0; i < 400 && svc->status().passes <= p; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     chk(!fs::exists(md) && svc->status().transitions == 1, "service: 61 days without a win retires it");
     svc->stop();
+    svc.reset();   // restart means the old holder is gone: its fd closes and releases the ledger lock
 
-    auto again = LearnService::start(o);
-    chk(again && again->status().ledger.recovered > 0, "service: the retirement is in the journal after a restart");
+    std::string again_err;
+    auto again = LearnService::start(o, &again_err);
+    chk(again && again->status().ledger.recovered > 0,
+        "service: the retirement is in the journal after a restart (again=" + std::string(again ? "y" : "n") +
+        (again ? " recovered=" + std::to_string(again->status().ledger.recovered) : " err=" + again_err) + ")");
+}
+
+// yaml.cpp: block scalars — chomping, blank lines inside, the nested key that does not shadow a top-level one
+static void test_yaml_block(const fs::path& base) {
+    const fs::path root = fresh(base, "yaml");
+    std::ofstream(root / "SKILL.md") << "---\nname: top\n"
+                                    "fold: >-\n  one\n  two\n"
+                                    "lit: |\n  a\n  b\n"
+                                    "fold_blank: >\n  one\n\n  three\n"
+                                    "keep: |+\n  a\n\n"
+                                    "meta:\n  name: nested\n"
+                                    "---\nbody\n";
+    const auto fm = core::parse_frontmatter(slurp(root / "SKILL.md"));
+    chk(fm.count("fold") && fm.at("fold") == "one two", "yaml: >- folds the lines, no trailing newline");
+    chk(fm.count("lit") && fm.at("lit") == "a\nb\n", "yaml: | keeps the lines, clip leaves one trailing newline");
+    chk(fm.count("fold_blank") && fm.at("fold_blank") == "one\nthree\n", "yaml: > folds; a blank line becomes a newline, clip keeps one");
+    chk(fm.count("keep") && fm.at("keep") == "a\n\n", "yaml: |+ keeps every trailing newline");
+    chk(fm.count("name") && fm.at("name") == "top", "yaml: the nested name: does not shadow the top-level one");
+    chk(fm.count("fold") && fm.count("lit") && fm.count("fold_blank") && fm.count("keep"), "yaml: block scalars do not swallow the keys after them");
 }
 
 int main() {
-    const fs::path base = fs::path("build") / ("learn_lifecycle_tmp_" + std::to_string(::getpid()));
+    const fs::path base = learn_test_dir("learn_lifecycle_tmp");
     fs::remove_all(base);
     fs::create_directories(base);
 
@@ -351,6 +375,7 @@ int main() {
     test_prior_uncapped();
     test_year(base);
     test_service_clock(base);
+    test_yaml_block(base);
 
     fs::remove_all(base);
     if (g_fail) std::printf("%d FAILED\n", g_fail);

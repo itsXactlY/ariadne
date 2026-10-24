@@ -4,7 +4,7 @@
 // terms_of folds, splits and filters: lowercase; ä ö ü ß and the accented
 // Latin letters folded to ae oe ue ss and their base letters; camelCase and
 // every non-alphanumeric split; a version or an error code (0.1.45, ENOENT)
-// also kept whole; English and German stopwords out.
+// also kept whole; stopwords out (English and German unless knowledge.stopword_languages says otherwise).
 //
 // The Distiller turns what a person wrote into a Query: pasted terminal and
 // code stripped, paths reduced to the project and file they name (never the
@@ -24,6 +24,12 @@ namespace know {
 
 std::vector<std::string> terms_of(std::string_view text, bool keep_stop = false);
 bool is_stopword(std::string_view folded);
+// Which languages' stopwords are out. Names are ISO 639-1 codes (stopword_languages() lists them; nb/nn count as no, bs as
+// hr; unknown names are ignored). The default is {"en", "de"}. The other languages are opt-in and never stop a word that
+// is also an English word or a common tech token (ai, ci, io, os, var, min ...): en and de are taken as they are.
+// Call it at setup, before the catalogues are built: it swaps one table in; a build running meanwhile may see either.
+void set_stopword_languages(const std::vector<std::string>& names);
+std::vector<std::string> stopword_languages();
 bool is_generic_path_word(std::string_view lower);
 
 // the first / last n bytes, never cutting inside a UTF-8 sequence

@@ -36,6 +36,7 @@ public:
     virtual std::vector<Card> list() = 0;                     // blocks; every skill this source holds
     virtual bool ok() const { return true; }                  // did the last list() reach its store?
     virtual size_t skipped() const { return 0; }              // rows in the last list() that were not skills
+    virtual size_t truncated() const { return 0; }            // listings in the last list() that hit their cap with more behind
     virtual void cancel(bool /*on*/) {}                       // abandon a list() in progress
     virtual std::optional<std::string> body(const Card& c) = 0;                                // the SKILL.md
     virtual std::optional<std::string> file(const Card&, const std::string& /*rel*/) { return std::nullopt; }
@@ -65,6 +66,7 @@ public:
     std::vector<Card> list() override;
     bool ok() const override { return ok_.load(); }
     size_t skipped() const override { return skipped_.load(); }
+    size_t truncated() const override { return truncated_.load(); }
     void cancel(bool on) override { cancel_.store(on); }
     std::optional<std::string> body(const Card& c) override;
 
@@ -74,6 +76,7 @@ private:
     using Paths = std::map<std::string, std::filesystem::path>;   // "<source>/<name>" -> the SKILL.md a pointer card names
     std::atomic<bool> ok_{false};
     std::atomic<size_t> skipped_{0};
+    std::atomic<size_t> truncated_{0};
     core::SnapCell<Paths> paths_;
 };
 
@@ -110,7 +113,7 @@ public:
     std::optional<Card> find(const std::string& name) const;   // by uri id
     std::vector<Card> cards() const;
     struct Census {
-        size_t cards = 0, bodyless = 0, collapsed = 0, superseded = 0, aliased = 0, skipped = 0;
+        size_t cards = 0, bodyless = 0, collapsed = 0, superseded = 0, aliased = 0, skipped = 0, truncated = 0;   // truncated: a source listing hit its cap
         std::map<std::string, size_t> by_group, by_source;
     };
     Census census() const;

@@ -13,8 +13,9 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include <unistd.h>
-#include <random>
+#include <cerrno>
 
 namespace dd {
 namespace gateway {
@@ -287,6 +288,38 @@ std::vector<std::string> PairingStore::all_platforms(const std::string& suffix) 
     return platforms;
 }
 
+// n bytes from the kernel CSPRNG; false when it cannot give them.
+static bool os_random(unsigned char* p, size_t n) {
+    while (n > 0) {
+        const ssize_t r = ::getrandom(p, n, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += r;
+        n -= static_cast<size_t>(r);
+    }
+    return true;
+}
+
+std::string pairing_random_code(const std::string& alphabet, int length) {
+    const size_t n = alphabet.size();
+    if (n == 0 || n > 256 || length <= 0) return "";
+    const unsigned limit = 256u - 256u % static_cast<unsigned>(n);   // bytes at or above it would favour the low symbols
+    std::string code;
+    code.reserve(static_cast<size_t>(length));
+    unsigned char buf[64];
+    while (code.size() < static_cast<size_t>(length)) {
+        if (!os_random(buf, sizeof buf)) return "";
+        for (unsigned char b : buf) {
+            if (b >= limit) continue;
+            code.push_back(alphabet[b % n]);
+            if (code.size() == static_cast<size_t>(length)) break;
+        }
+    }
+    return code;
+}
+
 std::optional<std::string> PairingStore::generate_code(const std::string& platform,
                                                        const std::string& user_id,
                                                        const std::string& user_name) {
@@ -300,10 +333,8 @@ std::optional<std::string> PairingStore::generate_code(const std::string& platfo
     if ((int)pending.obj.size() >= MAX_PENDING_PER_PLATFORM) return std::nullopt;
 
     // secrets.choice(ALPHABET) x CODE_LENGTH
-    static thread_local std::mt19937_64 rng(std::random_device{}());
-    std::uniform_int_distribution<int> dist(0, (int)ALPHABET.size() - 1);
-    std::string code;
-    for (int i = 0; i < CODE_LENGTH; ++i) code.push_back(ALPHABET[dist(rng)]);
+    const std::string code = pairing_random_code(ALPHABET, CODE_LENGTH);
+    if (code.empty()) return std::nullopt;
 
     Json entry = json_obj();
     obj_set(entry, "user_id", json_str(user_id));

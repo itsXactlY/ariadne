@@ -1,7 +1,11 @@
 // src/know/memory_catalogue.cpp — impl of dd/know/memory_catalogue.hpp.
 #include "dd/know/memory_catalogue.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <fstream>
 #include <sstream>
 
@@ -80,21 +84,38 @@ void MemoryCatalogue::load_cache() {
         if (r.id > 0) rows_[r.id] = std::move(r);
 }
 
+// The gists are the text of an encrypted store, in the clear: owner-only file in an owner-only directory, written whole.
 void MemoryCatalogue::save_cache() const {
     if (cache_.empty()) return;
     std::error_code ec;
-    std::filesystem::create_directories(cache_.parent_path(), ec);
-    const std::filesystem::path tmp = cache_.string() + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary);
-        if (!out) return;
-        for (const auto& [id, r] : rows_)
-            out << core::json_dump(core::json_obj({{"id", std::make_shared<core::Json>(core::json_num(static_cast<double>(id)))},
-                                                   {"label", std::make_shared<core::Json>(core::json_str(r.label))},
-                                                   {"gist", std::make_shared<core::Json>(core::json_str(r.gist))}}))
-                << "\n";
+    const std::filesystem::path dir = cache_.parent_path();
+    if (!dir.empty() && std::filesystem::create_directories(dir, ec))
+        std::filesystem::permissions(dir, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+    std::string text;
+    for (const auto& [id, r] : rows_)
+        text += core::json_dump(core::json_obj({{"id", std::make_shared<core::Json>(core::json_num(static_cast<double>(id)))},
+                                                {"label", std::make_shared<core::Json>(core::json_str(r.label))},
+                                                {"gist", std::make_shared<core::Json>(core::json_str(r.gist))}})) +
+                "\n";
+    const std::string tmp = cache_.string() + ".tmp";
+    ::unlink(tmp.c_str());   // a stale one from a crash: O_EXCL must win
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    const char* p = text.data();
+    size_t left = text.size();
+    bool ok = true;
+    while (left > 0) {
+        const ssize_t w = ::write(fd, p, left);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            ok = false;
+            break;
+        }
+        p += w;
+        left -= static_cast<size_t>(w);
     }
-    std::filesystem::rename(tmp, cache_, ec);
+    ok = ::close(fd) == 0 && ok;
+    if (!ok || ::rename(tmp.c_str(), cache_.c_str()) != 0) ::unlink(tmp.c_str());
 }
 
 void MemoryCatalogue::publish() {
@@ -131,7 +152,9 @@ void MemoryCatalogue::refresh() {
 
     std::map<long, std::string> live;   // id -> label, the maze now
     bool reached = true;
+    size_t capped = 0;   // prefixes whose listing ran into the cap with more behind
     for (const auto& prefix : prefixes()) {
+        bool complete = false;
         for (int off = 0; off < 6000; off += 200) {
             if (cancel_.load()) return;
             const auto page = mem_->labels(prefix, off, 200);
@@ -140,10 +163,15 @@ void MemoryCatalogue::refresh() {
                 break;
             }
             for (const auto& h : page) live[h.id] = h.label;
-            if (page.size() < 200) break;
+            if (page.size() < 200) {
+                complete = true;
+                break;
+            }
         }
         if (!reached) break;
+        if (!complete) ++capped;
     }
+    if (reached) truncated_.store(capped);
     // a listing that came back far shorter than what we know is a pod that flaked mid-way, not a maze that lost its rows
     const bool short_listing = !rows_.empty() && live.size() < rows_.size() / 2;
     healthy_.store(reached && !live.empty() && !short_listing);

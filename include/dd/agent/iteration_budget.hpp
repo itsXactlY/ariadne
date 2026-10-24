@@ -6,7 +6,7 @@
 // max_iterations (default 90); subagents at delegation.max_iterations (50).
 // execute_code turns refund() so they don't eat the budget.
 
-#include <mutex>
+#include <atomic>
 
 namespace dd {
 namespace agent {
@@ -14,34 +14,34 @@ namespace agent {
 class IterationBudget {
 public:
     int max_total;
-    int used = 0;
-    mutable std::mutex m;
+    std::atomic<int> used{0};
 
     explicit IterationBudget(int max_total_ = 90) : max_total(max_total_) {}
 
     // Try to consume one iteration. Returns true if allowed.
     bool consume() {
-        std::lock_guard<std::mutex> lk(m);
-        if (used >= max_total) return false;
-        ++used;
+        int u = used.load(std::memory_order_relaxed);
+        do {
+            if (u >= max_total) return false;
+        } while (!used.compare_exchange_weak(u, u + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
         return true;
     }
 
     // Give back one iteration (e.g. for execute_code turns).
     void refund() {
-        std::lock_guard<std::mutex> lk(m);
-        if (used > 0) --used;
+        int u = used.load(std::memory_order_relaxed);
+        while (u > 0 && !used.compare_exchange_weak(u, u - 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        }
     }
 
-    int remaining() const {
-        std::lock_guard<std::mutex> lk(m);
-        return max_total - used;
-    }
+    int remaining() const { return max_total - used.load(std::memory_order_acquire); }
 
-    // Copy is disabled (mutex); budgets are shared by pointer/reference.
+    // Budgets are shared by pointer/reference, never copied.
     IterationBudget(const IterationBudget&) = delete;
     IterationBudget& operator=(const IterationBudget&) = delete;
 };
+
+static_assert(std::atomic<int>::is_always_lock_free, "the budget is a plain atomic counter");
 
 }  // namespace agent
 }  // namespace dd

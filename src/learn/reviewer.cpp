@@ -49,6 +49,28 @@ const std::vector<Rule>& instruction_rules() {
     return r;
 }
 
+// What a skill must never tell the model to run: remote code, exfiltration, privilege, destruction, the operator's
+// own bans. The draft is built from tool arguments, so a poisoned episode would otherwise become standing advice.
+const std::vector<Rule>& command_rules() {
+    static const std::vector<Rule> r = [] {
+        const auto ic = std::regex::ECMAScript | std::regex::icase;
+        const std::string shells = "(?:sudo\\s+)?(?:sh|bash|zsh|dash|ksh|fish|python[0-9.]*(?!\\s+-m\\s+json)|perl|ruby|node)\\b";
+        std::vector<Rule> v;
+        v.push_back({"download piped into a shell", std::regex("\\b(?:curl|wget|fetch)\\b[^\\n]*\\|\\s*" + shells, ic)});
+        v.push_back({"decoded payload piped into a shell", std::regex("\\b(?:base64\\s+(?:-d|-D|--decode)|xxd\\s+-r)\\b[^\\n]*\\|\\s*" + shells, ic)});
+        v.push_back({"eval of command output", std::regex("\\beval\\s+[\"']?(?:\\$\\(|`)", ic)});
+        v.push_back({"network pipe to an address", std::regex("\\b(?:nc|ncat|netcat|socat)\\b[^\\n]{0,60}?(?:\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|[a-z0-9-]+\\.[a-z]{2,}\\b|\\blocalhost\\b|\\bTCP[46]?:|\\bTCP-LISTEN)", ic)});
+        v.push_back({"/dev/tcp", std::regex("/dev/(?:tcp|udp)/", ic)});
+        v.push_back({"privilege escalation", std::regex("(?:^|[\\s;&|(`])(?:sudo|doas|pkexec)\\b", ic)});
+        v.push_back({"recursive delete of / ~ $HOME", std::regex("\\brm\\s+(?:-[a-z]+\\s+)*(?:-[a-z]*r[a-z]*|--recursive)\\s+(?:-[a-z-]+\\s+)*[\"']?(?:/|/\\*|~|~/|~/\\*|\\$HOME|\\$\\{HOME\\}|\\$HOME/|\\$HOME/\\*)[\"']?(?:\\s|$|[;&|)`])", ic)});
+        v.push_back({"git force-push", std::regex("\\bgit\\s+push\\b[^\\n]*(?:--force|\\s-f\\b|\\s\\+[^\\s]+)", ic)});
+        v.push_back({"git hooks skipped", std::regex("--no-verify\\b|\\bgit\\s+commit\\s+(?:[^\\n]*\\s)?-[a-z]*n[a-z]*\\b", ic)});
+        v.push_back({"secret store read", std::regex("(?:^|[^A-Za-z0-9_])\\.(?:ssh|gnupg|aws)\\b|\\.netrc\\b|\\bid_(?:rsa|dsa|ecdsa|ed25519)\\b|/etc/shadow\\b", ic)});
+        return v;
+    }();
+    return r;
+}
+
 std::string first_match(const std::vector<Rule>& rules, const std::string& text) {
     for (const auto& r : rules)
         if (std::regex_search(text, r.re)) return r.label;
@@ -70,6 +92,15 @@ bool under(const std::string& path, const std::string& dir) {
 
 std::string Reviewer::find_secret(const std::string& text) { return first_match(secret_rules(), text); }
 std::string Reviewer::find_instruction(const std::string& text) { return first_match(instruction_rules(), text); }
+
+std::string Reviewer::find_command(const std::string& text) {
+    if (const std::string label = first_match(command_rules(), text); !label.empty()) return label;
+    // a downloaded file made executable: the two halves sit on different lines, so each is looked for on its own
+    static const std::regex download("\\b(?:curl|wget)\\b", std::regex::ECMAScript | std::regex::icase);
+    static const std::regex chmod_x("\\bchmod\\s+(?:[a-z]*\\+x|[0-7]*[1357][0-7]{0,2})\\b", std::regex::ECMAScript | std::regex::icase);
+    if (std::regex_search(text, download) && std::regex_search(text, chmod_x)) return "chmod +x of a downloaded file";
+    return {};
+}
 
 std::string Reviewer::find_private_path(const std::string& text) const {
     static const std::regex users("(/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|/root)(/[^\\s`'\"),]*)?");
@@ -101,6 +132,7 @@ Verdict Reviewer::review(const Draft& d) const {
     if (const auto s = find_secret(all); !s.empty()) return no("secret: " + s);
     if (const auto p = find_private_path(all); !p.empty()) return no("private path: " + p);
     if (const auto i = find_instruction(all); !i.empty()) return no("instruction: " + i);
+    if (const auto c = find_command(all); !c.empty()) return no("command: " + c);
 
     if (search_) {
         know::Distiller dist;

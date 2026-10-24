@@ -226,6 +226,7 @@ public:
     // Cards completed since the last call, as printed lines (no tty).
     std::string drain_inline(int width, bool color, bool truecolor);
     std::string row_text(int y) const;  // last presented frame, plain text
+    size_t live_text_bytes() const;     // bytes held by the streaming reasoning/answer cards (render thread, after present())
     const Theme& theme() const { return th_; }
 
     static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14, kReasonRows = 6;

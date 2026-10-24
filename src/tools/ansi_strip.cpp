@@ -8,8 +8,9 @@
 namespace dd {
 namespace tools {
 
-// Decode UTF-8 to codepoints. Invalid lead bytes are emitted as their byte
-// value and advance one byte (loose surrogateescape-style fallback).
+// Decode UTF-8 to codepoints. A byte that does not start a well-formed sequence (RFC 3629: no overlongs, no
+// surrogates, nothing past U+10FFFF) is emitted as its byte value and advances one byte (loose
+// surrogateescape-style fallback).
 static std::vector<uint32_t> decode_utf8(const std::string& s) {
     std::vector<uint32_t> cps;
     cps.reserve(s.size());
@@ -31,9 +32,12 @@ static std::vector<uint32_t> decode_utf8(const std::string& s) {
                 uint32_t cp = b0 & (0xFF >> (len + 1));
                 for (size_t k = 1; k < len; ++k)
                     cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
-                cps.push_back(cp);
-                i += len;
-                continue;
+                const uint32_t least = len == 2 ? 0x80u : len == 3 ? 0x800u : 0x10000u;
+                if (cp >= least && !(cp >= 0xD800 && cp <= 0xDFFF) && cp <= 0x10FFFF) {
+                    cps.push_back(cp);
+                    i += len;
+                    continue;
+                }
             }
         }
         cps.push_back(b0);
@@ -54,7 +58,7 @@ static void encode_utf8(uint32_t cp, std::string& out) {
         out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     } else {
         out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0xF0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     }

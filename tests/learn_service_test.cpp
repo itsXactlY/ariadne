@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "learn_tmp.hpp"
 #include "dd/learn/service.hpp"
 
 namespace fs = std::filesystem;
@@ -74,7 +75,7 @@ static size_t skill_files(const fs::path& root) {
 }
 
 int main() {
-    const fs::path base = fs::path("build") / ("learn_service_tmp_" + std::to_string(::getpid()));
+    const fs::path base = learn_test_dir("learn_service_tmp");
     fs::remove_all(base);
     fs::create_directories(base);
 

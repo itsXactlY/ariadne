@@ -157,7 +157,7 @@ void Journal::open_active(uint64_t index) {
     active_ = index;
     struct stat st;
     active_bytes_ = fd_ >= 0 && ::fstat(fd_, &st) == 0 ? static_cast<size_t>(st.st_size) : 0;
-    if (fd_ >= 0) fsx::sync_dir(dir_);
+    if (fd_ >= 0 && !fsx::sync_dir(dir_)) c_.sync_errors++;
 }
 
 Journal::~Journal() {
@@ -204,7 +204,9 @@ void Journal::maybe_sync() {
 
 void Journal::sync() {
     if (unsynced_ == 0 || fd_ < 0) return;
-    ::fdatasync(fd_);   // the data and the size; the name was synced when the segment was created
+    // the data and the size; the name was synced when the segment was created. A failed sync is not retried (the kernel may
+    // have dropped the pages): it is counted, and Ledger::health() says so
+    if (::fdatasync(fd_) != 0) c_.sync_errors++;
     unsynced_ = 0;
     c_.syncs++;
 }

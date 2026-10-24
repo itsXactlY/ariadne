@@ -236,7 +236,7 @@ core::Json create_job(const CreateJobParams& p) {
     }
 
     // uuid4().hex[:12]
-    static thread_local std::mt19937_64 rng(std::random_device{}());
+    static thread_local std::mt19937_64 rng([] { std::random_device rd; std::seed_seq seed{rd(), rd(), rd(), rd(), rd(), rd(), rd(), rd()}; return std::mt19937_64(seed); }());
     std::uniform_int_distribution<int> hexd(0, 15);
     std::string job_id;
     for (int i = 0; i < 12; ++i) {

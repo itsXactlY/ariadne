@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <optional>
@@ -49,12 +50,27 @@ std::string gist_of(const std::string& s, size_t n = 400) {
     return t.substr(0, cut) + "…";
 }
 
+// At most cap bytes of the file: a huge or endless one is never read whole.
 std::optional<std::string> read_all(const fs::path& p, size_t cap = 4u << 20) {
     std::ifstream in(p, std::ios::binary);
     if (!in) return std::nullopt;
-    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (text.size() > cap) text.resize(cap);
+    std::string text;
+    char buf[1 << 16];
+    while (text.size() < cap && in) {
+        in.read(buf, static_cast<std::streamsize>(std::min(sizeof buf, cap - text.size())));
+        const auto got = in.gcount();
+        if (got <= 0) break;
+        text.append(buf, static_cast<size_t>(got));
+    }
     return text;
+}
+
+// The number just before " bytes" in a card, or 0 when there is none or it is not a size a skill can have.
+size_t bytes_before(const std::string& content, size_t at) {
+    size_t b = at;
+    while (b > 0 && std::isdigit(static_cast<unsigned char>(content[b - 1]))) --b;
+    if (b == at || at - b > 9) return 0;   // no digits, or more than a billion
+    return static_cast<size_t>(std::strtoull(content.substr(b, at - b).c_str(), nullptr, 10));
 }
 
 std::string rev_of(const std::string& text) { return core::sha256_hex(text).substr(0, 12); }
@@ -211,7 +227,9 @@ std::optional<std::string> DiskSkills::file(const Card& c, const std::string& re
 
 std::vector<Card> MazeSkills::list() {
     skipped_.store(0);
+    size_t truncated = 0;   // listings that ran into their cap with more behind
     std::vector<context::Hit> labels;
+    bool complete = false;
     for (int off = 0; off < 4000; off += 200) {
         if (cancel_.load()) {
             ok_.store(false);
@@ -219,13 +237,18 @@ std::vector<Card> MazeSkills::list() {
         }
         auto page = mem_->labels("skill:", off, 200);
         labels.insert(labels.end(), page.begin(), page.end());
-        if (page.size() < 200) break;
+        if (page.size() < 200) {
+            complete = true;
+            break;
+        }
     }
+    if (!complete) ++truncated;
     if (labels.empty()) {
         ok_.store(false);
         return {};
     }
     std::set<std::string> with_body;   // "<source>:<name>" of every skillsrc:<source>:<name>#NNN
+    complete = false;
     for (int off = 0; off < 8000; off += 200) {
         if (cancel_.load()) {
             ok_.store(false);
@@ -234,8 +257,12 @@ std::vector<Card> MazeSkills::list() {
         auto page = mem_->labels("skillsrc:", off, 200);
         for (const auto& h : page)
             if (const size_t hash = h.label.rfind('#'); hash != std::string::npos && h.label.size() > 9) with_body.insert(h.label.substr(9, hash - 9));
-        if (page.size() < 200) break;
+        if (page.size() < 200) {
+            complete = true;
+            break;
+        }
     }
+    if (!complete) ++truncated;
     std::vector<long> ids;
     for (const auto& h : labels) ids.push_back(h.id);
     std::vector<context::Hit> rows;
@@ -253,18 +280,16 @@ std::vector<Card> MazeSkills::list() {
     std::vector<Card> out;
     size_t skipped = 0;
     auto paths = std::make_unique<Paths>();
-    for (const auto& r : rows) {
+    auto parse_row = [&](const context::Hit& r) -> std::optional<Card> {
         // skill:<source>:<name>; a note filed under skill: ("fact: a skill was created ...") has no source
         const std::string rest = r.label.rfind("skill:", 0) == 0 ? r.label.substr(6) : r.label;
         const size_t colon = rest.find(':');
         if (colon == std::string::npos) {
-            ++skipped;
-            continue;
+            return std::nullopt;
         }
         const std::string src = rest.substr(0, colon), name = rest.substr(colon + 1);
         if (src.empty() || !skill_name(name)) {   // also an ::afe:: fragment
-            ++skipped;
-            continue;
+            return std::nullopt;
         }
         std::string content = r.content;
         if (const size_t prev = content.find("\n[PREVIOUSLY]"); prev != std::string::npos) content.resize(prev);   // an older version of the same card
@@ -283,11 +308,7 @@ std::vector<Card> MazeSkills::list() {
             while (e < content.size() && std::isxdigit(static_cast<unsigned char>(content[e]))) ++e;
             if (e - (sha + 7) >= 8) c.rev = content.substr(sha + 7, std::min<size_t>(12, e - (sha + 7)));
         }
-        if (const size_t bytes = content.find(" bytes"); bytes != std::string::npos && bytes > 0) {
-            size_t b = bytes;
-            while (b > 0 && std::isdigit(static_cast<unsigned char>(content[b - 1]))) --b;
-            if (b < bytes) c.body_bytes = static_cast<size_t>(std::stoul(content.substr(b, bytes - b)));
-        }
+        if (const size_t bytes = content.find(" bytes"); bytes != std::string::npos && bytes > 0) c.body_bytes = bytes_before(content, bytes);
         c.has_body = with_body.count(src + ":" + name) > 0;
         if (!c.has_body) c.body_bytes = 0;
         // a legacy pointer card keeps its body where it always was: Path: /home/x/.hermes/skills/.../SKILL.md
@@ -300,10 +321,19 @@ std::vector<Card> MazeSkills::list() {
                 (*paths)[c.source + "/" + name] = p;
             }
         }
-        out.push_back(std::move(c));
+        return c;
+    };
+    for (const auto& r : rows) {
+        try {
+            if (auto c = parse_row(r)) out.push_back(std::move(*c));
+            else ++skipped;
+        } catch (...) {   // one bad card is left out, not the whole source
+            ++skipped;
+        }
     }
     paths_.publish(std::move(paths));
     skipped_.store(skipped);
+    truncated_.store(truncated);
     auto rank = [](const std::string& s) { return s == "maze:local" ? 0 : s == "maze:maze" ? 1 : s == "maze:builtin" ? 3 : 2; };
     std::stable_sort(out.begin(), out.end(), [&](const Card& a, const Card& b) { return rank(a.source) < rank(b.source); });
     return out;
@@ -389,6 +419,7 @@ void SkillCatalogue::refresh() {
         if (ok && !cards.empty()) last_good_[si] = cards;
         else if (!ok && !last_good_[si].empty()) cards = last_good_[si];
         census.skipped += src->skipped();
+        census.truncated += src->truncated();
 
         for (auto& c : cards) {
             if (opt_.disabled.count(c.uri.id)) continue;
@@ -504,6 +535,7 @@ std::string SkillCatalogue::map() const {
         out += (shown == 1 ? " " : " · ") + g + " " + std::to_string(n);
     }
     if (groups.size() > 10) out += " · +" + std::to_string(groups.size() - 10) + " groups";
+    if (s->census.truncated) out += " · " + std::to_string(s->census.truncated) + " listings capped (more behind)";   // a hard cap is a warning, not silence
     return out;
 }
 

@@ -392,7 +392,7 @@ void Router::log(const char* signal, const Delivery& d, const std::string& reaso
     for (const auto& u : d.opened) core::arr_push(opened, core::json_str(u.str()));
     on_log(core::json_dump(core::json_obj({{"t", sp(core::json_num(static_cast<double>(std::time(nullptr))))},
                                            {"signal", sp(core::json_str(signal))},
-                                           {"reason", sp(core::json_str(reason))},
+                                           {"reason", sp(core::json_str(utf8_head(reason, 120)))},
                                            {"offered", sp(std::move(offered))},
                                            {"opened", sp(std::move(opened))},
                                            {"tokens", sp(core::json_num(static_cast<double>(deliver_.tokens(d.note))))},

@@ -3,9 +3,16 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace dd;
 using namespace dd::core;
@@ -28,10 +35,61 @@ static bool code_valid(const std::string& code) {
     return true;
 }
 
+// Chi-square of `draws` characters over `alphabet` against the uniform expectation.
+static double chi_square(const std::string& alphabet, int draws) {
+    std::vector<long> seen(alphabet.size(), 0);
+    for (int done = 0; done < draws;) {
+        const int n = std::min(draws - done, 4096);
+        const std::string s = pairing_random_code(alphabet, n);
+        for (char c : s) ++seen[alphabet.find(c)];
+        done += n;
+    }
+    const double expect = static_cast<double>(draws) / static_cast<double>(alphabet.size());
+    double x = 0;
+    for (long c : seen) x += (c - expect) * (c - expect) / expect;
+    return x;
+}
+
 int main() {
-    set_daedalus_home_override("/tmp/dd_pairing_test");
+    // The scratch home lives beside the build, never in /tmp (a shared RAM tmpfs).
+    const char* t = std::getenv("DD_TEST_TMP");
+    const std::filesystem::path dir =
+        std::filesystem::absolute(std::filesystem::path(t && *t ? t : "build") / ("dd_pairing_test-" + std::to_string(::getpid())));
+    set_daedalus_home_override(dir.string());
     std::error_code ec;
-    std::filesystem::remove_all("/tmp/dd_pairing_test", ec);
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // --- the code generator: OS randomness, no bias ---
+    {
+        const std::string A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        CHECK(pairing_random_code(A, 8).size() == 8, "random code length");
+        CHECK(pairing_random_code("", 8).empty() && pairing_random_code(A, 0).empty(), "empty alphabet or length gives nothing");
+        CHECK(pairing_random_code(std::string(300, 'x'), 4).empty(), "an alphabet over 256 symbols is refused");
+        std::set<std::string> codes;
+        bool alphabet_ok = true;
+        for (int i = 0; i < 10000; ++i) {
+            const std::string c = pairing_random_code(A, 8);
+            alphabet_ok = alphabet_ok && code_valid(c);
+            codes.insert(c);
+        }
+        CHECK(alphabet_ok, "10k codes: eight characters from the alphabet");
+        CHECK(codes.size() >= 9999, "10k codes are distinct (a 2^40 space: at most a freak collision)");
+        // each thread draws from the kernel, not from a per-thread engine seeded once
+        std::string a, b;
+        std::thread([&] { a = pairing_random_code(A, 32); }).join();
+        std::thread([&] { b = pairing_random_code(A, 32); }).join();
+        CHECK(a.size() == 32 && b.size() == 32 && a != b, "two threads draw different streams");
+        // 31 degrees of freedom: 80 is p ~ 1e-6
+        CHECK(chi_square(A, 64000) < 80.0, "32 symbols over 64k draws are uniform");
+        // 10 symbols do not divide 256: rejection sampling keeps them even (9 d.o.f.; 40 is p ~ 1e-5)
+        CHECK(chi_square("0123456789", 100000) < 40.0, "10 symbols over 100k draws are uniform (no modulo bias)");
+        // plain `byte % 10` would give digits 0-5 60.9% of the draws instead of 60.0%: ~1900 extra in 200k
+        const std::string d = pairing_random_code("0123456789", 200000);
+        long low = 0;
+        for (char c : d) low += c < '6';
+        CHECK(low > 119000 && low < 121000, "digits 0-5 take 60% of the draws, not 60.9%");
+    }
 
     PairingStore store;
 
@@ -87,7 +145,7 @@ int main() {
     auto blocked = store.generate_code("wx", "z");
     CHECK(!blocked.has_value(), "generate blocked while locked out");
 
-    std::filesystem::remove_all("/tmp/dd_pairing_test", ec);
+    std::filesystem::remove_all(dir, ec);
 
     if (failures) {
         std::cerr << failures << " test(s) failed\n";

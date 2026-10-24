@@ -1,6 +1,8 @@
 // src/know/wiring.cpp — impl of dd/know/wiring.hpp.
 #include "dd/know/wiring.hpp"
 
+#include "dd/know/text.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -35,6 +37,28 @@ SkillSetup skill_setup(const core::Config& cfg, const core::Home& home) {
     num("knowledge.rank.k1", s.bm25.k1);
     if (cfg.has("knowledge.page_bytes")) s.page_bytes = static_cast<size_t>(std::max<long long>(1000, cfg.get_int("knowledge.page_bytes")));
     return s;
+}
+
+void configure(const core::Config& cfg) {
+    std::vector<std::string> langs = {"en", "de"};
+    if (const core::Json* n = cfg.get("knowledge.stopword_languages"); n && n->type != core::Json::Null) {
+        langs.clear();
+        if (n->type == core::Json::Arr) {
+            for (const auto& x : n->arr)
+                if (x && x->type == core::Json::Str) langs.push_back(x->str);
+        } else if (n->type == core::Json::Str) {
+            std::string cur;
+            for (const char c : n->str + ",") {
+                if (c == ',' || c == ';' || c == ' ') {
+                    if (!cur.empty()) langs.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur.push_back(c);
+                }
+            }
+        }
+    }
+    set_stopword_languages(langs);
 }
 
 std::shared_ptr<SkillCatalogue> make_skill_catalogue(const SkillSetup& s, std::shared_ptr<context::Memory> mem) {

@@ -52,6 +52,54 @@ int main() {
     CHECK(is_safe_url("") == false, "empty-host");
     CHECK(is_safe_url("http://169.254.169.254/") == false, "numeric-blocked");
 
+    // NAT64 carries an IPv4: as blocked as the address inside; 6to4 and Teredo are blocked wholesale
+    CHECK(is_blocked_ip("64:ff9b::a9fe:a9fe"), "nat64 metadata address");
+    CHECK(is_blocked_ip("64:ff9b::7f00:1"), "nat64 loopback");
+    CHECK(is_blocked_ip("64:ff9b::10.0.0.1"), "nat64 private, dotted tail");
+    CHECK(!is_blocked_ip("64:ff9b::808:808"), "nat64 public stays reachable");
+    CHECK(is_blocked_ip("2002:a9fe:a9fe::1"), "6to4 around the metadata address");
+    CHECK(is_blocked_ip("2001:0:4136:e378:8000:63bf:3fff:fdd2"), "teredo");
+
+    // url_hostname: the host a client connects to, never the userinfo in front of it
+    struct H { const char* url; const char* host; };
+    static const H hosts[] = {
+        {"http://example.invalid/x", "example.invalid"},
+        {"http://example.invalid./x", "example.invalid"},
+        {"HTTP://Example.INVALID:8080/x?q=1#f", "example.invalid"},
+        {"http://pub.example:80@169.254.169.254/", "169.254.169.254"},
+        {"http://user:pa:ss@host.example:81/p", "host.example"},
+        {"http://a@b@c.example/", "c.example"},
+        {"http://example.invalid#@169.254.169.254/", "example.invalid"},
+        {"http://example.invalid?@169.254.169.254/", "example.invalid"},
+        {"http://[::1]:8080/", "::1"},
+        {"http://user@[::ffff:10.0.0.1]/", "::ffff:10.0.0.1"},
+        {"http://[::ffff:127.0.0.1]", "::ffff:127.0.0.1"},
+        {"//host.example/p", "host.example"},
+        {"host.example/p", "host.example"},
+        {"http://[::1/", ""},
+        {"http://ho st.example/", ""},
+        {"http://", ""},
+        {"", ""},
+    };
+    for (const auto& h : hosts) {
+        const std::string got = url_hostname(h.url);
+        if (got != h.host) std::fprintf(stderr, "FAIL url_hostname(%s) = '%s', want '%s'\n", h.url, got.c_str(), h.host);
+        if (got != h.host) ++failures;
+    }
+    CHECK(url_hostname("http://example.invalid\\@169.254.169.254/") == "example.invalid", "a backslash ends the authority");
+
+    // userinfo tricks and literals: decided without DNS
+    CHECK(is_safe_url("http://pub.example:80@169.254.169.254/") == false, "userinfo in front of the metadata address");
+    CHECK(is_safe_url("http://169.254.169.254:80@pub.example/") == false, "metadata address as userinfo only: nothing resolves");
+    CHECK(is_safe_url("http://[::1]/") == false, "ipv6 loopback literal");
+    CHECK(is_safe_url("http://user@[::ffff:10.0.0.1]/") == false, "mapped private address behind userinfo");
+    CHECK(is_safe_url("http://[::ffff:127.0.0.1]:9/") == false, "mapped loopback");
+    CHECK(is_safe_url("http://[64:ff9b::a9fe:a9fe]/") == false, "nat64 metadata literal");
+    CHECK(is_safe_url("http://metadata.google.internal./x") == false, "blocked hostname with a trailing dot");
+    CHECK(is_safe_url("http://METADATA.GOOG/x") == false, "blocked hostname in capitals");
+    CHECK(is_safe_url("http://2130706433/") == false, "decimal loopback");
+    CHECK(is_safe_url("http://0x7f.1/") == false, "hex loopback");
+
     if (failures == 0) std::fprintf(stderr, "all url-safety tests passed\n");
     return failures == 0 ? 0 : 1;
 }

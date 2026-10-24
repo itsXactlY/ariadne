@@ -11,6 +11,10 @@ namespace tools {
 // if the string is not a valid IPv4 or IPv6 address.
 bool is_blocked_ip(const std::string& ip_str);
 
+// The host part of a URL as a client connects to it: userinfo (up to the last '@') and port stripped, IPv6 brackets
+// removed, lower-cased, trailing dots dropped; "" when there is no usable host.
+std::string url_hostname(const std::string& url);
+
 // Full URL safety check: parse the URL, reject blocked hostnames, resolve
 // the hostname via getaddrinfo, and block if any resolved address is blocked.
 // Returns false on any parse/DNS failure (mirrors the Python try/except).

@@ -9,6 +9,7 @@ namespace agent {
 using core::Json;
 
 void ChatStream::feed(const char* p, size_t n) {
+    if (overflow_) return;
     if (head_.size() < 2048) head_.append(p, std::min(n, 2048 - head_.size()));
     buf_.append(p, n);
     size_t start = 0, nl;
@@ -19,6 +20,11 @@ void ChatStream::feed(const char* p, size_t n) {
         start = nl + 1;
     }
     buf_.erase(0, start);
+    if (buf_.size() > max_line) {
+        overflow_ = true;
+        error_ = "stream line over " + std::to_string(max_line) + " bytes";
+        buf_.clear();
+    }
 }
 
 void ChatStream::finish() {

@@ -1,14 +1,16 @@
 // src/context/render.cpp — impl of dd/context/render.hpp.
 #include "dd/context/render.hpp"
 
+#include "dd/context/fsutil.hpp"
 #include "dd/core/json.hpp"
+#include "dd/agent/redact.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <set>
 
 namespace dd {
@@ -21,6 +23,30 @@ namespace {
 
 const char* const kIdArgKeys[] = {"file_path", "path", "command", "cmd", "pattern",
                                   "query", "url", "name", "target", "expression"};
+
+// Tool content re-entering the prompt loses key-shaped tokens: 16+ chars with letters and digits (hashes, api keys)
+// or 16+ chars carrying a '/'. Short prose and plain paths stay; excerpt markers are added after this pass.
+std::string mask_secrets(const std::string& s) {
+    std::string out;
+    const size_t n = s.size();
+    for (size_t i = 0; i < n;) {
+        if (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') { out.push_back(s[i++]); continue; }
+        size_t j = i;
+        while (j < n && s[j] != ' ' && s[j] != '\t' && s[j] != '\n' && s[j] != '\r') ++j;
+        const std::string tok = s.substr(i, j - i);
+        bool digit = false, letter = false, slash = false;
+        for (char c : tok) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if (std::isdigit(u)) digit = true;
+            else if (std::isalpha(u)) letter = true;
+            else if (c == '/') slash = true;
+        }
+        const bool redact = tok.size() >= 16 && ((digit && letter) || slash);
+        out += redact ? dd::agent::mask_token(tok) : tok;
+        i = j;
+    }
+    return out;
+}
 
 std::string squash(const std::string& s) {   // runs of whitespace -> one space
     std::string o;
@@ -84,18 +110,41 @@ std::vector<ItemPtr> window(const std::vector<ItemPtr>& items, long current, int
 }  // namespace
 
 std::string Spill::write(const std::string& kind, const std::string& text) {
-    std::error_code ec;
-    std::filesystem::create_directories(dir_, ec);
-    if (ec) return "";
+    if (!fsx::mkdirs(dir_)) return "";
     std::string safe;
     for (char c : kind) safe.push_back(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ? c : '_');
     char name[64];
     std::snprintf(name, sizeof name, "%04u-%s.txt", ++seq_, safe.empty() ? "spill" : safe.substr(0, 40).c_str());
     const std::string path = dir_ + "/" + name;
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return "";
-    f << text;
-    return f ? path : "";
+    const int fd = fsx::open_private(path);
+    if (fd < 0) return "";
+    const bool ok = fsx::write_all(fd, text.data(), text.size());
+    ::close(fd);
+    return ok ? path : "";
+}
+
+void Spill::remove_all() const {
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+}
+
+// dd-<hex time>-<hex 4>: what Session::new_id makes; the sweep touches nothing else in a shared directory.
+static bool session_dir_name(const std::string& n) {
+    if (n.size() < 8 || n.compare(0, 3, "dd-") != 0) return false;
+    const size_t dash = n.find('-', 3);
+    if (dash == std::string::npos || dash == 3 || n.size() - dash - 1 != 4) return false;
+    return std::all_of(n.begin() + 3, n.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) || c == '-'; });
+}
+
+void Spill::sweep(const std::string& root, int max_age_days) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(24 * max_age_days);
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_directory(e2) || it->is_symlink(e2) || !session_dir_name(it->path().filename().string())) continue;
+        if (fs::last_write_time(it->path(), e2) < cutoff && !e2) fs::remove_all(it->path(), e2);
+    }
 }
 
 std::string Renderer::describe_call(const core::ToolCall& c) {
@@ -194,7 +243,7 @@ std::string Renderer::excerpt(const std::string& text, const std::string& path, 
         while (k < last.size() && last[k] == ' ') ++k;
         size_t d = k;
         while (d < last.size() && std::isdigit(static_cast<unsigned char>(last[d]))) ++d;
-        if (d > k && d < last.size() && last[d] == '|') next = std::stol(last.substr(k, d - k)) + 1;
+        if (d > k && d - k <= 18 && d < last.size() && last[d] == '|') next = std::stol(last.substr(k, d - k)) + 1;   // 18 digits fit a long
         long stop = start + asked - 1;
         if (total_lines > 0) stop = std::min(stop, total_lines);
         const Json* p = core::json_get(*read_args, "path");
@@ -224,7 +273,7 @@ std::string Renderer::capped(const Message& tool, const std::vector<ItemPtr>& vi
     const std::string name = call ? call->name : "";
     Json args = core::json_obj();
     if (call) { bool repaired = false; args = core::json_parse_args(call->arguments.empty() ? "{}" : call->arguments, repaired); }  // cut args: keep the members that arrived
-    const std::string text = readable(content);
+    const std::string text = mask_secrets(readable(content));
     if (name == "read_file" && args.type == Json::Obj && core::json_get(args, "path")) {
         long total = 0;
         try {
@@ -274,7 +323,7 @@ Renderer::Epoch Renderer::epoch(const std::vector<ItemPtr>& items, long current,
             int sib = 1;
             const core::ToolCall* call = call_for(ep.sources, m.tool_call_id, sib);
             const std::string tool = call ? call->name : "tool";
-            const std::string path = spill_->write(tool, readable(m.content));
+            const std::string path = spill_->write(tool, mask_secrets(readable(m.content)));
             if (!path.empty())
                 m.content = "[SPILLED RESULT — " + tool + " output (" + std::to_string(m.content.size()) +
                             " chars) moved to disk. Read it back with read_file(\"" + path + "\").]";

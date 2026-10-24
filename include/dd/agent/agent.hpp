@@ -7,9 +7,10 @@
 //     api_call_count += 1; if not budget.consume(): break
 //     build payload; call LLM client; normalize -> assistant msg
 //     append assistant
-//     if tool_calls: dedup + cap_delegate + execute (seq/concurrent) -> append tool results
+//     if tool_calls: dedup + cap_delegate (before the message is recorded) + execute (seq/concurrent) -> append tool results
 //     else: final response; break
 //   on hitting the cap: _handle_max_iterations (one summary call).
+// Every exit of run() closes the context engine's turn once (end_turn), a throwing LLM call included.
 //
 // The provider HTTP transport is a pluggable LLMClient interface; the LOOP
 // LOGIC is what is ported faithfully here.
@@ -67,7 +68,7 @@ public:
     // ---- configuration ----
     std::string model;
     int max_iterations = 90;
-    double tool_delay = 1.0;
+    double tool_delay = 0.0;   // seconds between sequential calls of one batch; an interrupt ends the wait
     std::vector<std::string> enabled_toolsets, disabled_toolsets;
     bool quiet_mode = true;
     std::string system_prompt;
@@ -103,6 +104,9 @@ public:
 
     std::string handle_max_iterations(std::vector<core::Message>& messages,
                                       int api_call_count);
+
+private:
+    std::string run_loop(const std::string& user_message, bool& interrupted);
 };
 
 // ---- faithful helpers (namespace-level) ----

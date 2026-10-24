@@ -15,6 +15,7 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
+#include "dd/tools/fs_tools.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
 
@@ -35,8 +36,6 @@ namespace ddcore = ::dd::core;
 
 using JsonSP = ddcore::JsonSP;
 
-// ---- tiny builders: turn a Json value into a JsonSP (for init-lists) ----
-static JsonSP jsp(Json v) { return std::make_shared<Json>(std::move(v)); }
 
 // libcurl 8.16+ write-callback: (buffer, capacity, actual_bytes, outstream).
 static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems, void* ud) {
@@ -115,55 +114,10 @@ struct HttpLLMClient : dd::agent::LLMClient {
 };
 
 // ---- working filesystem tool handlers (real I/O) ----
-static std::string jerr(const std::string& m) {
-    return json_dump(json_obj({{"error", jsp(json_str(m))}}));
-}
-static std::string h_read_file(const Json& args) {
-    const Json* p = json_get(args, "path");
-    if (!p || p->type != Json::Str) return jerr("path required");
-    std::ifstream f(p->str, std::ios::binary);
-    if (!f) return jerr("cannot open " + p->str);
-    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    return json_dump(json_obj({{"path", jsp(json_str(p->str))},
-                               {"content", jsp(json_str(s))}}));
-}
-static std::string h_write_file(const Json& args) {
-    const Json* p = json_get(args, "path");
-    const Json* c = json_get(args, "content");
-    if (!p || p->type != Json::Str || !c || c->type != Json::Str) return jerr("path+content required");
-    std::ofstream o(p->str, std::ios::binary);
-    if (!o) return jerr("cannot open " + p->str);
-    o << c->str;
-    return json_dump(json_obj({{"path", jsp(json_str(p->str))},
-                               {"bytes", jsp(json_num((double)c->str.size()))}}));
-}
-static std::string h_list_dir(const Json& args) {
-    const Json* p = json_get(args, "path");
-    std::string dir = (p && p->type == Json::Str) ? p->str : std::string(".");
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) return jerr("not a dir: " + dir);
-    Json arr = json_arr();
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
-        arr_push(arr, json_str(e.path().string()));
-    return json_dump(json_obj({{"path", jsp(json_str(dir))}, {"entries", jsp(std::move(arr))}}));
-}
-
-// Register the fs tools with faithful OpenAI-style schemas.
-static ddcore::Json fs_schema(const std::vector<std::string>& props, const std::string& desc) {
-    Json props_map = json_obj();
-    for (const auto& k : props) {
-        Json one = json_obj({{"type", jsp(json_str("string"))},
-                             {"description", jsp(json_str(desc))}});
-        obj_set(props_map, k, one);
-    }
-    Json req = json_arr();
-    for (const auto& k : props) arr_push(req, json_str(k));
-    Json parameters = json_obj({{"type", jsp(json_str("object"))},
-                                {"properties", jsp(std::move(props_map))},
-                                {"required", jsp(std::move(req))}});
-    return json_obj({{"description", jsp(json_str(desc))},
-                     {"parameters", jsp(std::move(parameters))}});
-}
+static std::string h_read_file(const Json& args) { return dd::tools::fs_read(args); }
+static std::string h_write_file(const Json& args) { return dd::tools::fs_write(args); }
+static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args); }
+static ddcore::Json fs_schema(const std::vector<std::string>& props, const std::string& desc) { return dd::tools::fs_tool_schema(props, desc); }
 static void register_fs_tools(dd::tools::ToolRegistry& reg) {
     { ToolEntry e; e.name = "read_file"; e.schema = fs_schema({"path"}, "Read a file's UTF-8 text content."); e.handler = h_read_file; reg.register_tool(e); }
     { ToolEntry e; e.name = "write_file"; e.schema = fs_schema({"path","content"}, "Write text content to a file."); e.handler = h_write_file; reg.register_tool(e); }
@@ -184,7 +138,9 @@ int main(int argc, char** argv) {
         else config_flag = a;
     }
     // config.yaml beside the binary (see dd_tui --init), not the Python Daedalus's ~/.daedalus
-    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag);
+    std::string why;
+    const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag, &why);
+    if (home.root.empty()) { std::cerr << why << "\n"; return 2; }
     ddcore::set_daedalus_home_override(home.root.string());
     const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
 
@@ -200,7 +156,9 @@ int main(int argc, char** argv) {
     std::string model = env_or("DD_MODEL", cfg.get_string("model.name"));
     std::string api_key = env_or("DD_API_KEY", cfg.get_string("model.api_key"));
     long long mt = 0;
-    if (const char* v = std::getenv("DD_MAX_TURNS")) mt = std::stoll(v);
+    if (const char* v = std::getenv("DD_MAX_TURNS")) {
+        try { mt = std::stoll(v); } catch (...) { mt = 0; }   // a bad value falls back to the default
+    }
     else { long long t = cfg.get_int("agent.max_turns"); mt = t; }
     int max_iterations = (mt > 0) ? (int)mt : 90;
 

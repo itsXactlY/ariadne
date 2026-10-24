@@ -1,8 +1,10 @@
-// tests/config_test.cpp — verify the YAML config loader against the real config.yaml.
+// tests/config_test.cpp — verify the YAML config loader against tests/fixtures/config.yaml (DD_FIXTURES overrides the folder).
 #include "dd/core/config.hpp"
 #include "dd/core/json.hpp"
 
+#include <cstdlib>
 #include <iostream>
+#include <string>
 using namespace dd;
 using namespace dd::core;
 using dd::core::Json;
@@ -18,14 +20,15 @@ static int failures = 0;
     } while (0)
 
 int main() {
-    Config c = load_config("/home/alca/.daedalus/config.yaml");
+    const char* fx = std::getenv("DD_FIXTURES");   // the test runs from the repo root
+    Config c = load_config(std::string(fx && *fx ? fx : "tests/fixtures") + "/config.yaml");
 
     // version
     CHECK(c.get_int("_config_version") == 16, "_config_version==16");
 
     // model map + nested scalars
     CHECK(c.get_map("model") != nullptr, "model is a map");
-    CHECK(c.get_string("model.name") == "qwen3.8-flash-next-coder-iq1_m", "model.name");
+    CHECK(c.get_string("model.name") == "example-model-q4", "model.name");
     CHECK(c.get_string("model.provider") == "custom", "model.provider==custom");
     CHECK(c.get_string("model.base_url") == "http://127.0.0.1:8080/v1", "model.base_url");
 
@@ -51,22 +54,34 @@ int main() {
     // skills.external_dirs block list of 1
     const Json* ext = c.get_list("skills.external_dirs");
     CHECK(ext && ext->arr.size() == 1, "skills.external_dirs size 1");
-    CHECK(ext && ext->arr.size() == 1 && ext->arr[0]->str == "/home/alca/.daedalus/skills-maze",
+    CHECK(ext && ext->arr.size() == 1 && ext->arr[0]->str == "/opt/skills/extra",
           "skills.external_dirs[0]");
 
     // nested map under mcp_servers
-    CHECK(c.get_map("mcp_servers.mazemaker.tools") != nullptr, "mcp_servers.mazemaker.tools map");
+    CHECK(c.get_map("mcp_servers.memory.tools") != nullptr, "mcp_servers.memory.tools map");
 
     // multi-line double-quoted description with \u escapes + line continuation
-    std::string pulse = c.get_string("mcp_servers.pulse.description");
-    CHECK(pulse.find("PULSE") != std::string::npos, "pulse desc has PULSE");
-    CHECK(pulse.find("arXiv") != std::string::npos, "pulse desc has arXiv");
-    CHECK(pulse.find("\xE2\x80\x94") != std::string::npos, "pulse desc has em-dash");
+    std::string search = c.get_string("mcp_servers.search.description");
+    CHECK(search.find("SEARCH") != std::string::npos, "search desc has SEARCH");
+    CHECK(search.find("arXiv") != std::string::npos, "search desc has arXiv (after the line continuation)");
+    CHECK(search.find("arXiv, reports") != std::string::npos, "line continuation joins without a space");
+    CHECK(search.find("\xE2\x80\x94") != std::string::npos, "search desc has em-dash");
 
     // single-line \u description
-    std::string btq = c.get_string("mcp_servers.btquant.description");
-    CHECK(btq.find("BTQuant") != std::string::npos, "btquant desc has BTQuant");
-    CHECK(btq.find("\xE2\x80\x94") != std::string::npos, "btquant desc has em-dash");
+    std::string quant = c.get_string("mcp_servers.quant.description");
+    CHECK(quant.find("QUANT") != std::string::npos, "quant desc has QUANT");
+    CHECK(quant.find("\xE2\x80\x94") != std::string::npos, "quant desc has em-dash");
+
+    // flow collections, per-tool switch, enabled flags
+    CHECK(c.get_string("agent.system_prompt").empty() && c.get_map("agent") != nullptr, "empty system prompt");
+    const Json* disabled = c.get_list("skills.disabled");
+    CHECK(disabled && disabled->arr.size() == 3 && disabled->arr[1]->str == "beta" && disabled->arr[2]->str == "gamma", "flow list with mixed quoting");
+    CHECK(c.get_int("providers.custom.options.timeout") == 30, "flow map value");
+    CHECK(c.get_bool("mcp_servers.memory.enabled"), "mcp server enabled");
+    CHECK(!c.get_bool("mcp_servers.quant.enabled"), "mcp server disabled");
+    CHECK(c.get_string("mcp_servers.memory.tools.memory_prune.enabled") == "false", "per-tool switch");
+    CHECK(c.get_string("model.api_key").empty(), "empty quoted scalar");
+    CHECK(c.get_string("model.name") == "example-model-q4", "trailing comment after a plain scalar");
 
     // misc scalars
     CHECK(c.get_string("terminal.backend") == "local", "terminal.backend==local");

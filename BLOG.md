@@ -3,7 +3,7 @@
 **TL;DR:** the agent harness lives in `src/agent/agent.cpp`. Every feature anyone
 thought was missing from it ended up as a paragraph of prose about how it works
 somewhere else. That's boring. So it got fixed in C++ instead. Four prompts.
-One binary, `-Werror`, 23k lines, zero mock-based checks.
+One binary, `-Werror`, ~46k lines with the tests, 86 test binaries.
 
 ---
 
@@ -72,7 +72,7 @@ constraints, not adjectives:
   alternate screen. An unchanged frame writes nothing.
 - Rounded panels with titles set into the border, a 34-col sidebar
   (`session` / `engine` / `tools`), fixed-height tool cards, `turn 3 ·
-  4 calls · 2 tools · 41.2s`. Skins from `~/.daedalus/skins/*.yaml`,
+  4 calls · 2 tools · 41.2s`. Skins from `skins/*.yaml` beside the binary,
   truecolor when `COLORTERM` says so. Raw `termios` input (restored on
   exit and on fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse
   wheel, UTF-8 line editing, tab-completed `/help /tools /turns /clear`.
@@ -110,22 +110,21 @@ means here: the language caught a dependency's ABI drift.
 ## What it doesn't do
 
 Honest, because the README is 6k words of it and the honest line is one
-of them: no smart model routing, no cron/gateway loop, no retrieval
-compression with watermark tiers, no credential pooling. Those are
-the other harness's territory. This one does the things it doesn't do
-instead *in compiled code*: LSP/AST code intelligence, hashline edit
-safety, typed tools (line selectors, archive/SQLite/JSON readers),
-recoverable `artifact://` elision + a deterministic compaction order
-(shake → snapcompact → handoff → remote) with async speculative
-compaction, 32-concurrent subagents with `agent://` messaging,
-persistent eval kernels, session tree rewind/fork.
+of them: no smart model routing, no cron/gateway loop wired in, no
+credential pooling, no LSP/AST code intelligence, no hashline edits, no
+subagents, no eval kernels, no session-tree rewind. Parts of the Python
+harness are ported into this tree but linked into no binary (`tools/*`,
+`gateway/*`, `cron/*`, the retry/classification helpers; the README lists
+them): they are tested, they are not wired. What *is* wired is the run
+loop, the context tape with retrieval-based rebases, the knowledge router,
+the learn loop and a `run_terminal` that is a guard, not a sandbox.
 
 ## Layout
 
 ```
 src/            port TUs (agent · core · tools · ui · ui_simd)
 include/dd/     headers
-tests/          64 _test.cpp suites — `make test`
+tests/          86 test binaries — `make test`
 build/          dd · dd_agent · dd_tui · dd_ui_tests
 ```
 

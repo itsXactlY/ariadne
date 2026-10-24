@@ -3,7 +3,7 @@
 //   2. 180-day sim      600 skills, hidden ground truth, clock jumps, a pod outage, secrets in errors, a human skill
 //   3. downgrade        newer-schema frames are skipped and counted, a newer snapshot refuses to open and is left alone
 //   4. service burst    the real LearnService: a flood of solved problems in one day stays under the daily cap
-// Env: DD_SOAK_DAYS (180) DD_SOAK_TURNS (300 per day) DD_SOAK_CRASHES (40) DD_SOAK_SEED. Files live under build/.
+// Env: DD_SOAK_DAYS (180) DD_SOAK_TURNS (300 per day) DD_SOAK_CRASHES (40) DD_SOAK_SEED. Files live under $DD_TEST_TMP (else build/), in a per-process folder.
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -25,6 +25,7 @@
 #include <variant>
 #include <vector>
 
+#include "learn_tmp.hpp"
 #include "dd/learn/author.hpp"
 #include "dd/learn/codec.hpp"
 #include "dd/learn/compactor.hpp"
@@ -65,8 +66,13 @@ static uint64_t rnd() {
 }
 static double unit() { return static_cast<double>(rnd() >> 11) / 9007199254740992.0; }
 
+static const fs::path& soak_root() {
+    static const fs::path p = learn_test_dir("learn_soak_tmp");
+    return p;
+}
+
 static fs::path fresh(const std::string& name) {
-    const fs::path p = fs::path("build") / "learn_soak_tmp" / name;
+    const fs::path p = soak_root() / name;
     std::error_code ec;
     fs::remove_all(p, ec);
     fs::create_directories(p, ec);
@@ -699,13 +705,13 @@ int main() {
     const int turns = static_cast<int>(env_long("DD_SOAK_TURNS", 300));
     const int crashes = static_cast<int>(env_long("DD_SOAK_CRASHES", 40));
     std::error_code ec;
-    fs::remove_all(fs::path("build") / "learn_soak_tmp", ec);
+    fs::remove_all(soak_root(), ec);
 
     test_crashes(crashes);
     test_sim(days, turns);
     test_service_burst();
 
-    fs::remove_all(fs::path("build") / "learn_soak_tmp", ec);
+    fs::remove_all(soak_root(), ec);
     if (g_fail) std::printf("%d FAILED\n", g_fail);
     else std::printf("learn soak: all passed\n");
     return g_fail ? 1 : 0;

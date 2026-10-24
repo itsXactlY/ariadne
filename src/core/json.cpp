@@ -1,7 +1,9 @@
 #include "dd/core/json.hpp"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <deque>
 #include <sstream>
 #include <stdexcept>
 
@@ -66,7 +68,7 @@ static size_t utf8_len(const unsigned char* p, size_t left) {
     return 0;
 }
 
-static Json parse_value(const std::string& s, size_t& i);
+static Json parse_value(const std::string& s, size_t& i, int depth);
 
 static std::string parse_string_raw(const std::string& s, size_t& i) {
     // i points at opening quote.
@@ -108,10 +110,11 @@ static std::string parse_string_raw(const std::string& s, size_t& i) {
     throw std::runtime_error("json: unterminated string");
 }
 
-static Json parse_value(const std::string& s, size_t& i) {
+static Json parse_value(const std::string& s, size_t& i, int depth) {
     skip_ws(s, i);
     if (i >= s.size()) throw std::runtime_error("json: eof");
     char c = s[i];
+    if ((c == '{' || c == '[') && depth >= kJsonMaxDepth) throw std::runtime_error("json: too deep");
     if (c == '{') {
         Json o; o.type = Json::Obj;
         ++i;
@@ -123,7 +126,7 @@ static Json parse_value(const std::string& s, size_t& i) {
             skip_ws(s, i);
             if (i >= s.size() || s[i] != ':') throw std::runtime_error("json: expected ':'");
             ++i;
-            auto val = parse_value(s, i);
+            auto val = parse_value(s, i, depth + 1);
             o.obj.emplace_back(key, std::make_shared<Json>(std::move(val)));
             skip_ws(s, i);
             if (i < s.size() && s[i] == ',') { ++i; continue; }
@@ -137,7 +140,7 @@ static Json parse_value(const std::string& s, size_t& i) {
         skip_ws(s, i);
         if (i < s.size() && s[i] == ']') { ++i; return a; }
         while (true) {
-            auto val = parse_value(s, i);
+            auto val = parse_value(s, i, depth + 1);
             a.arr.push_back(std::make_shared<Json>(std::move(val)));
             skip_ws(s, i);
             if (i < s.size() && s[i] == ',') { ++i; continue; }
@@ -152,18 +155,30 @@ static Json parse_value(const std::string& s, size_t& i) {
     if (s.compare(i, 4, "true") == 0) { i += 4; return json_bool(true); }
     if (s.compare(i, 5, "false") == 0) { i += 5; return json_bool(false); }
     if (s.compare(i, 4, "null") == 0) { i += 4; return json_null(); }
-    // number
+    // number: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
     size_t start = i;
-    if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
-    bool is_real = false;
-    while (i < s.size() && (std::isdigit((unsigned char)s[i]) || s[i] == '.' ||
-                            s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-')) {
-        if (s[i] == '.' || s[i] == 'e' || s[i] == 'E') is_real = true;
+    auto digits = [&] {
+        const size_t d0 = i;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+        return i - d0;
+    };
+    if (i < s.size() && s[i] == '-') ++i;
+    if (i < s.size() && s[i] == '0') ++i;
+    else if (digits() == 0) throw std::runtime_error("json: bad number");
+    if (i < s.size() && s[i] == '.') {
         ++i;
+        if (digits() == 0) throw std::runtime_error("json: bad number");
     }
-    if (i == start) throw std::runtime_error("json: bad number");
-    Json v; v.type = Json::Num; v.num = std::stod(s.substr(start, i - start));
-    (void)is_real;
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+        if (digits() == 0) throw std::runtime_error("json: bad number");
+    }
+    const std::string tok = s.substr(start, i - start);
+    errno = 0;
+    const double d = std::strtod(tok.c_str(), nullptr);   // the process never leaves the "C" locale
+    if (errno == ERANGE && std::isinf(d)) throw std::runtime_error("json: number out of range");   // underflow is 0, as everywhere
+    Json v; v.type = Json::Num; v.num = d;
     return v;
 }
 
@@ -179,7 +194,12 @@ static std::string repair_truncated(const std::string& s) {
             cl += (*it == '{' ? '}' : ']');
         return cl;
     };
-    std::vector<std::pair<size_t, std::string>> cuts;
+    constexpr size_t kTries = 512;   // only the newest cut points are ever tried
+    std::deque<std::pair<size_t, std::string>> cuts;
+    auto cut_at = [&](size_t at, const std::string& stack) {
+        cuts.emplace_back(at, closers(stack));
+        if (cuts.size() > kTries) cuts.pop_front();
+    };
     std::string stack;  // open '{' / '['
     size_t i = 0;
     while (i < s.size()) {
@@ -195,14 +215,19 @@ static std::string repair_truncated(const std::string& s) {
             }
             if (!closed) break;  // the cut is inside this string: nothing past it survives
             i = k;
-            cuts.emplace_back(i, closers(stack));
+            cut_at(i, stack);
             continue;
         }
-        if (c == '{' || c == '[') { stack.push_back(c); ++i; continue; }
+        if (c == '{' || c == '[') {
+            if (stack.size() >= static_cast<size_t>(kJsonMaxDepth)) return {};   // too deep to be a call's arguments
+            stack.push_back(c);
+            ++i;
+            continue;
+        }
         if (c == '}' || c == ']') {
             if (!stack.empty()) stack.pop_back();
             ++i;
-            cuts.emplace_back(i, closers(stack));
+            cut_at(i, stack);
             continue;
         }
         if (c == ',' || c == ':') { ++i; continue; }
@@ -211,7 +236,7 @@ static std::string repair_truncated(const std::string& s) {
             ++k;
         if (k == i) break;  // not a value start: stop salvaging
         i = k;
-        cuts.emplace_back(i, closers(stack));
+        cut_at(i, stack);
     }
     for (size_t t = cuts.size(); t-- > 0;) {
         const std::string cand = s.substr(0, cuts[t].first) + cuts[t].second;
@@ -219,14 +244,13 @@ static std::string repair_truncated(const std::string& s) {
             (void)json_parse(cand);
             return cand;
         } catch (...) {}
-        if (cuts.size() - t >= 512) break;  // a megabyte of prefixes is not worth trying
     }
     return {};
 }
 
 Json json_parse(const std::string& text) {
     size_t i = 0;
-    auto v = parse_value(text, i);
+    auto v = parse_value(text, i, 0);
     skip_ws(text, i);
     return v;
 }
@@ -252,7 +276,8 @@ Json json_parse_args(const std::string& text, bool& repaired) {
     return Json{};
 }
 
-static void dump_str(const Json& v, std::string& out) {
+static void dump_str(const Json& v, std::string& out, int depth) {
+    if (depth > kJsonMaxDepth) { out += "null"; return; }   // a tree this deep never came from the parser
     switch (v.type) {
         case Json::Null: out += "null"; break;
         case Json::Bool: out += v.b ? "true" : "false"; break;
@@ -300,7 +325,7 @@ static void dump_str(const Json& v, std::string& out) {
             out.push_back('[');
             for (size_t k = 0; k < v.arr.size(); ++k) {
                 if (k) out.push_back(',');
-                dump_str(*v.arr[k], out);
+                dump_str(*v.arr[k], out, depth + 1);
             }
             out.push_back(']');
         } break;
@@ -309,9 +334,9 @@ static void dump_str(const Json& v, std::string& out) {
             for (size_t k = 0; k < v.obj.size(); ++k) {
                 if (k) out.push_back(',');
                 Json key; key.type = Json::Str; key.str = v.obj[k].first;
-                dump_str(key, out);
+                dump_str(key, out, depth + 1);
                 out.push_back(':');
-                dump_str(*v.obj[k].second, out);
+                dump_str(*v.obj[k].second, out, depth + 1);
             }
             out.push_back('}');
         } break;
@@ -320,7 +345,7 @@ static void dump_str(const Json& v, std::string& out) {
 
 std::string json_dump(const Json& v) {
     std::string out;
-    dump_str(v, out);
+    dump_str(v, out, 0);
     return out;
 }
 
@@ -351,18 +376,21 @@ const Json* json_get(const Json& o, const std::string& key) {
     return nullptr;
 }
 
-Json json_deep_copy(const Json& v) {
+static Json deep_copy(const Json& v, int depth) {
     Json out;
+    if (depth > kJsonMaxDepth) return out;   // Null: same cut as json_dump
     out.type = v.type;
     out.b = v.b;
     out.num = v.num;
     out.str = v.str;
     out.arr.reserve(v.arr.size());
-    for (const auto& e : v.arr) out.arr.push_back(std::make_shared<Json>(json_deep_copy(*e)));
+    for (const auto& e : v.arr) out.arr.push_back(std::make_shared<Json>(deep_copy(*e, depth + 1)));
     out.obj.reserve(v.obj.size());
-    for (const auto& kv : v.obj) out.obj.push_back({kv.first, std::make_shared<Json>(json_deep_copy(*kv.second))});
+    for (const auto& kv : v.obj) out.obj.push_back({kv.first, std::make_shared<Json>(deep_copy(*kv.second, depth + 1))});
     return out;
 }
+
+Json json_deep_copy(const Json& v) { return deep_copy(v, 0); }
 
 }  // namespace core
 }  // namespace dd

@@ -1,13 +1,17 @@
 // tests/context_compressor_test.cpp — differential vs context_compressor.py message-graph core.
-// Ground truth from /tmp/gt_cc.py: real ContextCompressor, get_model_context_length forced to 1000
+// Ground truth: files gt_cc_<tag>.json (tags: _meta, alignbwd, alignfwd, compress, compress_none, compress_tiny, describe, findtail, in_msgs, isoffloaded, orphan, prune, prunefloor, sanitize, toolcallid, toolcallnames, toolcallsubjects, toolish, withprefix) written by a script that drives the real
+// Python ContextCompressor; they are not in the repo. $DD_GT_DIR names the folder holding them (default
+// tests/fixtures/gt); with none there the test prints SKIP and exits 0. The script ran with get_model_context_length forced to 1000
 // (threshold_tokens=500, tail_token_budget=100), LLM _generate_summary replaced by a stub,
 // estimate_messages_tokens_rough patched (logging-only, never in return path).
 // Config for the instance under test: protect_first_n=1, protect_last_n=2.
 #include "dd/core/json.hpp"
 #include "dd/core/context_compressor.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 using namespace dd::core;
@@ -18,13 +22,23 @@ static void chk(bool c, const std::string& w) {
     else { ++g_fail; std::cout << "FAIL: " << w << "\n"; }
 }
 
+static std::string g_gt_dir;
+
+// A member of a ground-truth object; a missing one is a failed comparison, not a crash.
+static Json field(const Json& o, const std::string& k) {
+    const Json* v = json_get(o, k);
+    if (!v) throw std::runtime_error("ground truth has no member '" + k + "'");
+    return *v;
+}
+
 static std::string read_file(const std::string& p) {
     std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("missing ground truth file " + p);
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
-static Json gt(const std::string& tag) { return json_parse(read_file("/tmp/gt_cc_" + tag + ".json")); }
+static Json gt(const std::string& tag) { return json_parse(read_file(g_gt_dir + "/gt_cc_" + tag + ".json")); }
 
-int main() {
+static int run() {
     // ---- constants (referenced so no unused warnings; cross-checked vs gt meta) ----
     Json meta = gt("_meta");
     chk(get_str(meta, "ph", "") == _PRUNED_TOOL_PLACEHOLDER, "const PH");
@@ -32,8 +46,8 @@ int main() {
     chk(get_str(meta, "legacy", "") == LEGACY_SUMMARY_PREFIX, "const LEGACY");
     chk(get_str(meta, "offload_prefix", "") == _OFFLOAD_PREFIX, "const OFFLOAD_PREFIX");
     {
-        Json subjs = *json_get(meta, "subj");
-        chk(subjs.type == Json::Arr && subjs.arr.size() == 6, "const SUBJ count");
+        const Json* subjs = json_get(meta, "subj");
+        chk(subjs && subjs->type == Json::Arr && subjs->arr.size() == 6, "const SUBJ count");
     }
 
     const long long THRESH = 500, TAIL = 100, LIVE = 12;
@@ -44,8 +58,8 @@ int main() {
     cfg.tail_token_budget = TAIL;
     cfg.live_window_messages = LIVE;
     cfg.compression_count = 0;
-    chk((long long)json_get(meta, "threshold_tokens")->num == cfg.threshold_tokens, "cfg threshold");
-    chk((long long)json_get(meta, "tail_token_budget")->num == cfg.tail_token_budget, "cfg tail");
+    chk((long long)field(meta, "threshold_tokens").num == cfg.threshold_tokens, "cfg threshold");
+    chk((long long)field(meta, "tail_token_budget").num == cfg.tail_token_budget, "cfg tail");
 
     Json in_msgs = gt("in_msgs");
     Json orphan = gt("orphan");
@@ -77,8 +91,8 @@ int main() {
     {
         auto pr = prune_old_tool_results(in_msgs, cfg.protect_last_n * 3);
         Json exp = gt("prune");
-        chk(json_dump(pr.first) == json_dump(*json_get(exp, "msgs")), "prune msgs");
-        chk(pr.second == (long long)json_get(exp, "count")->num, "prune count");
+        chk(json_dump(pr.first) == json_dump(field(exp, "msgs")), "prune msgs");
+        chk(pr.second == (long long)field(exp, "count").num, "prune count");
         auto pe = prune_old_tool_results(json_arr(), 6);
         chk(pe.second == 0 && json_dump(pe.first) == "[]", "prune empty");
     }
@@ -140,9 +154,9 @@ int main() {
     // ---- align_boundary_forward ----
     {
         Json af = gt("alignfwd");
-        chk(align_boundary_forward(toolish, 1) == (long long)json_get(af, "i1")->num, "alignfwd i1");
-        chk(align_boundary_forward(toolish, 3) == (long long)json_get(af, "i3")->num, "alignfwd i3");
-        chk(align_boundary_forward(toolish, 0) == (long long)json_get(af, "i0")->num, "alignfwd i0");
+        chk(align_boundary_forward(toolish, 1) == (long long)field(af, "i1").num, "alignfwd i1");
+        chk(align_boundary_forward(toolish, 3) == (long long)field(af, "i3").num, "alignfwd i3");
+        chk(align_boundary_forward(toolish, 0) == (long long)field(af, "i0").num, "alignfwd i0");
     }
 
     // ---- align_boundary_backward ----
@@ -158,15 +172,15 @@ int main() {
     {
         Json ft = gt("findtail");
         chk(find_tail_cut_by_tokens(in_msgs, 1, cfg.tail_token_budget, cfg.protect_last_n)
-                == (long long)json_get(ft, "he1")->num, "findtail he1");
+                == (long long)field(ft, "he1").num, "findtail he1");
         chk(find_tail_cut_by_tokens(in_msgs, 0, cfg.tail_token_budget, cfg.protect_last_n)
-                == (long long)json_get(ft, "he0")->num, "findtail he0");
+                == (long long)field(ft, "he0").num, "findtail he0");
     }
 
     // ---- sanitize_tool_pairs ----
     {
         Json san = gt("sanitize");
-        chk(json_dump(sanitize_tool_pairs(orphan)) == json_dump(*json_get(san, "msgs")), "sanitize orphan");
+        chk(json_dump(sanitize_tool_pairs(orphan)) == json_dump(field(san, "msgs")), "sanitize orphan");
         chk(json_dump(sanitize_tool_pairs(in_msgs)) == json_dump(in_msgs), "sanitize clean no-op");
     }
 
@@ -194,4 +208,19 @@ int main() {
 
     std::cout << "context_compressor: " << g_pass << " tests: " << (g_fail ? "FAIL" : "PASS") << "\n";
     return g_fail ? 1 : 0;
+}
+
+int main() {
+    const char* d = std::getenv("DD_GT_DIR");
+    g_gt_dir = d && *d ? d : "tests/fixtures/gt";
+    if (!std::ifstream(g_gt_dir + "/gt_cc__meta.json")) {
+        std::cout << "SKIP: no ground truth in " << g_gt_dir << " (DD_GT_DIR)\n";
+        return 0;
+    }
+    try {
+        return run();
+    } catch (const std::exception& e) {
+        std::cout << "FAIL: " << e.what() << "\n";
+        return 1;
+    }
 }

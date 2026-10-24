@@ -19,6 +19,7 @@ namespace agent {
 class ChatStream {
 public:
     std::function<void(const std::string&)> on_reasoning, on_content;
+    size_t max_line = 64u << 20;   // a line with no newline past this ends the stream with an error
 
     void feed(const char* p, size_t n);   // raw bytes, any split
     void finish();                        // flush a last line without "\n"
@@ -28,7 +29,8 @@ public:
     const std::string& reasoning() const { return reasoning_; }
     const core::Json& usage() const { return usage_; }
     const core::Json& timings() const { return timings_; }
-    const std::string& error() const { return error_; }   // an in-stream {"error":…}
+    const std::string& error() const { return error_; }   // an in-stream {"error":…}, or an overlong line
+    bool overflowed() const { return overflow_; }         // stop feeding: error() says why
     const std::string& raw_head() const { return head_; } // first bytes, for reports
 
 private:
@@ -38,6 +40,7 @@ private:
     std::map<long, core::ToolCall> calls_;   // by delta index
     core::Json usage_, timings_;
     long chunks_ = 0;
+    bool overflow_ = false;
 };
 
 }  // namespace agent

@@ -99,6 +99,9 @@ Result status(const InspectPaths& p, int64_t now) {
         o << "; skipped: " << h.replay_newer << " newer, " << h.replay_undecodable << " undecodable, " << h.bad_segments
           << " bad segments, " << h.snapshots_corrupt << " bad snapshots";
     o << "\n";
+    if (h.sync_errors || h.write_errors)   // left by the run that saw them (Ledger's HEALTH file)
+        o << "WARNING: the last run could not make its records durable: " << h.sync_errors << " failed sync(s), " << h.write_errors
+          << " failed write(s); the newest records may be missing\n";
     double offered = 0, opened = 0, helped = 0, failed = 0;
     for (const auto& [k, c] : s.cards) {
         offered += c.offered.at(now, kHlConversion);

@@ -12,6 +12,10 @@
 namespace dd {
 namespace gateway {
 
+// `length` characters drawn uniformly from `alphabet` out of the OS CSPRNG (getrandom, rejection sampling: no modulo
+// bias). "" when the alphabet is empty or longer than 256 or the kernel cannot supply randomness; never a weaker fallback.
+std::string pairing_random_code(const std::string& alphabet, int length);
+
 class PairingStore {
 public:
     PairingStore();

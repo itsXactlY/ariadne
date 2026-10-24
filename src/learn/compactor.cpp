@@ -115,12 +115,12 @@ Compactor::Result Compactor::compact(uint64_t through) {
             return res;
         }
         if (!step("fsync_tmp")) return ::close(fd), res.aborted = true, res;
-        if (::fsync(fd) != 0) return ::close(fd), res;
+        if (::fsync(fd) != 0) return ::close(fd), ++res.sync_errors, res;
         ::close(fd);
         if (!step("rename")) return res.aborted = true, res;
         if (::rename(tmp.c_str(), dst.c_str()) != 0) return res;
         if (!step("fsync_dir")) return res.aborted = true, res;
-        fsx::sync_dir(dir_);
+        if (!fsx::sync_dir(dir_)) ++res.sync_errors;
     }
     for (const uint64_t idx : Journal::segments(dir_)) {
         if (idx > through) break;
@@ -132,7 +132,7 @@ Compactor::Result Compactor::compact(uint64_t through) {
         if (!step("unlink_snapshot")) return res.aborted = true, res;
         if (::unlink(snapshot_path(dir_, idx).c_str()) == 0) ++res.snapshots_removed;
     }
-    fsx::sync_dir(dir_);
+    if (!fsx::sync_dir(dir_)) ++res.sync_errors;
     res.ok = true;
     return res;
 }

@@ -81,6 +81,16 @@ knowledge:
     failure: true          # a call failed twice, or its error is a known one
     stall: true            # the same call twice, or three blind explorations
   rules: true              # tripwires: ./rules/*.md and the maze's rule: rows
+  stopword_languages: [en, de]   # words dropped from queries and cards; add nl fr es pt it ro sv da no fi pl cs ... for prompts in those languages (a short word in
+                                 # another language can be a technical term in yours: "os", "ci", "var" are real words elsewhere, so they are opt-in)
+
+# What dd learns from its own use (docs/LEARN.md). Priors and learned terms are bounded and reversible; drafting skills is OFF until you say so:
+# a drafted skill is later offered to the model, so read `dd learn status` and the drafts under skills/ before turning it on.
+learn:
+  enabled: true
+  feedback: true           # learn priors and query terms from what was offered and opened
+  author: false            # draft skills from fixed failures (probation first); a human skill of the same name always wins
+  max_drafts_per_day: 3
 
 # Local tools and these stay in the window; the rest is found with tool_search.
 tool_search:
@@ -102,8 +112,10 @@ mcp_servers:
     transport: http
     url: http://127.0.0.1:8765/mcp
     instructions: harness
+    # headers:                            # extra request headers; ${VAR} is read from the environment
+    #   Authorization: "Bearer ${MAZEMAKER_TOKEN}"
     tools:                                # optional per-tool switch
       mazemaker_prune: {enabled: false}
 
-# run_terminal already refuses sudo/su/dd/mkfs/shutdown/force-push/...; add words here.
+# run_terminal is a guard, not a sandbox: it refuses obviously destructive commands (sudo, recursive rm on broad paths, force-push, ...); add command words here.
 command_denylist: []

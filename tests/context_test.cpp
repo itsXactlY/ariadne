@@ -11,11 +11,14 @@
 #include "dd/know/skills.hpp"
 #include "dd/tools/registry.hpp"
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -31,6 +34,37 @@ using core::Message;
 static int g_fail = 0;
 static void chk(bool ok, const std::string& label) {
     if (!ok) { ++g_fail; std::printf("FAIL %s\n", label.c_str()); }
+}
+
+
+// Scratch lives under $DD_TEST_TMP (the Makefile sets it), never in the shared /tmp; one directory per process, gone at exit.
+static std::string tmp_root_s() {
+    static const std::string s = [] {
+        const char* e = std::getenv("DD_TEST_TMP");
+        return (std::filesystem::path(e && *e ? e : "build/tmp") / ("ctx-" + std::to_string(::getpid()))).string();
+    }();
+    return s;
+}
+static std::string tmp_dir(const std::string& name) {
+    const auto p = std::filesystem::path(tmp_root_s()) / name;
+    std::error_code ec;
+    std::filesystem::create_directories(p, ec);
+    return p.string();
+}
+static struct TmpCleanup {
+    std::string dir = tmp_root_s();
+    ~TmpCleanup() {
+        // destructors run at exit: a throw here would call std::terminate
+        try {
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(dir), ec);
+        } catch (...) {}
+    }
+} g_tmp_cleanup;
+
+static unsigned mode_of(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0 ? (st.st_mode & 07777u) : 0xFFFFu;
 }
 
 static core::JsonSP jsp(Json v) { return std::make_shared<Json>(std::move(v)); }
@@ -102,7 +136,7 @@ static int prefix_breaks(bool tape, int* calls_out, std::vector<std::vector<std:
     cfg.render.reasoning_window = 1;
     cfg.turn_recall = false;
     cfg.prewarm = false;
-    const std::string spill = std::filesystem::temp_directory_path().string() + "/dd_context_test_spill";
+    const std::string spill = tmp_dir("spill");
     TapeEngine eng(cfg, "you are a test", ep, maze, nullptr, deck, llm, spill);
 
     int breaks = 0, calls = 0, n = 0;
@@ -177,7 +211,7 @@ int main() {
         pol.tool_group_ttl = 1;
         pol.reasoning_window = 1;
         bool maze_up = true;
-        Spill spill(std::filesystem::temp_directory_path().string() + "/dd_context_test_render");
+        Spill spill(tmp_dir("render"));
         Renderer r(pol, [&] { return maze_up; }, [&](Item& it) { soaked.push_back(it.msg.reasoning); it.soaked = true; }, &spill);
         Session s("dd-r");
         Message u;
@@ -243,7 +277,7 @@ int main() {
         cfg.protect_last_n = 2;
         cfg.turn_recall = false;
         cfg.prewarm = false;
-        TapeEngine eng(cfg, "sys", ep, maze, nullptr, deck, llm, std::filesystem::temp_directory_path().string());
+        TapeEngine eng(cfg, "sys", ep, maze, nullptr, deck, llm, tmp_dir("spill"));
         std::vector<std::string> notes;
         eng.on_note = [&](const std::string& s) { notes.push_back(s); };
         eng.begin_turn("first question, long enough to anchor a short follow-up later on");
@@ -293,7 +327,7 @@ int main() {
         cfg.turn_recall = false;
         cfg.prewarm = false;
         TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                       std::filesystem::temp_directory_path().string());
+                       tmp_dir("spill"));
         eng.begin_turn("read every big file and summarise the lot, one line per file please");
         eng.payload();
         for (int i = 1; i <= 5; ++i) {   // 5 results of ~3.75k tokens each
@@ -325,7 +359,7 @@ int main() {
         cfg.turn_recall = false;
         cfg.prewarm = false;
         TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                       std::filesystem::temp_directory_path().string());
+                       tmp_dir("spill"));
         std::vector<std::string> notes;
         eng.on_note = [&](const std::string& s) { notes.push_back(s); };
         eng.begin_turn(std::string(16000, 'q'));
@@ -389,7 +423,7 @@ int main() {
             "non-answers");
         chk(Soaker::reasoning_content("s", std::string(4000, 'q'), 0).find("…[truncated]") != std::string::npos,
             "long reasoning is cut");
-        const std::string spool = std::filesystem::temp_directory_path().string() + "/dd_context_test_spool.jsonl";
+        const std::string spool = tmp_dir("spool") + "/spool.jsonl";
         std::remove(spool.c_str());
         {
             Soaker s(std::make_shared<Maze>("http://127.0.0.1:9/mcp"), spool);   // nothing listens on :9
@@ -411,6 +445,11 @@ int main() {
     {
         chk(trivial_prompt("ok!") && trivial_prompt("/help") && trivial_prompt("Thank you.") && !trivial_prompt("ok, now fix the bug"),
             "trivial prompts");
+        chk(trivial_prompt("/effort high") && trivial_prompt("/resume last") && trivial_prompt("continue") && trivial_prompt("ok"),
+            "a slash command is trivial");
+        chk(!trivial_prompt("/home/someone/projects/x full audit") && !trivial_prompt("/tmp/x.log crashed, why?") &&
+                !trivial_prompt("/var/log/syslog has errors since boot"),
+            "a prompt that starts with a path is a question");
         Session s("x");
         Message u;
         u.role = "user";
@@ -455,7 +494,7 @@ int main() {
         cfg.low = 0.7, cfg.high = 0.88, cfg.hard = 0.95;
         cfg.render.context_length = 61337;
         TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                       std::filesystem::temp_directory_path().string());
+                       tmp_dir("spill"));
         const long layer = 61337 - 61337 / 16;
         const TapeStats st = eng.stats();
         chk(st.fast_layer == layer, "the fast layer stops a sixteenth under the window (" + std::to_string(st.fast_layer) + ")");
@@ -466,7 +505,7 @@ int main() {
         EngineConfig big = cfg;   // a window the layer fits in is left alone
         big.render.context_length = 262144;
         TapeEngine roomy(big, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                         std::filesystem::temp_directory_path().string());
+                         tmp_dir("spill"));
         chk(roomy.stats().fast_layer == 65536, "a window above the layer changes nothing");
     }
 
@@ -484,7 +523,7 @@ int main() {
         cfg.turn_recall = false;
         cfg.prewarm = false;
         TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                       std::filesystem::temp_directory_path().string());
+                       tmp_dir("spill"));
         std::vector<std::string> notes;
         eng.on_note = [&](const std::string& s) { notes.push_back(s); };
         eng.begin_turn(std::string(6000, 'q'));   // ~1.6k tokens as chars/4
@@ -515,7 +554,7 @@ int main() {
         cfg.prewarm = false;
         cfg.render.context_length = 61337;
         TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm,
-                       std::filesystem::temp_directory_path().string());
+                       tmp_dir("spill"));
         std::vector<std::string> notes;
         eng.on_note = [&](const std::string& s) { notes.push_back(s); };
         eng.begin_turn("read the files and tell me what is in them, one line each please");
@@ -544,7 +583,7 @@ int main() {
     // ---- the router in the engine: a note on the question, a note after a batch, only ever appended ----
     {
         namespace fs = std::filesystem;
-        const fs::path dir = fs::temp_directory_path() / ("dd_context_test_skills_" + std::to_string(::getpid()));
+        const fs::path dir = fs::path(tmp_dir("skills"));
         fs::remove_all(dir);
         auto skill = [&](const std::string& name, const std::string& desc, const std::string& tags) {
             fs::create_directories(dir / name);
@@ -567,7 +606,7 @@ int main() {
         agent::HttpLLM llm;
         EngineConfig cfg;
         cfg.prewarm = false;
-        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, (fs::temp_directory_path() / "dd_context_test_spill_r").string(), &router);
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_r"), &router);
         std::vector<std::string> notes;
         eng.on_note = [&](const std::string& n) { notes.push_back(n); };
 
@@ -672,6 +711,244 @@ int main() {
         chk(all.find("[aged out of context]") != std::string::npos && all.find("first result") == std::string::npos, "aged notes: the older batch collapsed");
         chk(all.find("OLD NOTE") == std::string::npos, "aged notes: its note left with it");
         chk(all.find("NEW NOTE") != std::string::npos && all.find("second result") != std::string::npos, "aged notes: the newest batch keeps its note");
+    }
+
+
+    // ---- a base URL is read by its host, not by a substring ----
+    {
+        const auto K = [](const char* u) { return classify_host(u); };
+        chk(K("http://127.0.0.1:8080/v1") == HostKind::Loopback && K("http://127.9.8.7/v1") == HostKind::Loopback &&
+                K("http://localhost:8080") == HostKind::Loopback && K("http://[::1]:8080/v1") == HostKind::Loopback &&
+                K("http://me@127.0.0.1/v1") == HostKind::Loopback && K("HTTP://LOCALHOST/v1") == HostKind::Loopback,
+            "endpoint: loopback hosts");
+        chk(K("http://192.168.1.50:8080/v1") == HostKind::Private && K("http://10.1.2.3/v1") == HostKind::Private &&
+                K("http://172.16.0.1/v1") == HostKind::Private && K("http://172.31.255.254/v1") == HostKind::Private &&
+                K("http://169.254.7.7/v1") == HostKind::Private && K("http://[fd00::1]:8080/v1") == HostKind::Private &&
+                K("http://[fc00::2]/v1") == HostKind::Private && K("http://box.local:8080/v1") == HostKind::Private,
+            "endpoint: private hosts");
+        chk(K("http://203.0.113.1/v1") == HostKind::Remote && K("http://172.32.0.1/v1") == HostKind::Remote &&
+                K("http://172.15.0.1/v1") == HostKind::Remote && K("http://8.8.8.8/v1") == HostKind::Remote &&
+                K("https://api.example.invalid/v1") == HostKind::Remote && K("http://100.64.1.1/v1") == HostKind::Remote &&
+                K("http://x.example/127.0.0.1") == HostKind::Remote && K("http://127.0.0.1.evil.example/v1") == HostKind::Remote &&
+                K("http://127.0.0.1@evil.example/v1") == HostKind::Remote && K("http://localhost.evil.example/v1") == HostKind::Remote &&
+                K("http://x.example/?next=localhost") == HostKind::Remote && K("") == HostKind::Remote,
+            "endpoint: everything else, names and tricks included, is remote");
+
+        const std::string props = "{\"default_generation_settings\":{\"n_ctx\":65536},\"total_slots\":2,\"build_info\":\"b1234\"}";
+        std::vector<std::string> asked;
+        auto fake = [&](const std::string& url, long) {
+            asked.push_back(url);
+            net::Response r;
+            r.status = 200;
+            if (url == "http://192.168.1.50:8080/props") r.body = props;
+            else if (url == "http://192.168.1.50:8080/slots") r.body = "[{\"id\":0},{\"id\":1}]";
+            else r.body = "<html>not a llama-server</html>";
+            return r;
+        };
+        {   // a LAN box that answers like llama-server is one; before it answers it is not
+            Endpoint lan("http://192.168.1.50:8080/v1");
+            lan.http_get = fake;
+            Json b0 = core::json_obj();
+            lan.shape(b0, 1, false);
+            chk(!lan.info().local && lan.root().empty() && !core::json_get(b0, "n_cache_reuse"), "endpoint: a private host is remote until it answers");
+            lan.probe();
+            Json b1 = core::json_obj();
+            lan.shape(b1, 1, false);
+            chk(lan.info().local && lan.root() == "http://192.168.1.50:8080" && lan.info().n_ctx == 65536 && lan.info().slots == 2 &&
+                    lan.multi_slot() && core::json_get(b1, "n_cache_reuse") && core::json_get(b1, "id_slot"),
+                "endpoint: a private host that answers like llama-server gets slots and shaping");
+        }
+        {   // a LAN box that is something else stays an API
+            asked.clear();
+            Endpoint other("http://192.168.1.60/v1");
+            other.http_get = fake;
+            other.probe();
+            chk(!other.info().local && other.root().empty() && asked.size() == 1, "endpoint: a private host that is not llama-server stays remote");
+            asked.clear();
+            Endpoint json_only("http://192.168.1.50:8080/v1");
+            json_only.http_get = [&](const std::string&, long) {
+                net::Response r;
+                r.status = 200;
+                r.body = "{\"ok\":true}";
+                return r;
+            };
+            json_only.probe();
+            chk(!json_only.info().local, "endpoint: JSON that is not /props does not make it a llama-server");
+        }
+        {   // a remote provider is never probed; loopback always is
+            asked.clear();
+            Endpoint far("http://203.0.113.1/v1");
+            far.http_get = fake;
+            far.probe();
+            chk(asked.empty() && !far.info().local && far.root().empty(), "endpoint: a remote host gets no probes");
+            Endpoint trick("http://x.example/127.0.0.1");
+            trick.http_get = fake;
+            trick.probe();
+            chk(asked.empty() && !trick.info().local, "endpoint: a loopback address in the path is not loopback");
+            Endpoint lo("http://127.0.0.1:1/v1");
+            lo.http_get = fake;
+            chk(lo.info().local && lo.root() == "http://127.0.0.1:1", "endpoint: loopback is local at once");
+            lo.probe();
+            chk(!asked.empty() && asked[0] == "http://127.0.0.1:1/props", "endpoint: loopback is probed");
+        }
+    }
+
+    // ---- stats() from any thread while the worker drives a turn ----
+    {
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "you are a test", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_stats"));
+        chk(eng.stats().history == 0 && eng.stats().session == eng.session().id(), "stats: a snapshot exists from the constructor on");
+        std::atomic<bool> stop{false};
+        std::atomic<long> reads{0}, bad{0};
+        std::thread reader([&] {
+            int epoch = 0;
+            size_t history = 0;
+            while (!stop.load(std::memory_order_acquire)) {
+                const TapeStats st = eng.stats();
+                if (st.epoch < epoch || st.history < history || st.history > 1000 || st.session.empty()) bad.fetch_add(1);
+                epoch = st.epoch, history = st.history;
+                reads.fetch_add(1);
+            }
+        });
+        int n = 0;
+        for (int turn = 0; turn < 6; ++turn) {
+            eng.begin_turn("turn " + std::to_string(turn) + ": read the files and report");
+            for (int k = 0; k < 4; ++k) {
+                (void)eng.payload();
+                ++n;
+                eng.on_assistant(assistant_calls(n, "read_file", "/f" + std::to_string(n), std::string(200, 'r')));
+                eng.on_tool_results({tool_result(n, std::string(300, 'x'))});
+                eng.after_tools();
+            }
+            Message fin;
+            fin.role = "assistant";
+            fin.content = "done";
+            eng.on_assistant(fin);
+            eng.end_turn(fin.content, false);
+        }
+        stop.store(true, std::memory_order_release);
+        reader.join();
+        chk(bad.load() == 0 && reads.load() > 0, "stats: a reader on another thread only ever sees whole, forward-moving snapshots (" +
+                                                  std::to_string(reads.load()) + " reads)");
+        chk(eng.stats().history == eng.session().items().size(), "stats: after the turn the snapshot is the current state");
+        eng.sync();
+        chk(eng.stats().session == eng.session().id(), "stats: sync republishes");
+    }
+
+    // ---- end_turn closes a turn once ----
+    {
+        struct Count : know::EventSink {
+            std::atomic<int> turn_ends{0};
+            void emit(know::Event&& e) noexcept override {
+                if (e.type == know::Event::Type::TurnEnd) turn_ends.fetch_add(1);
+            }
+        };
+        auto sink = std::make_shared<Count>();
+        know::Router router({nullptr, nullptr, nullptr}, know::Policy{}, nullptr);
+        router.set_sink(sink);
+        tools::ToolRegistry reg;
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_end"), &router);
+        eng.end_turn("an answer", false);
+        chk(sink->turn_ends.load() == 0, "end_turn: nothing to close before a turn began");
+        eng.begin_turn("a question that is long enough to count as one");
+        eng.end_turn("", true);   // what the agent loop does from its catch block
+        eng.end_turn("", true);
+        eng.end_turn("an answer", false);
+        chk(sink->turn_ends.load() == 1, "end_turn: a second call for the same turn does nothing (" + std::to_string(sink->turn_ends.load()) + ")");
+        eng.begin_turn("the next question, also long enough to count");
+        eng.end_turn("an answer", false);
+        chk(sink->turn_ends.load() == 2, "end_turn: the next turn closes again");
+    }
+
+    // ---- spill: private, bounded, gone with its session ----
+    {
+        namespace fs = std::filesystem;
+        const std::string root = tmp_dir("spill_modes");
+        {
+            Spill sp(root + "/dd-1a2b3c-00ff");
+            const std::string f = sp.write("read_file", "some output");
+            chk(!f.empty() && mode_of(f) == 0600 && mode_of(sp.dir()) == 0700, "spill: files 0600, directory 0700");
+            fs::permissions(f, fs::perms::owner_all | fs::perms::group_read | fs::perms::others_read);
+            const std::string again = Spill(root + "/dd-1a2b3c-00ff").write("read_file", "second");   // a fresh counter: same name, widened by hand
+            chk(mode_of(again) == 0600, "spill: an existing file is narrowed back to 0600");
+            sp.remove_all();
+            chk(!fs::exists(root + "/dd-1a2b3c-00ff"), "spill: remove_all takes the session's directory");
+        }
+        {   // a session's directory goes with the engine
+            tools::ToolRegistry reg;
+            ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+            deck.arrange({});
+            Endpoint ep("http://203.0.113.1/v1");
+            agent::HttpLLM llm;
+            EngineConfig cfg;
+            std::string first_dir;
+            {
+                TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, root);
+                first_dir = root + "/" + eng.session().id();
+                Spill(first_dir).write("x", "y");
+                chk(fs::exists(first_dir), "spill: the session wrote its directory");
+                eng.reset();
+                chk(!fs::exists(first_dir), "spill: reset takes the old session's directory");
+                Spill(root + "/" + eng.session().id()).write("x", "y");
+                first_dir = root + "/" + eng.session().id();
+            }
+            chk(!fs::exists(first_dir), "spill: the destructor takes the session's directory");
+        }
+        {   // old session directories are swept; other directories and young ones are not
+            const fs::path old_s = fs::path(root) / "dd-5e5e5e-1234", young = fs::path(root) / "dd-5e5e5e-5678", other = fs::path(root) / "keepme";
+            for (const auto& d : {old_s, young, other}) {
+                fs::create_directories(d);
+                std::ofstream(d / "f.txt") << "x";
+            }
+            const auto eight_days = std::chrono::hours(24 * 8);
+            fs::last_write_time(old_s, fs::file_time_type::clock::now() - eight_days);
+            fs::last_write_time(other, fs::file_time_type::clock::now() - eight_days);
+            Spill::sweep(root);
+            chk(!fs::exists(old_s) && fs::exists(young) && fs::exists(other), "spill: sweep removes only old session directories");
+        }
+    }
+
+    // ---- an excerpt cut at a line number too large for a long does not throw ----
+    {
+        RenderPolicy pol;
+        pol.context_length = 8000;   // a small window: a 5k result is over its share
+        Renderer rd(pol, [] { return true; }, nullptr, nullptr);
+        std::string text = "     1|" + std::string(900, 'z') + "\n" + std::string(30, '9') + "|" + std::string(900, 'z') + "\n";
+        for (int i = 3; i <= 6; ++i) text += "     " + std::to_string(i) + "|" + std::string(900, 'z') + "\n";
+        const std::string content = core::json_dump(core::json_obj({{"path", jsp(core::json_str("/f"))},
+                                                                    {"content", jsp(core::json_str(text))},
+                                                                    {"total_lines", jsp(core::json_num(6))}}));
+        std::vector<ItemPtr> view;
+        auto add = [&](Message m) {
+            auto it = std::make_shared<Item>();
+            it->msg = std::move(m);
+            view.push_back(it);
+        };
+        add(assistant_calls(9, "read_file", "/f", ""));
+        Message t = tool_result(9, content);
+        add(t);
+        bool threw = false;
+        std::string cut;
+        try {
+            cut = rd.capped(t, view);
+        } catch (...) {
+            threw = true;
+        }
+        chk(!threw && cut.find(Renderer::kResultCut) != std::string::npos, "render: a 30-digit line prefix in a cut read does not throw");
     }
 
     if (g_fail) std::printf("%d FAILED\n", g_fail);

@@ -44,6 +44,8 @@ public:
     // thread starts, or from it: the rows are the refreshing thread's alone.
     void preload();
     void cancel(bool on) override { cancel_.store(on); }
+    // prefixes whose last listing hit the 6000-row cap with more behind: those rows are not cards
+    size_t truncated() const { return truncated_.load(); }
     float idf(const std::string& term) const override;
 
     static const std::vector<std::string>& prefixes();
@@ -66,6 +68,7 @@ private:
     core::SnapCell<Snapshot> snap_;
     std::atomic<bool> healthy_{false};
     std::atomic<bool> cancel_{false};
+    std::atomic<size_t> truncated_{0};
     std::atomic<uint64_t> gen_{0};
     std::map<long, Row> rows_;   // the refresh thread's alone
     bool cache_loaded_ = false;

@@ -2,6 +2,7 @@
 #include "dd/core/json.hpp"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 using namespace dd::core;
@@ -56,6 +57,54 @@ int main() {
     rep = false;
     const Json junk = json_parse_args("{oops", rep);
     chk(rep && junk.type == Json::Null, "unrecoverable -> Null, no throw");
+
+    // ---- nesting: bounded, so no input can overflow the stack (50k levels crashed the parser) ----
+    {
+        auto arr = [](size_t n) { return std::string(n, '[') + std::string(n, ']'); };
+        auto obj = [](size_t n) { std::string s; for (size_t i = 0; i < n; ++i) s += "{\"a\":"; s += "1"; return s + std::string(n, '}'); };
+        auto parses = [](const std::string& t) { try { json_parse(t); return true; } catch (const std::runtime_error&) { return false; } };
+        chk(parses(arr(200)) && parses(obj(200)), "200 levels parse");
+        chk(parses(arr(kJsonMaxDepth)) && parses(obj(kJsonMaxDepth)), "kJsonMaxDepth levels parse");
+        chk(!parses(arr(kJsonMaxDepth + 1)) && !parses(obj(kJsonMaxDepth + 1)), "one more is refused");
+        chk(!parses(arr(50000)) && !parses(obj(50000)), "50k levels throw instead of crashing");
+        bool rep = false;
+        const Json deep = json_parse_args(std::string(50000, '['), rep);
+        chk(rep && deep.type == Json::Null, "too-deep args -> Null, repaired, no throw");
+        rep = false;
+        const Json deep_obj = json_parse_args(obj(50000), rep);
+        chk(rep && deep_obj.type == Json::Null, "too-deep object args -> Null");
+        rep = false;
+        const Json cut_nested = json_parse_args("{\"keep\":1,\"a\":" + obj(150).substr(0, 400), rep);   // a nested call cut short still salvages
+        chk(rep && cut_nested.type == Json::Obj && json_get(cut_nested, "keep") && !json_get(cut_nested, "a"), "cut but not deep: salvaged");
+        const std::string round = json_dump(json_parse(obj(200)));
+        chk(round == obj(200), "200-deep round trip");
+
+        // a tree built by hand, far past the limit: dump and deep copy cut it, neither overflows
+        Json cur = json_arr();
+        for (int i = 0; i < 5000; ++i) { Json up = json_arr(); arr_push(up, cur); cur = std::move(up); }
+        const std::string d = json_dump(cur);
+        size_t open = 0;
+        while (open < d.size() && d[open] == '[') ++open;
+        chk(open == static_cast<size_t>(kJsonMaxDepth) + 1 && d.find("null") != std::string::npos, "dump cuts a hand-built deep tree to null");
+        const Json copy = json_deep_copy(cur);
+        int levels = 0;
+        for (const Json* p = &copy; p->type == Json::Arr && !p->arr.empty(); p = p->arr[0].get()) ++levels;
+        chk(levels == kJsonMaxDepth + 1, "deep copy cuts at the same depth");
+    }
+
+    // ---- numbers follow the JSON grammar ----
+    {
+        auto num = [](const std::string& t, double want) { try { const Json j = json_parse(t); return j.type == Json::Num && j.num == want; } catch (...) { return false; } };
+        auto bad = [](const std::string& t) { try { json_parse(t); return false; } catch (const std::runtime_error&) { return true; } };
+        chk(num("0", 0) && num("-0", 0) && num("12", 12) && num("-12.5", -12.5) && num("1e3", 1000) && num("1E+3", 1000) && num("-12.5e-1", -1.25), "valid numbers");
+        chk(bad("+1") && bad("-") && bad("1.") && bad(".5") && bad("1e") && bad("1e+") && bad("--1") && bad("x"), "invalid numbers throw");
+        chk(bad("[1-2]") && bad("[01]") && bad("[1,]") && bad("[+1]"), "inside a container the grammar is strict");
+        chk(bad("1e999") && bad("-1e999") && bad("[1e999]"), "overflow throws runtime_error");
+        chk(num("1e-999", 0), "underflow is zero");
+        chk(num("123456789012345678", 123456789012345678.0), "big integers");
+        chk(json_parse("1-2-3").num == 1 && json_parse(R"({"a":1} trailing)").type == Json::Obj, "text after the first value is ignored");
+        chk(json_dump(json_parse("[1,2.5,-3e2,0.1]")) == "[1,2.5,-300,0.10000000000000001]", "numbers dump");
+    }
 
     std::cout << "json: " << g_pass << " passed, " << g_fail << " failed\n";
     return g_fail ? 1 : 0;

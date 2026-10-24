@@ -43,7 +43,7 @@ struct ReplayInfo {
 using ReplayFn = std::function<void(uint64_t seq, const Record&)>;
 
 struct JournalCounters {
-    std::atomic<uint64_t> appended{0}, syncs{0}, rotations{0}, torn_bytes{0}, bad_segments{0}, write_errors{0};
+    std::atomic<uint64_t> appended{0}, syncs{0}, rotations{0}, torn_bytes{0}, bad_segments{0}, write_errors{0}, sync_errors{0};
 };
 
 class Journal {

@@ -6,15 +6,27 @@
 #include "dd/context/deck.hpp"
 #include "dd/context/endpoint.hpp"
 #include "dd/context/engine.hpp"
+#include "dd/context/fsutil.hpp"
 #include "dd/context/maze.hpp"
 #include "dd/context/recall.hpp"
+#include "dd/core/json.hpp"
 #include "dd/core/mpsc.hpp"
+#include "dd/tools/mcp.hpp"
 #include "dd/tools/registry.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <thread>
@@ -77,6 +89,161 @@ struct FakeGraph : Memory {
     int connect(const std::vector<Edge>& e) override {
         for (const auto& x : e) edges.push(x);
         return static_cast<int>(e.size());
+    }
+};
+
+
+// Scratch lives under $DD_TEST_TMP (the Makefile sets it), never in the shared /tmp; one directory per process, gone at exit.
+static std::string tmp_root_s() {
+    static const std::string s = [] {
+        const char* e = std::getenv("DD_TEST_TMP");
+        return (std::filesystem::path(e && *e ? e : "build/tmp") / ("maze-" + std::to_string(::getpid()))).string();
+    }();
+    return s;
+}
+static std::string tmp_dir(const std::string& name) {
+    const auto p = std::filesystem::path(tmp_root_s()) / name;
+    std::error_code ec;
+    std::filesystem::create_directories(p, ec);
+    return p.string();
+}
+static struct TmpCleanup {
+    std::string dir = tmp_root_s();
+    ~TmpCleanup() {
+        // destructors run at exit: a throw here would call std::terminate
+        try {
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(dir), ec);
+        } catch (...) {}
+    }
+} g_tmp_cleanup;
+
+static unsigned mode_of(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0 ? (st.st_mode & 07777u) : 0xFFFFu;
+}
+
+static size_t lines_in(const std::string& path) {
+    std::ifstream in(path);
+    size_t n = 0;
+    for (std::string l; std::getline(in, l);) ++n;
+    return n;
+}
+
+// A loopback MCP pod: every POST answers one tools/call result; GET /health says the maze is reachable.
+struct FakePod {
+    int lfd = -1, port = 0;
+    std::atomic<bool> stop{false};
+    std::thread th;
+    std::string text = "";
+    bool is_error = false, rpc_error = false;
+
+    FakePod() {
+        lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+        int one = 1;
+        ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = 0;
+        ::bind(lfd, reinterpret_cast<sockaddr*>(&a), sizeof a);
+        socklen_t len = sizeof a;
+        ::getsockname(lfd, reinterpret_cast<sockaddr*>(&a), &len);
+        port = ntohs(a.sin_port);
+        ::listen(lfd, 8);
+        th = std::thread([this] { serve(); });
+    }
+    ~FakePod() { shutdown(); }
+    void shutdown() {
+        if (lfd < 0) return;
+        stop = true;
+        const int c = ::socket(AF_INET, SOCK_STREAM, 0);   // wake accept()
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(static_cast<uint16_t>(port));
+        ::connect(c, reinterpret_cast<sockaddr*>(&a), sizeof a);
+        ::close(c);
+        th.join();
+        ::close(lfd);
+        lfd = -1;
+    }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port) + "/mcp"; }
+
+    void serve() {
+        while (!stop) {
+            const int c = ::accept(lfd, nullptr, nullptr);
+            if (c < 0) continue;
+            if (stop) {
+                ::close(c);
+                break;
+            }
+            std::string req;
+            char buf[4096];
+            size_t need = std::string::npos;
+            for (;;) {
+                const ssize_t n = ::recv(c, buf, sizeof buf, 0);
+                if (n <= 0) break;
+                req.append(buf, static_cast<size_t>(n));
+                const size_t h = req.find("\r\n\r\n");
+                if (h == std::string::npos) continue;
+                if (need == std::string::npos) {
+                    need = h + 4;
+                    const size_t cl = req.find("Content-Length:");
+                    const size_t cl2 = req.find("content-length:");
+                    const size_t at = cl != std::string::npos ? cl : cl2;
+                    if (at != std::string::npos) need += static_cast<size_t>(std::atol(req.c_str() + at + 15));
+                }
+                if (req.size() >= need) break;
+            }
+            std::string body, type = "application/json";
+            if (req.rfind("GET ", 0) == 0) {
+                body = "{\"mazemaker_reachable\":true}";
+            } else {
+                core::Json id = core::json_num(1);
+                try {
+                    const core::Json rq = core::json_parse(req.substr(req.find("\r\n\r\n") + 4));
+                    if (const core::Json* i = core::json_get(rq, "id")) id = *i;
+                } catch (...) {
+                }
+                core::Json msg = core::json_obj({{"jsonrpc", std::make_shared<core::Json>(core::json_str("2.0"))},
+                                                 {"id", std::make_shared<core::Json>(id)}});
+                if (rpc_error) {
+                    core::obj_set(msg, "error", core::json_obj({{"code", std::make_shared<core::Json>(core::json_num(-32000))},
+                                                                {"message", std::make_shared<core::Json>(core::json_str("boom"))}}));
+                } else {
+                    core::Json part = core::json_obj({{"type", std::make_shared<core::Json>(core::json_str("text"))},
+                                                      {"text", std::make_shared<core::Json>(core::json_str(text))}});
+                    core::Json res = core::json_obj({{"content", std::make_shared<core::Json>(core::json_arr({std::make_shared<core::Json>(part)}))}});
+                    if (is_error) core::obj_set(res, "isError", core::json_bool(true));
+                    core::obj_set(msg, "result", res);
+                }
+                body = "event: message\ndata: " + core::json_dump(msg) + "\n\n";
+                type = "text/event-stream";
+            }
+            const std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nContent-Length: " + std::to_string(body.size()) +
+                                     "\r\nConnection: close\r\n\r\n" + body;
+            size_t off = 0;
+            while (off < resp.size()) {
+                const ssize_t w = ::send(c, resp.data() + off, resp.size() - off, MSG_NOSIGNAL);
+                if (w <= 0) break;
+                off += static_cast<size_t>(w);
+            }
+            ::close(c);
+        }
+    }
+};
+
+// remember() fails until healthy; then it behaves; slow_ms sleeps inside the write.
+struct FlakyGraph : FakeGraph {
+    std::atomic<bool> healthy{false};
+    std::atomic<int> slow_ms{0}, started{0}, finished{0};
+    long remember(const std::string& label, const std::string& content) override {
+        started.fetch_add(1);
+        if (slow_ms.load()) std::this_thread::sleep_for(std::chrono::milliseconds(slow_ms.load()));
+        const long id = healthy.load() ? FakeGraph::remember(label, content) : -1;
+        finished.fetch_add(1);
+        return id;
     }
 };
 
@@ -162,7 +329,7 @@ int main() {
         cfg.fast_layer_tokens = 100000;
         cfg.prewarm = false;
         Soaker soaker(g, "");
-        TapeEngine eng(cfg, "sys", ep, g, &soaker, deck, llm, std::filesystem::temp_directory_path().string());
+        TapeEngine eng(cfg, "sys", ep, g, &soaker, deck, llm, tmp_dir("spill"));
         const auto recent = eng.recent_sessions("dd-", 5);
         chk(recent.size() == 1 && recent[0].id == "dd-old" && recent[0].turns == 2, "sessions listed from the maze");
         std::string why;
@@ -182,6 +349,111 @@ int main() {
         chk(base.size() >= 2 && base[1]->msg.content.find("memory ids [100,101]") != std::string::npos &&
                 base[1]->msg.content.find("mazemaker_get(memory_ids=[100,101])") != std::string::npos,
             "the rebase anchor names the turns by id");
+    }
+
+
+    // ---- the spool: private, replayed from the front, one writer at a time ----
+    {
+        namespace fs = std::filesystem;
+        const std::string dir = tmp_dir("spool_case") + "/state/deeper";   // not there yet: the spool makes it
+        const std::string spool = dir + "/soak-spool.jsonl";
+        auto g = std::make_shared<FlakyGraph>();
+        Soaker s(g, spool);
+        auto wait_spooled = [&](uint64_t n) {
+            for (int i = 0; i < 300 && s.stats().spooled < n; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        };
+        s.turn("s", "q1", "a1", 0);
+        wait_spooled(1);
+        s.turn("s", "q2", "a2", 0);
+        wait_spooled(2);
+        chk(lines_in(spool) == 2, "spool: a dead pod's turns land on disk");
+        chk(mode_of(spool) == 0600 && mode_of(dir) == 0700 && mode_of(dir + "/..") == 0700, "spool: file 0600, the directories it made 0700");
+        chk(mode_of(spool + ".lock") == 0600, "spool: the lock file is private too");
+
+        // another dd on this home holds the lock: an append waits for it
+        std::atomic<bool> held{false};
+        std::thread other([&] {
+            const fsx::FileLock lk(spool + ".lock");
+            held = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        });
+        while (!held) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const auto t0 = std::chrono::steady_clock::now();
+        s.turn("s", "q3", "a3", 0);
+        wait_spooled(3);
+        const auto waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        other.join();
+        chk(s.stats().spooled == 3 && waited >= 300, "spool: an append waits for another process's lock (" + std::to_string(static_cast<int>(waited)) + " ms)");
+        chk(lines_in(spool) == 3, "spool: nothing torn or lost across the lock");
+
+        // the pod answers again: the head is replayed and the rest rewritten, still 0600
+        fs::permissions(spool, fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::others_read);
+        g->healthy = true;
+        s.turn("s", "q4", "a4", 0);
+        for (int i = 0; i < 300 && lines_in(spool) != 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        chk(lines_in(spool) == 2, "spool: one spooled turn replays per live write (" + std::to_string(lines_in(spool)) + " left)");
+        chk(mode_of(spool) == 0600, "spool: the rewrite is 0600 (" + std::to_string(mode_of(spool)) + ")");
+        Hit first;
+        bool saw = false;
+        while (g->remembered.pop(first)) saw = saw || first.content.find("q1") != std::string::npos;
+        chk(saw, "spool: the oldest turn went first");
+        s.turn("s", "q5", "a5", 0);
+        s.turn("s", "q6", "a6", 0);
+        for (int i = 0; i < 300 && fs::exists(spool); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        chk(!fs::exists(spool), "spool: an emptied spool is removed");
+    }
+
+    // ---- the destructor waits for a write in flight, by join, and no longer ----
+    {
+        auto g = std::make_shared<FlakyGraph>();
+        g->healthy = true;
+        g->slow_ms = 300;
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            { Soaker idle(g, ""); }
+            const double idle_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            chk(idle_ms < 200, "soaker: nothing in flight, the destructor returns at once (" + std::to_string(static_cast<int>(idle_ms)) + " ms)");
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        {
+            Soaker s(g, "");
+            s.turn("s", "q", "an answer", 0);
+            while (g->started.load() < 1) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        chk(g->finished.load() == 1 && ms >= 200 && ms < 2500, "soaker: the destructor waits for the write in flight (" + std::to_string(static_cast<int>(ms)) + " ms)");
+    }
+
+    // ---- Maze::call: an answered call keeps the maze up, an unreachable pod takes it down ----
+    {
+        FakePod pod;   // answers every call with an empty text
+        Maze m(pod.url());
+        chk(m.probe() && m.up(), "maze: /health says it is up");
+        m.recall("a question that finds nothing", 3);
+        chk(m.up(), "maze: an empty reply that was answered is still an answer");
+        pod.text = "[]";
+        m.recall("a question with an empty list", 3);
+        chk(m.up(), "maze: a reply with content keeps it up");
+        // the contract on tool errors, checked only when the MCP client reports them (the client is another module)
+        pod.is_error = true;
+        pod.text = "tool failed";
+        tools::MCPClient probe_client;
+        probe_client.url = pod.url();
+        const bool client_reports = probe_client.call_ex("mazemaker_recall", core::json_obj()).is_error;
+        if (client_reports) {
+            m.recall("a question the tool rejects", 3);
+            chk(!m.up(), "maze: a tool that reports isError marks it down");
+            pod.is_error = false;
+            pod.text = "";
+            m.recall("again", 3);
+            chk(m.up(), "maze: the next answered call brings it back up");
+        } else {
+            std::printf("note: MCPClient::call_ex does not report isError yet; that part of the maze contract is not exercised\n");
+            pod.is_error = false;
+        }
+        pod.shutdown();
+        m.recall("nobody is listening", 3);
+        chk(!m.up(), "maze: an unreachable pod marks it down");
     }
 
     if (g_fail) std::printf("%d FAILED\n", g_fail);

@@ -132,72 +132,73 @@ std::string get_budget_warning(int api_call_count, int max_iterations,
 }
 
 // ---- execute_tool_calls (run_agent.py:8880) ----
+// Every call of the assistant message gets exactly one result: run, refused by the gate, or cancelled by an interrupt
+// (the calls not yet started when the flag is set). A call that has started finishes.
 void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core::Message>& messages, int api_call_count) {
-    std::vector<core::ToolCall> calls = assistant.tool_calls;
-
-    if (interrupt_requested) {
-        for (const auto& tc : calls) {
-            core::Message tm;
-            tm.role = "tool";
-            tm.content = "[Tool execution cancelled — " + tc.name + " was skipped due to user interrupt]";
-            tm.tool_call_id = tc.id;
-            messages.push_back(tm);
-        }
-        return;
-    }
+    const std::vector<core::ToolCall>& calls = assistant.tool_calls;
+    const size_t n = calls.size();
+    std::vector<std::string> results(n);
+    const auto cancelled = [](const core::ToolCall& tc) {
+        return "[Tool execution cancelled — " + tc.name + " was skipped due to user interrupt]";
+    };
 
     // a gate may refuse a call: decided up front, in order, before anything runs
-    std::vector<std::optional<std::string>> vetoed(calls.size());
-    if (gate)
-        for (size_t i = 0; i < calls.size(); ++i) vetoed[i] = gate->veto(calls[i]);
+    std::vector<std::optional<std::string>> vetoed(n);
+    if (gate && !interrupt_requested.load(std::memory_order_acquire))
+        for (size_t i = 0; i < n; ++i) vetoed[i] = gate->veto(calls[i]);
 
-    const bool parallel = should_parallelize(calls, registry);
-    std::vector<std::string> results(calls.size());
+    const auto run_one = [&](size_t i) {
+        bool repaired = false;
+        const core::Json args = core::json_parse_args(calls[i].arguments, repaired);
+        if (registry && (repaired || args.type != core::Json::Obj))
+            results[i] = bad_args_json(args, repaired);
+        else
+            results[i] = registry ? registry->dispatch(calls[i].name, args)
+                                  : std::string("{\"error\":\"Unknown tool: ") + calls[i].name + "\"}";
+    };
 
-    if (parallel) {
-        std::vector<std::thread> workers;
-        size_t i = 0;
-        while (i < calls.size()) {
-            size_t batch = std::min<size_t>(MAX_TOOL_WORKERS, calls.size() - i);
+    if (should_parallelize(calls, registry)) {
+        for (size_t i = 0; i < n;) {
+            const size_t batch = std::min<size_t>(MAX_TOOL_WORKERS, n - i);
+            std::vector<std::thread> workers;
             for (size_t k = 0; k < batch; ++k) {
-                size_t idx = i + k;
+                const size_t idx = i + k;
+                if (interrupt_requested.load(std::memory_order_acquire)) {
+                    results[idx] = cancelled(calls[idx]);
+                    continue;
+                }
                 if (vetoed[idx]) {
                     results[idx] = *vetoed[idx];
                     continue;
                 }
-                workers.emplace_back([&, idx]() {
-                    bool repaired = false;
-                    const core::Json args = core::json_parse_args(calls[idx].arguments, repaired);
-                    if (registry && (repaired || args.type != core::Json::Obj))
-                        results[idx] = bad_args_json(args, repaired);
-                    else
-                        results[idx] = registry ? registry->dispatch(calls[idx].name, args)
-                                                : std::string("{\"error\":\"Unknown tool: ") + calls[idx].name + "\"}";
+                workers.emplace_back([&, idx] {
+                    if (interrupt_requested.load(std::memory_order_acquire)) results[idx] = cancelled(calls[idx]);
+                    else run_one(idx);
                 });
             }
             for (auto& t : workers) t.join();
-            workers.clear();
             i += batch;
         }
     } else {
-        for (size_t i = 0; i < calls.size(); ++i) {
+        for (size_t i = 0; i < n; ++i) {
+            if (interrupt_requested.load(std::memory_order_acquire)) {
+                results[i] = cancelled(calls[i]);
+                continue;
+            }
             if (vetoed[i]) {
                 results[i] = *vetoed[i];
                 continue;
             }
-            bool repaired = false;
-            const core::Json args = core::json_parse_args(calls[i].arguments, repaired);
-            if (registry && (repaired || args.type != core::Json::Obj))
-                results[i] = bad_args_json(args, repaired);
-            else
-                results[i] = registry ? registry->dispatch(calls[i].name, args)
-                                      : std::string("{\"error\":\"Unknown tool: ") + calls[i].name + "\"}";
-            if (tool_delay > 0 && i + 1 < calls.size())
-                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(tool_delay * 1000)));
+            run_one(i);
+            if (tool_delay > 0 && i + 1 < n) {   // slices, so an interrupt ends the wait within one
+                const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(tool_delay);
+                while (!interrupt_requested.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < end)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
         }
     }
 
-    for (size_t i = 0; i < calls.size(); ++i) {
+    for (size_t i = 0; i < n; ++i) {
         core::Message tm;
         tm.role = "tool";
         tm.content = results[i];
@@ -225,7 +226,7 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
         if (context) {   // the tape plus the request: everything before it is already cached
             sent = context->payload();
             sent.push_back(req);
-            tools = context->tools();
+            tools = context->tools();   // unchanged, or the server re-reads the whole prefix
         }
         core::Message summary = llm->chat(sent, tools);
         std::string text = summary.content;
@@ -238,6 +239,12 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
             if (context) context->on_assistant(am);
             return text;
         }
+        if (summary.has_tool_calls()) {
+            std::string names;
+            for (const auto& tc : summary.tool_calls) names += (names.empty() ? "" : ", ") + tc.name;
+            return "I reached the maximum iterations (" + std::to_string(max_iterations) +
+                   ") and the model tried to call tools (" + names + ") instead of summarising: no summary was produced.";
+        }
         return "I reached the iteration limit and couldn't generate a summary.";
     } catch (...) {
         return "I reached the maximum iterations (" + std::to_string(max_iterations) +
@@ -246,8 +253,27 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
 }
 
 // ---- run loop (run_agent.py:10202) ----
+// Whatever ends the turn, the engine's turn is closed once: a call that throws (an Esc during generation) included.
 std::string Agent::run(const std::string& user_message) {
     if (context) context->begin_turn(user_message);
+    bool interrupted = false;
+    std::string final_response;
+    try {
+        final_response = run_loop(user_message, interrupted);
+    } catch (...) {
+        if (context) {
+            try {
+                context->end_turn("", true);
+            } catch (...) {
+            }
+        }
+        throw;
+    }
+    if (context) context->end_turn(final_response, interrupted || interrupt_requested.load());
+    return final_response;
+}
+
+std::string Agent::run_loop(const std::string& user_message, bool& interrupted) {
     std::vector<core::Message> messages;
     if (!system_prompt.empty()) {
         core::Message sys;
@@ -265,7 +291,6 @@ std::string Agent::run(const std::string& user_message) {
     budget = std::make_unique<IterationBudget>(max_iterations);
     api_call_count = 0;
     std::string final_response;
-    bool interrupted = false;
 
     while (api_call_count < max_iterations && budget->remaining() > 0) {
         if (interrupt_requested) { interrupted = true; break; }
@@ -273,7 +298,7 @@ std::string Agent::run(const std::string& user_message) {
         api_call_count += 1;
         if (!budget->consume()) {
             if (!quiet_mode)
-                std::cerr << "\nIteration budget exhausted (" << budget->used << "/"
+                std::cerr << "\nIteration budget exhausted (" << budget->used.load() << "/"
                           << budget->max_total << " iterations used)\n";
             break;
         }
@@ -310,6 +335,8 @@ std::string Agent::run(const std::string& user_message) {
             }
         }
         if (assistant.role.empty()) assistant.role = "assistant";
+        // a dropped duplicate leaves the message too, so no tool_call is ever recorded without its result
+        assistant.tool_calls = cap_delegate_calls(dedup_tool_calls(assistant.tool_calls), 3);
         if (assistant.finish_reason.empty())
             assistant.finish_reason = assistant.has_tool_calls() ? "tool_calls" : "stop";
 
@@ -322,10 +349,8 @@ std::string Agent::run(const std::string& user_message) {
             break;
         }
 
-        core::Message norm = assistant;
-        norm.tool_calls = cap_delegate_calls(dedup_tool_calls(assistant.tool_calls), 3);
         const size_t before = messages.size();
-        execute_tool_calls(norm, messages, api_call_count);
+        execute_tool_calls(assistant, messages, api_call_count);
         if (context) {
             context->on_tool_results(std::vector<core::Message>(messages.begin() + static_cast<long>(before), messages.end()));
             context->after_tools();
@@ -334,8 +359,6 @@ std::string Agent::run(const std::string& user_message) {
 
     if (final_response.empty() && !interrupted && api_call_count >= max_iterations)
         final_response = handle_max_iterations(messages, api_call_count);
-
-    if (context) context->end_turn(final_response, interrupted || interrupt_requested.load());
     return final_response;
 }
 

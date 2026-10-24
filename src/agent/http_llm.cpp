@@ -3,9 +3,11 @@
 
 #include "dd/agent/chat_stream.hpp"
 #include "dd/net/http.hpp"
+#include "dd/tools/url_safety.hpp"
 
 #include <curl/curl.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -25,25 +27,60 @@ double num_at(const Json& o, const char* a, const char* b = nullptr) {
     return v && v->type == Json::Num ? v->num : 0.0;
 }
 
-int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    const auto* flag = static_cast<const std::atomic<bool>*>(ud);
-    return flag && flag->load(std::memory_order_relaxed) ? 1 : 0;
-}
-
 // Stop the moment the flag is set; keep raw bytes until the first SSE chunk
 // in case the server answers with plain JSON (an error, or no streaming).
+// The sink also carries the stall clock: LOW_SPEED_* only counts bytes curl
+// received, so a server that sends headers and then falls silent never trips
+// it — this callback does.
 struct StreamSink {
     ChatStream cs;
     std::string raw;
     const std::atomic<bool>* cancel = nullptr;
+    curl_off_t recv = 0;    // bytes the write callback has seen
+    long stall_s = 0;       // 0 = no stall guard
+    curl_off_t last_recv = 0;
+    bool seen = false;
+    bool stalled = false;
+    std::chrono::steady_clock::time_point since{};
+    curl_off_t max_bytes = 64u << 20;   // hard cap on the whole response
+    curl_off_t total = 0;
+    bool over = false;
 };
+
+int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    auto* s = static_cast<StreamSink*>(ud);
+    if (s->cancel && s->cancel->load(std::memory_order_relaxed)) return 1;
+    if (s->stall_s <= 0) return 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (!s->seen) {
+        s->seen = true;
+        s->since = now;
+        s->last_recv = s->recv;
+        return 0;
+    }
+    if (s->recv != s->last_recv) {   // bytes are still moving: the clock resets
+        s->last_recv = s->recv;
+        s->since = now;
+        return 0;
+    }
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - s->since).count() >= s->stall_s) {
+        s->stalled = true;
+        return 1;
+    }
+    return 0;
+}
 
 std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
     auto* s = static_cast<StreamSink*>(ud);
     if (s->cancel && s->cancel->load(std::memory_order_relaxed)) return 0;
+    if (s->total + static_cast<curl_off_t>(n) > s->max_bytes) {   // hard byte cap, like net::sink
+        s->over = true;
+        return 0;
+    }
+    s->total += static_cast<curl_off_t>(n);
     if (!s->cs.saw_data() && s->raw.size() < (1u << 24)) s->raw.append(p, n);
     s->cs.feed(p, n);
-    return n;
+    return s->cs.overflowed() ? 0 : n;
 }
 
 }  // namespace
@@ -93,11 +130,13 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
     core::obj_set(b, "stream_options", core::json_obj({{"include_usage", jsp(core::json_bool(true))}}));
     const std::string payload = core::json_dump(b);
     const std::string endpoint = url();
+    if (!dd::tools::is_safe_url(endpoint)) throw std::runtime_error("url rejected: " + endpoint);
 
     StreamSink sink;
     sink.cancel = cancel;
     sink.cs.on_reasoning = on_reasoning;
     sink.cs.on_content = on_content;
+    sink.stall_s = stall_timeout_s;
 
     CURL* c = curl_easy_init();
     if (!c) throw std::runtime_error("curl: out of memory for handle");
@@ -113,19 +152,29 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, stream_sink);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);   // Esc aborts a call; this only guards a dead server
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);   // Esc aborts a call; this only guards a dead server
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, stall_timeout_s);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, abort_if);
-    curl_easy_setopt(c, CURLOPT_XFERINFODATA, cancel);
+    curl_easy_setopt(c, CURLOPT_XFERINFODATA, &sink);
 
     streamed = false;
     if (on_begin) on_begin();
     const auto t0 = std::chrono::steady_clock::now();
     const CURLcode rc = curl_easy_perform(c);
     const bool cancelled = cancel && cancel->load(std::memory_order_relaxed);
-    if (rc == CURLE_ABORTED_BY_CALLBACK || (rc == CURLE_WRITE_ERROR && cancelled)) throw std::runtime_error("interrupted");
+    if (rc == CURLE_ABORTED_BY_CALLBACK || (rc == CURLE_WRITE_ERROR && cancelled)) {
+        if (sink.stalled && !cancelled)
+            throw std::runtime_error("curl: stalled — no bytes for " + std::to_string(sink.stall_s) + "s");
+        throw std::runtime_error("interrupted");
+    }
+    if (rc == CURLE_WRITE_ERROR && sink.over) throw std::runtime_error("response over " + std::to_string(sink.max_bytes) + " bytes");
+    if (rc == CURLE_WRITE_ERROR && sink.cs.overflowed()) throw std::runtime_error(sink.cs.error());
     if (rc != CURLE_OK) throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
     sink.cs.finish();
     long status = 0;

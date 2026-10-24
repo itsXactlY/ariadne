@@ -1,4 +1,4 @@
-// dd::core::Home — config and state live beside the binary; nothing reaches into $HOME.
+// dd::core::Home — config and state follow the folder dd was started from; the install is where the binary sits. Nothing reaches $HOME.
 #include "dd/core/home.hpp"
 
 #include <unistd.h>
@@ -36,31 +36,58 @@ int main() {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
 
-    // ---- the order: --home > --config's folder > DD_HOME > DAEDALUS_HOME > the binary's folder
+    // ---- what a plain start picks. The test binary sits in build/, which is
+    // make's output: dd never adopts it, so with nothing owning a config.yaml the
+    // launch folder decides. Run the suite from the project root, not from build/.
     ::unsetenv("DD_HOME");
     ::unsetenv("DAEDALUS_HOME");
     set_daedalus_home_override("");
     const fs::path exe = exe_dir();
-    chk(!exe.empty() && fs::exists(exe), "exe_dir is the running binary's folder");
-    chk(resolve_home().root == exe, "no flag, no env: beside the binary");
-    chk(get_daedalus_home() == exe, "get_daedalus_home defaults beside the binary, not ~/.daedalus");
+    const fs::path start = fs::current_path();
+    chk(resolve_home().root == start, "make's output folder is not adopted: the launch folder decides");
+    { std::string w; chk(!resolve_home("", (exe / "x" / "config.yaml").string()).root.empty(),
+        "an explicit --config inside make's output still decides: only an implicit pick is refused"); }
     chk(resolve_home().root != platform_default_daedalus_home(), "never ~/.daedalus by default");
 
+    // ---- a folder that owns a config.yaml governs, wherever dd sits
+    const fs::path project = tmp / "project";
+    fs::create_directories(project);
+    { std::ofstream(project / "config.yaml") << "model:\n  base_url: http://p/v1\n"; }
+    chk(::chdir(project.c_str()) == 0, "dd is started from the project folder");
+    chk(resolve_home().root == project, "its config.yaml governs: the home is the project folder");
+    chk(get_daedalus_home() == project, "the ported modules agree on it");
+    fs::remove(project / "config.yaml");
+    chk(resolve_home().root == project, "a launch folder that owns nothing is still where dd works");
+    chk(::chdir(start.string().c_str()) == 0, "back to where the test was started");
+
+    // ---- the flags and the environment still outrank every folder rule
     ::setenv("DAEDALUS_HOME", (tmp / "legacy").c_str(), 1);
     chk(resolve_home().root == tmp / "legacy", "DAEDALUS_HOME still names a home");
     ::setenv("DD_HOME", (tmp / "dd").c_str(), 1);
     chk(resolve_home().root == tmp / "dd", "DD_HOME beats DAEDALUS_HOME");
     chk(get_daedalus_home() == tmp / "dd", "get_daedalus_home follows DD_HOME");
-    chk(resolve_home("", (tmp / "cfgdir" / "config.yaml").string()).root == tmp / "cfgdir", "--config's folder beats the env");
+    chk(resolve_home("", (tmp / "cfgdir" / "config.yaml").string()).root == tmp / "cfgdir",
+        "the folder of --config is the home");
     chk(resolve_home((tmp / "flag").string(), (tmp / "cfgdir" / "config.yaml").string()).root == tmp / "flag",
-        "--home beats everything");
-    chk(resolve_home("rel/dir").root.is_absolute(), "relative --home becomes absolute");
-    chk(resolve_home("a/../b").root.filename() == "b", "lexically normal");
+        "--home beats --config");
+    chk(resolve_home("rel/dir").root.is_absolute(), "a relative --home is made absolute");
+    chk(resolve_home("a/../b").root.filename() == "b", "and normalised lexically, not through symlinks");
     set_daedalus_home_override((tmp / "override").string());
     chk(get_daedalus_home() == tmp / "override", "the override beats the env for the ported modules");
     set_daedalus_home_override("");
     ::unsetenv("DD_HOME");
     ::unsetenv("DAEDALUS_HOME");
+
+    // ---- the mix that used to happen: asking for the Python install's home
+    const fs::path pyhome = platform_default_daedalus_home();
+    std::string nohome;
+    ::setenv("DD_HOME", pyhome.string().c_str(), 1);
+    chk(resolve_home("", "", &nohome).root.empty() && !nohome.empty(),
+        "DD_HOME naming ~/.daedalus is refused, with a reason");
+    chk(resolve_home(pyhome.string(), "", &nohome).root.empty() && nohome.find("--home") != std::string::npos,
+        "--home ~/.daedalus is refused too, and says what asked");
+    ::unsetenv("DD_HOME");
+    chk(resolve_home().root != pyhome, "nothing names ~/.daedalus by default");
 
     const Home h = resolve_home((tmp / "box").string());
     chk(h.config() == tmp / "box" / "config.yaml" && h.skills() == tmp / "box" / "skills" &&

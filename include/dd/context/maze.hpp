@@ -17,11 +17,13 @@
 // Soaking is fire-and-forget: callers push onto a lock-free queue, one worker
 // writes and pushes the ids back on another. Disk is the fallback only while
 // the pod is dead: a spool (edges included), replayed one write at a time.
+// ~Soaker stops that worker and joins it: teardown waits, it never polls.
 
 #include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "dd/context/memory.hpp"
@@ -101,8 +103,9 @@ private:
         int epoch = 0;
         std::vector<Edge> edges;   // written after the node, both ends already in the graph
     };
-    struct State;   // shared with the worker, which may outlive a quit by a write
+    struct State;   // shared with the worker; ~Soaker joins it
     std::shared_ptr<State> st_;
+    std::thread th_;   // the soak worker
     // producer-only
     std::string prev_turn_;
     std::vector<std::string> reasoning_since_turn_;

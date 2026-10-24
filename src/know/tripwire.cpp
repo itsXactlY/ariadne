@@ -7,7 +7,9 @@
 #include <iterator>
 
 #include "dd/core/yaml.hpp"
+#include "dd/know/text.hpp"
 #include "dd/tools/registry.hpp"
+#include "dd/tools/tool_search.hpp"
 
 namespace dd {
 namespace know {
@@ -16,11 +18,14 @@ namespace {
 
 using core::Json;
 
-// every string a call carries (its command, path, content ...), joined: what a rule is matched against
+// every string a call carries (its command, path, content ...), joined: what a rule is matched against. cap is for the
+// whole call: one huge string is cut, not scanned whole.
 void strings_of(const Json& j, std::string& out, size_t cap) {
-    if (out.size() >= cap) return;
-    if (j.type == Json::Str) out += j.str + "\n";
-    else if (j.type == Json::Arr)
+    if (out.size() + 1 >= cap) return;
+    if (j.type == Json::Str) {
+        out += utf8_head(j.str, cap - out.size() - 1);
+        out += '\n';
+    } else if (j.type == Json::Arr)
         for (const auto& x : j.arr)
             if (x) strings_of(*x, out, cap);
     if (j.type == Json::Obj)
@@ -143,14 +148,30 @@ std::vector<std::string> Tripwires::names() const {
 std::vector<const Rule*> Tripwires::check(const core::ToolCall& call) {
     std::vector<const Rule*> fired;
     if (rules_.empty()) return fired;
+    constexpr size_t kCap = 16384;
     bool repaired = false;
     const Json args = core::json_parse_args(call.arguments, repaired);
+    std::string name = call.name;   // the tool the call is really for: through the deferred-tool bridge it is the inner one
+    Json inner;
+    const Json* what = &args;
+    if (call.name == tools::TOOL_CALL_NAME && args.type == Json::Obj) {
+        if (const Json* n = core::json_get(args, "name"); n && n->type == Json::Str && !n->str.empty()) name = n->str;
+        if (const Json* a = core::json_get(args, "arguments")) {
+            if (a->type == Json::Str) {
+                bool cut = false;
+                inner = core::json_parse_args(a->str.empty() ? "{}" : a->str, cut);
+                what = &inner;
+            } else {
+                what = a;
+            }
+        }
+    }
     std::string text;
-    strings_of(args, text, 16384);
-    if (text.empty()) text = call.arguments;
+    strings_of(*what, text, kCap);
+    if (text.empty()) text = utf8_head(call.arguments, kCap);
     const int turn = turn_ ? turn_() : 0;
     for (auto& c : rules_) {
-        if (!c.rule.tool.empty() && c.rule.tool != call.name) continue;
+        if (!c.rule.tool.empty() && c.rule.tool != name && c.rule.tool != call.name) continue;
         if (c.rule.once && c.spoken && (c.rule.repeat_gap <= 0 || turn - c.spoken_turn < c.rule.repeat_gap)) continue;
         bool hit = false;
         try {

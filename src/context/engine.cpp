@@ -67,7 +67,10 @@ bool trivial_prompt(const std::string& text) {
     const size_t b = t.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return true;
     t = t.substr(b);
-    if (t[0] == '/') return true;
+    if (t[0] == '/') {   // "/effort high" is a command, "/home/x/y fix it" is a question
+        const size_t sp = t.find_first_of(" \t\r\n");
+        return t.find('/', 1) == std::string::npos || t.find('/', 1) > (sp == std::string::npos ? t.size() : sp);
+    }
     while (!t.empty() && std::string(" \t\r\n!?.:;,\"'~()[]{}<>*&^%$#@+=`").find(t.back()) != std::string::npos) t.pop_back();
     static const char* const kTrivial[] = {
         "yes", "no", "ok", "okay", "sure", "thanks", "thank you", "y", "n", "yep", "nope", "yeah", "nah", "hi", "hey",
@@ -164,16 +167,20 @@ TapeEngine::TapeEngine(EngineConfig cfg, std::string system_prompt, Endpoint& ep
       recaller_(mem_), deck_(deck),
       llm_(llm), spill_root_(std::move(spill_root)), session_(std::make_unique<Session>(Session::new_id())),
       spill_(std::make_unique<Spill>(spill_root_ + "/" + session_->id())),
-      render_(cfg.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get()) {}
+      render_(cfg.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get()) {
+    Spill::sweep(spill_root_);
+    publish();
+}
 
 TapeEngine::~TapeEngine() {
     join_prep(true);
     delete ready_.exchange(nullptr);
+    spill_->remove_all();
 }
 
 long TapeEngine::window() const {
     if (const long c = ep_.info().n_ctx; c > 0) return c;
-    return cfg_.render.context_length > 0 ? cfg_.render.context_length : window_seen_;
+    return cfg_.render.context_length > 0 ? cfg_.render.context_length : window_seen_.load(std::memory_order_relaxed);
 }
 
 // The fast layer is a budget inside the server's window, never past it: a server window cut below it (Strata's
@@ -220,7 +227,7 @@ void TapeEngine::soak(Item& item) {
     if (soaker_) soaker_->reasoning(session_->id(), item.msg.reasoning, session_->generation());
 }
 
-TapeStats TapeEngine::stats() const {
+TapeStats TapeEngine::compute_stats() const {
     TapeStats s;
     s.epoch = session_->generation();
     s.history = session_->items().size();
@@ -254,8 +261,22 @@ TapeStats TapeEngine::stats() const {
     return s;
 }
 
+TapeStats TapeEngine::stats() const {
+    const auto r = snap_.read();
+    return r ? *r : TapeStats{};
+}
+
+void TapeEngine::publish() const { snap_.publish(std::make_unique<const TapeStats>(compute_stats())); }
+
 void TapeEngine::emit() const {
-    if (on_stats) on_stats(stats());
+    TapeStats s = compute_stats();
+    snap_.publish(std::make_unique<const TapeStats>(s));
+    if (on_stats) on_stats(s);
+}
+
+void TapeEngine::sync() {
+    drain_ledger();
+    publish();
 }
 
 // ---- the session in the graph ----
@@ -290,6 +311,7 @@ void TapeEngine::begin_turn(const std::string& user_message) {
     else if (!prep_running_.load() && prep_thread_.joinable()) prep_thread_.join();
 
     drain_ledger();
+    turn_open_ = true;
     question_ = user_message;
     Message um;
     um.role = "user";
@@ -419,7 +441,7 @@ bool TapeEngine::rebase(const char* why) {
 bool TapeEngine::on_overflow(const std::string& error) {
     long prompt = 0, win = 0;
     if (!parse_overflow(error, &prompt, &win)) return false;
-    if (win > 0) window_seen_ = win;
+    if (win > 0) window_seen_.store(win, std::memory_order_relaxed);
     if (prompt > 0) tokens_ = prompt;
     tool_chars_ = 0;
     join_prep(true);
@@ -641,6 +663,8 @@ void TapeEngine::after_tools() {
 // ---- turn end ----
 
 void TapeEngine::end_turn(const std::string& final_response, bool interrupted) {
+    if (!turn_open_) return;   // never begun, or already ended: nothing to close twice
+    turn_open_ = false;
     if (router_) router_->end_turn();
     if (!interrupted && !final_response.empty() && soaker_)
         soaker_->turn(session_->id(), question_, final_response, session_->generation());
@@ -718,6 +742,8 @@ void TapeEngine::join_prep(bool cancel) {
 void TapeEngine::reset() {
     join_prep(true);
     delete ready_.exchange(nullptr);
+    turn_open_ = false;
+    spill_->remove_all();
     session_ = std::make_unique<Session>(Session::new_id());
     spill_ = std::make_unique<Spill>(spill_root_ + "/" + session_->id());
     render_ = Renderer(cfg_.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get());
@@ -791,6 +817,8 @@ bool TapeEngine::resume(const std::string& session_id, std::string* why) {
     });
     join_prep(true);
     delete ready_.exchange(nullptr);
+    turn_open_ = false;
+    spill_->remove_all();
     session_ = std::make_unique<Session>(session_id);
     spill_ = std::make_unique<Spill>(spill_root_ + "/" + session_->id());
     render_ = Renderer(cfg_.render, [m = mem_] { return m && m->up(); }, [this](Item& it) { soak(it); }, spill_.get());

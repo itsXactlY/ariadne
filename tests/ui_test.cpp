@@ -17,6 +17,13 @@
 
 using namespace dd::ui;
 
+// Runs before every default-priority initializer, as another TU's static initializer might: the kernel set is picked on first use.
+struct Early {
+    int width;
+    Early() : width(dd::ui::text_width("early ascii text")) {}
+};
+static Early g_early __attribute__((init_priority(101)));
+
 static int g_fail = 0;
 static void chk(bool ok, const std::string& label) {
     if (!ok) { ++g_fail; std::printf("FAIL %s\n", label.c_str()); }
@@ -263,6 +270,83 @@ int main() {
         const auto hide = run(ReasonView::Hide, 30);
         chk(hide.size() == 2 && hide[0].find("◈ thought") != std::string::npos && hide[1].empty(), "hide = one row");
         chk(run(ReasonView::Full, 30).size() == 30 + 3, "full = every line");
+    }
+
+    chk(g_early.width == 16, "text_width from a static initializer (lazy kernel pick)");
+
+    // ---- decode: well-formed UTF-8 only (RFC 3629) ----
+    {
+        auto cps = [](const std::string& b) { return from_utf8(b); };
+        chk(cps("\xC0\xAF") == std::u32string(2, U'\uFFFD'), "overlong '/' -> U+FFFD per byte");
+        chk(cps("\xED\xA0\xBD") == std::u32string(3, U'\uFFFD'), "surrogate -> U+FFFD per byte");
+        chk(cps("\xF4\x90\x80\x80") == std::u32string(4, U'\uFFFD'), "U+110000 (the repaint sentinel) is never decoded");
+        chk(cps("\xF4\x8F\xBF\xBF") == std::u32string(1, char32_t(0x10FFFF)), "U+10FFFF decodes");
+        chk(cps("\xE0\x80\x80") == std::u32string(3, U'\uFFFD'), "overlong 3-byte");
+        chk(cps("\xF0\x9F\x98\x80") == std::u32string(1, char32_t(0x1F600)), "emoji decodes");
+        chk(cps("a\xE2\x82") == std::u32string{U'a', U'\uFFFD', U'\uFFFD'}, "cut sequence at the end");
+        Canvas c(6, 1);
+        c.text(0, 0, "\xF4\x90\x80\x80", Style{});
+        chk(c.at(0, 0).ch == U'\uFFFD', "no sentinel glyph reaches a cell");
+    }
+
+    // ---- the sidebar's tools title is a middle dot, not mojibake ----
+    {
+        Scene s{Theme{}};
+        Info info;
+        info.model = "m";
+        info.endpoint = "http://127.0.0.1:9/v1";
+        info.tools = 7;
+        info.max_turns = 4;
+        s.set_info(info);
+        s.present(120, 30, true);
+        bool title = false, mojibake = false;
+        for (int y = 0; y < 30; ++y) {
+            const std::string r = s.row_text(y);
+            title = title || r.find("tools \xC2\xB7 7") != std::string::npos;
+            mojibake = mojibake || r.find("\xC3\x82") != std::string::npos;
+        }
+        chk(title, "sidebar title reads 'tools · 7'");
+        chk(!mojibake, "no double-encoded characters on screen");
+    }
+
+    // ---- a streaming card keeps at most 512 KiB, cut at a character ----
+    {
+        Scene s{Theme{}};
+        s.set_reason_view(ReasonView::Full);
+        s.turn_begin();
+        s.llm_begin();
+        s.llm_reasoning("HEADMARK ");
+        std::string chunk;
+        for (int i = 0; i < 30; ++i) chunk += "\xE2\x82\xAC";   // 3-byte characters: the cut lands inside one
+        for (int i = 0; i < 7000; ++i) s.llm_reasoning(chunk);
+        s.llm_reasoning(" TAILMARK");
+        s.present(120, 40, true);
+        const size_t held = s.live_text_bytes();
+        chk(held <= (512u << 10) && held > (400u << 10), "live reasoning bounded (" + std::to_string(held) + " bytes)");
+        s.scroll(10000000);
+        s.present(120, 40, true);
+        bool head = false, repl = false, euro = false;
+        for (int y = 0; y < 40; ++y) {
+            const std::string r = s.row_text(y);
+            head = head || r.find("HEADMARK") != std::string::npos;
+            repl = repl || r.find("\xEF\xBF\xBD") != std::string::npos;
+            euro = euro || r.find("\xE2\x82\xAC") != std::string::npos;
+        }
+        chk(!head && !repl && euro, "oldest bytes dropped, first kept character is whole");
+        s.scroll(-10000000);
+        s.present(120, 40, true);
+        bool tail = false;
+        for (int y = 0; y < 40; ++y) tail = tail || s.row_text(y).find("TAILMARK") != std::string::npos;
+        chk(tail, "the newest text is kept");
+    }
+    {
+        Scene s{Theme{}};
+        s.turn_begin();
+        s.llm_begin();
+        const std::string chunk(4096, 'w');
+        for (int i = 0; i < 200; ++i) s.llm_content(chunk);   // 800 KiB
+        s.present(120, 40, true);
+        chk(s.live_text_bytes() <= (512u << 10) && s.live_text_bytes() > (400u << 10), "live answer bounded");
     }
 
     // ---- 1 thread vs 8: same frames, byte for byte ----

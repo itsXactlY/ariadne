@@ -76,7 +76,7 @@ std::vector<Skill> Scanner::scan() const {
         std::sort(found.begin(), found.end());
 
         for (const auto& skill_md : found) {
-            auto content = read_head(skill_md, 4000);
+            auto content = read_head(skill_md, 16384);   // a long description still closes its frontmatter
             auto fm = dd::core::parse_frontmatter(content);
             if (!platform_ok(fm, platform_)) continue;
 

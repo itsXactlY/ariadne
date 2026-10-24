@@ -28,13 +28,15 @@ struct RenderPolicy {
     long context_length = 0;    // server n_ctx; 0 = results are never capped
 };
 
-// Working material on disk, only while the maze is dead:
-// <cwd>/.daedalus/spill/<session>/.
+// Working material on disk, only while the maze is dead: <home>/state/spill/<session>/, 0700 / 0600.
+// A session's directory goes with the session; older ones are swept at start.
 class Spill {
 public:
     explicit Spill(std::string dir) : dir_(std::move(dir)) {}
     std::string write(const std::string& kind, const std::string& text);   // the path, or ""
     const std::string& dir() const { return dir_; }
+    void remove_all() const;   // the session is over: its files go
+    static void sweep(const std::string& root, int max_age_days = 7);   // session dirs nobody touched for that long
 
 private:
     std::string dir_;

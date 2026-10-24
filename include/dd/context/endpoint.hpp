@@ -11,16 +11,26 @@
 // server half + agent/backend_kind.py.
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "dd/core/json.hpp"
+#include "dd/net/http.hpp"
 
 namespace dd {
 namespace context {
 
+// Where a base URL points, by its parsed host (never by a substring of the URL).
+enum class HostKind {
+    Loopback,   // 127.0.0.0/8, ::1, localhost
+    Private,    // RFC1918, 169.254.0.0/16, fc00::/7, *.local: a LAN box, probed before it is trusted to be a llama-server
+    Remote,     // anything else, names included: an API, no probes
+};
+HostKind classify_host(const std::string& base_url);
+
 struct ServerInfo {
-    bool local = false;      // 127.0.0.1 / localhost: slots, erase and probes apply
+    bool local = false;      // a llama-server / Strata we may probe: loopback, or a private host that answered /props like one
     bool reachable = false;  // /props answered
     bool strata = false;     // one conversation at a time: parks instead of slots
     int slots = 1;
@@ -32,9 +42,12 @@ class Endpoint {
 public:
     explicit Endpoint(std::string base_url);
     const std::string& base_url() const { return base_url_; }
-    std::string root() const { return root_; }   // "" for a remote provider
+    std::string root() const { return root_; }   // "" for a remote provider (and a private host not yet confirmed)
 
-    const ServerInfo& probe();                   // /props + /slots
+    // GET used by probe() and slots(); tests replace it.
+    std::function<net::Response(const std::string& url, long timeout_ms)> http_get;
+
+    const ServerInfo& probe();                   // /props + /slots; a private host stays remote unless /props answers like llama-server
     const ServerInfo& info() const { return info_; }
     bool multi_slot() const { return info_.local && info_.slots >= 2; }
     // One conversation at a time (a one-slot Strata): a second one parks the
@@ -69,7 +82,7 @@ public:
     std::vector<std::string> efforts() const;
 
 private:
-    std::string base_url_, root_;
+    std::string base_url_, root_, candidate_;   // candidate_: a private host's root, adopted once it answers like llama-server
     ServerInfo info_;
     std::atomic<int> main_{1};   // a prewarm thread reads it while main may be promoted
 };

@@ -75,6 +75,29 @@ int main() {
     chk(sanitize_display_text("a" + mk({0x80}) + "b") == "ab", "d_c1_mid");
     chk(sanitize_display_text("a" + mk({0x9F}) + "b") == "ab", "d_c1_mid_9f");
 
+    // ---- supplementary-plane characters survive the slow path byte for byte ----
+    {
+        const std::string emoji = mk({0x1F600}), top = mk({0x10FFFF}), low = mk({0x10000}), mid = mk({0x20AC});
+        chk(emoji == "\xF0\x9F\x98\x80", "mk emoji bytes");
+        chk(sanitize_display_text("ok " + emoji + " done") == "ok " + emoji + " done", "p_emoji_fast");
+        chk(sanitize_display_text(mk({ESC,'[','3','1','m'}) + "red" + mk({ESC,'[','0','m'}) + " " + emoji + " tail\r\n") == "red " + emoji + " tail\n",
+            "p_emoji_ansi_crlf");
+        chk(sanitize_display_text("a\r" + low + top + mid + emoji) == "a\n" + low + top + mid + emoji, "p_planes_cr");
+        chk(strip_ansi(mk({ESC,'[','3','1','m'}) + emoji) == emoji, "p_strip_emoji");
+        chk(strip_ansi(mk({0x9B,'3','1','m'}) + low + top) == low + top, "p_strip_planes");
+    }
+
+    // ---- a byte that is not a well-formed sequence is one character of its own, never a smuggled one ----
+    {
+        // overlong '/', surrogate, past U+10FFFF: each lead byte falls back to its Latin-1 value
+        chk(sanitize_display_text("\rx\xC0\xAF") == "\nx" + mk({0xC0, 0xAF}), "i_overlong_slash");
+        chk(sanitize_display_text("\r\xED\xA0\x80").find("\xED\xA0\x80") == std::string::npos, "i_surrogate_not_passed");
+        chk(sanitize_display_text("\r\xF4\x90\x80\x80").find("\xF4\x90") == std::string::npos, "i_past_10ffff");
+        chk(sanitize_display_text("\rx\xE0\x80\xAF") == "\nx" + mk({0xE0}) + mk({0xAF}), "i_overlong_3byte_slash");
+        // an overlong ESC must not turn into a real one
+        chk(strip_ansi("\xC1\x9B[31mx") == "\xC1\x9B[31mx" || strip_ansi("\xC1\x9B[31mx").find('\x1b') == std::string::npos, "i_overlong_esc");
+    }
+
     if (g_fail == 0) { std::printf("all ansi-strip tests passed\n"); return 0; }
     std::printf("%d failures\n", g_fail);
     return 1;

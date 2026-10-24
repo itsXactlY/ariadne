@@ -113,6 +113,9 @@ static bool v6_blocked(std::uint64_t hi, std::uint64_t lo) {
         std::uint32_t mapped = static_cast<std::uint32_t>(lo & 0xFFFFFFFFULL);
         return v4_blocked(mapped);
     }
+    // NAT64 (64:ff9b::/96) forwards to the IPv4 in the low 32 bits: as blocked as that address
+    if (hi == 0x0064FF9B00000000ULL && (lo >> 32) == 0)
+        return v4_blocked(static_cast<std::uint32_t>(lo & 0xFFFFFFFFULL));
     return v6_is_private(hi, lo) || v6_is_loopback(hi, lo) || v6_is_link_local(hi, lo)
         || v6_is_reserved(hi, lo) || v6_is_multicast(hi, lo) || v6_is_unspecified(hi, lo);
 }
@@ -217,38 +220,45 @@ bool is_blocked_ip(const std::string& ip_str) {
     throw std::invalid_argument("invalid ip: " + ip_str);
 }
 
-// URL hostname parser: scheme://[user@]host[:port] -> host (lowercased).
-static std::string url_hostname(const std::string& url) {
-    std::string u = url;
+// The host a client will connect to: scheme://[user[:pass]@]host[:port]/... -> host, lower-case, no brackets, no
+// trailing dot. Userinfo ends at the LAST '@' of the authority (what curl and browsers connect to); the authority ends
+// at / ? # or a backslash. "" when there is no usable host (control characters, an unclosed '[').
+std::string url_hostname(const std::string& url) {
     std::size_t start = 0;
-    std::size_t colon = u.find("://");
-    if (colon != std::string::npos) {
-        start = colon + 3;
-    } else {
-        start = 0;
-    }
-    while (start < u.size() && u[start] == '/') ++start;
+    const std::size_t colon = url.find("://");
+    if (colon != std::string::npos) start = colon + 3;
+    while (start < url.size() && url[start] == '/') ++start;
     std::size_t end = start;
-    while (end < u.size() && u[end] != '/' && u[end] != ':' && u[end] != '?') ++end;
-    std::string host = u.substr(start, end - start);
-    std::transform(host.begin(), host.end(), host.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    while (end < url.size() && url[end] != '/' && url[end] != '?' && url[end] != '#' && url[end] != '\\') ++end;
+    std::string auth = url.substr(start, end - start);
+    for (unsigned char c : auth)
+        if (c <= 0x20 || c == 0x7F) return "";
+    if (const std::size_t at = auth.rfind('@'); at != std::string::npos) auth.erase(0, at + 1);
+    std::string host;
+    if (!auth.empty() && auth[0] == '[') {
+        const std::size_t close = auth.find(']');
+        if (close == std::string::npos) return "";
+        host = auth.substr(1, close - 1);
+    } else {
+        host = auth.substr(0, auth.find(':'));
+    }
+    std::transform(host.begin(), host.end(), host.begin(), [](unsigned char c) { return std::tolower(c); });
+    while (!host.empty() && host.back() == '.') host.pop_back();
     return host;
 }
 
+// The name is resolved here and again by whoever connects: a caller that must not be rebound connects to the checked address.
 bool is_safe_url(const std::string& url) {
     std::string host = url_hostname(url);
     if (host.empty()) return false;
     if (host == "metadata.google.internal" || host == "metadata.goog") return false;
-    addrinfo hint;
-    hint.ai_flags = 0;
+    // Loopback is the harness's own MCP/LLM servers: admit only literal 'localhost' and dotted 127.x, never the
+    // bracketed or compressed v6 spellings that the blocked registries already catch.
+    if (host == "localhost") return true;
+    std::uint32_t ltip = 0;
+    if (parse_ipv4(host, ltip) && v4_is_loopback(ltip)) return true;
+    addrinfo hint{};
     hint.ai_family = AF_UNSPEC;
-    hint.ai_socktype = 0;
-    hint.ai_protocol = 0;
-    hint.ai_addrlen = 0;
-    hint.ai_canonname = nullptr;
-    hint.ai_addr = nullptr;
-    hint.ai_next = nullptr;
     addrinfo* res = nullptr;
     int rc = ::getaddrinfo(host.c_str(), nullptr, &hint, &res);
     if (rc != 0) return false;

@@ -1,6 +1,7 @@
 // src/context/maze.cpp — impl of dd/context/maze.hpp.
 #include "dd/context/maze.hpp"
 
+#include "dd/context/fsutil.hpp"
 #include "dd/core/json.hpp"
 #include "dd/net/http.hpp"
 #include "dd/tools/mcp.hpp"
@@ -137,14 +138,16 @@ std::string Maze::call(const std::string& tool, const std::string& args_json, lo
     tools::MCPClient mcp;
     mcp.url = url_;
     mcp.timeout_ms = timeout_ms;
-    std::string text;
+    core::Json args;
     try {
-        text = mcp.call(tool, core::json_parse(args_json));
+        args = core::json_parse(args_json);
     } catch (...) {
-        text.clear();
+        return "";
     }
-    if (mark) up_.store(!text.empty(), std::memory_order_relaxed);
-    return text;
+    const tools::McpResult r = mcp.call_ex(tool, args);
+    const bool good = r.ok && !r.is_error;   // an empty reply that was answered is still an answer
+    if (mark) up_.store(good, std::memory_order_relaxed);
+    return good ? r.text : std::string();
 }
 
 std::vector<Hit> Maze::recall(const std::string& query, int limit, const std::string& scope) {
@@ -236,8 +239,10 @@ struct Soaker::State {
     core::MpscQueue<Job> q;
     core::MpscQueue<LedgerEntry> out;
     std::atomic<uint32_t> bell{0};
-    std::atomic<bool> stop{false}, busy{false};
+    std::atomic<bool> stop{false};
     std::atomic<uint64_t> queued{0}, written{0}, spooled{0}, skipped{0}, edges{0};
+
+    std::string lock_path() const { return spool + ".lock"; }
 
     void spool_job(const Job& j) {
         if (spool.empty()) return;
@@ -248,25 +253,35 @@ struct Soaker::State {
         const std::string line = core::json_dump(core::json_obj({{"label", jsp(core::json_str(j.label))},
                                                                  {"content", jsp(core::json_str(j.content))},
                                                                  {"edges", jsp(std::move(e))}})) + "\n";
-        std::error_code ec;   // the work dir appears only when something has to land on disk
-        std::filesystem::create_directories(std::filesystem::path(spool).parent_path(), ec);
-        const int fd = ::open(spool.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        fsx::mkdirs(std::filesystem::path(spool).parent_path());   // the work dir appears only when something has to land on disk
+        const fsx::FileLock lock(lock_path());
+        const int fd = fsx::open_private(spool, O_APPEND);
         if (fd < 0) return;
         const ssize_t w = ::write(fd, line.data(), line.size());   // one append: whole line or nothing torn
         ::close(fd);
         if (w == static_cast<ssize_t>(line.size())) spooled.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // The pod answered again: one spooled write per live write, oldest first.
+    // the spool as lines (under the lock); false: none
+    bool read_lines(std::vector<std::string>& lines) const {
+        std::ifstream in(spool);
+        if (!in) return false;
+        lines.clear();
+        for (std::string l; std::getline(in, l);) lines.push_back(std::move(l));
+        return !lines.empty();
+    }
+
+    // The pod answered again: one spooled write per live write, oldest first. The lock is held to read the head and
+    // again to drop it, never across the network call; a second dd on this home appends in between.
     void replay_one() {
         if (spool.empty()) return;
-        std::ifstream in(spool);
-        if (!in) return;
-        std::string first, line;
-        std::ostringstream rest;
-        if (!std::getline(in, first)) return;
-        while (std::getline(in, line)) rest << line << "\n";
-        in.close();
+        std::string first;
+        {
+            const fsx::FileLock lock(lock_path());
+            std::vector<std::string> lines;
+            if (!read_lines(lines)) return;
+            first = lines.front();
+        }
         try {
             const Json j = core::json_parse(first);
             const std::string l = str(j, "label"), c = str(j, "content");
@@ -281,14 +296,24 @@ struct Soaker::State {
             edges_n(mem->connect(edges));
         } catch (...) {   // a torn line is dropped, not retried forever
         }
-        const std::string tmp = spool + ".tmp";
-        {
-            std::ofstream o(tmp, std::ios::trunc);
-            o << rest.str();
+        const fsx::FileLock lock(lock_path());
+        std::vector<std::string> lines;
+        if (!read_lines(lines) || lines.front() != first) return;   // someone else replayed it already
+        lines.erase(lines.begin());
+        if (lines.empty()) {
+            std::remove(spool.c_str());
+            return;
         }
-        if (rest.str().empty()) std::remove(spool.c_str());
-        else std::rename(tmp.c_str(), spool.c_str());
-        std::remove(tmp.c_str());
+        const std::string tmp = spool + ".tmp";
+        ::unlink(tmp.c_str());
+        const int fd = fsx::open_private(tmp, O_EXCL);   // 0600: the rename must not widen the spool's mode
+        if (fd < 0) return;
+        std::string body;
+        for (const auto& l : lines) body += l + "\n";
+        const bool ok = fsx::write_all(fd, body.data(), body.size());
+        ::close(fd);
+        if (ok) std::rename(tmp.c_str(), spool.c_str());
+        else ::unlink(tmp.c_str());
     }
 
     void edges_n(int n) {
@@ -304,7 +329,6 @@ struct Soaker::State {
                     spool_job(j);
                     continue;
                 }
-                busy.store(true, std::memory_order_release);
                 if (const long id = mem->remember(j.label, j.content); id > 0) {
                     written.fetch_add(1, std::memory_order_relaxed);
                     out.push(LedgerEntry{j.kind, j.label, j.session, id, j.epoch});
@@ -313,7 +337,6 @@ struct Soaker::State {
                 } else {
                     spool_job(j);
                 }
-                busy.store(false, std::memory_order_release);
                 continue;
             }
             if (stop.load(std::memory_order_acquire)) return;
@@ -325,17 +348,19 @@ struct Soaker::State {
 Soaker::Soaker(std::shared_ptr<Memory> memory, std::string spool_path) : st_(std::make_shared<State>()) {
     st_->mem = std::move(memory);
     st_->spool = std::move(spool_path);
-    std::thread([st = st_] { st->run(); }).detach();
+    th_ = std::thread([st = st_] { st->run(); });
 }
 
 Soaker::~Soaker() {
     st_->stop.store(true, std::memory_order_release);
     st_->bell.fetch_add(1, std::memory_order_release);
     st_->bell.notify_all();
-    // A write in flight gets a moment; past that the worker finishes on its
-    // own (it holds the state) and anything still queued goes to the spool.
-    for (int i = 0; i < 30 && st_->busy.load(std::memory_order_acquire); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // The join is the sync: the worker sees stop, queued jobs drain to the spool, the
+    // worker exits; only a network write in flight bounds this wait. Never throw from here.
+    try {
+        if (th_.joinable()) th_.join();
+    } catch (...) {   // teardown path
+    }
 }
 
 void Soaker::push(Job j) {

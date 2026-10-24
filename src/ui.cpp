@@ -48,6 +48,9 @@ char32_t decode(const std::string& s, size_t& i) {
         if ((b & 0xC0) != 0x80) { ++i; return 0xFFFD; }
         v = (v << 6) | (b & 0x3Fu);
     }
+    // RFC 3629: no overlongs, no surrogates, nothing past U+10FFFF (U+110000 is kSentinel: it must never be a glyph)
+    const char32_t least = len == 2 ? 0x80 : len == 3 ? 0x800 : 0x10000;
+    if (v < least || (v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) { ++i; return 0xFFFD; }
     i += static_cast<size_t>(len);
     return v;
 }
@@ -100,6 +103,16 @@ std::string trim(const std::string& s) {
     const size_t b = s.find_first_not_of(' ');
     if (b == std::string::npos) return "";
     return s.substr(b, s.find_last_not_of(' ') - b + 1);
+}
+
+// A streaming card keeps at most kLiveMax bytes; past it the oldest go (to kLiveKeep, so the cut is rare), never mid-character.
+constexpr size_t kLiveMax = 512u << 10, kLiveKeep = 448u << 10;
+
+void cap_live(std::string& t) {
+    if (t.size() <= kLiveMax) return;
+    size_t cut = t.size() - kLiveKeep;
+    while (cut < t.size() && (static_cast<unsigned char>(t[cut]) & 0xC0) == 0x80) ++cut;
+    t.erase(0, cut);
 }
 
 std::string hhmmss() {
@@ -768,6 +781,7 @@ void Scene::apply(Event& e) {
             reason_t0_ = e.at;
         }
         live_reason_->text += e.a;
+        cap_live(live_reason_->text);
         ++live_reason_->n;
         ++live_reason_->ver;
         phase_ = Phase::Reasoning;
@@ -780,6 +794,7 @@ void Scene::apply(Event& e) {
         }
         if (!live_say_) live_say_ = &push(Kind::Say, "");
         live_say_->text += e.a;
+        cap_live(live_say_->text);
         ++live_say_->n;
         ++live_say_->ver;
         phase_ = Phase::Writing;
@@ -1361,7 +1376,7 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     const int th2 = std::min(th, want + 2);
     const int ty = y + sh + eh + tph;
     f.box(x, ty, w, th2, b, true);
-    f.title(x + 2, ty, "tools Â· " + std::to_string(info_.tools), head, b);
+    f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
     int ry = ty + 1;
     for (auto it = entries_.rbegin(); it != entries_.rend() && ry < ty + th2 - 1; ++it) {
         if (it->kind != Kind::Tool) continue;
@@ -1541,6 +1556,10 @@ std::string Scene::drain_inline(int width, bool color, bool truecolor) {
         ++printed_;
     }
     return out;
+}
+
+size_t Scene::live_text_bytes() const {
+    return (live_reason_ ? live_reason_->text.size() : 0) + (live_say_ ? live_say_->text.size() : 0);
 }
 
 std::string Scene::row_text(int y) const {
