@@ -692,12 +692,13 @@ int main(int argc, char** argv) {
     }
     {
         ToolEntry e;
-        e.name = "skill_load";
-        e.schema = dd::know::Resolver::skill_load_schema();
-        e.handler = [&resolver](const Json& a) { return resolver.skill_load(a); };
+        e.name = "skills_list";
+        e.schema = dd::know::Resolver::skills_list_schema();
+        e.handler = [&resolver](const Json& a) { return resolver.skills_list(a); };
         add_tool(e);
     }
-    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load"});
+
+    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list"});
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
     if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call
     // the router learns what was worth offering (priors, terms for the skills that were found by other words); the overlay

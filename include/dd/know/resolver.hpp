@@ -5,6 +5,7 @@
 //   read_file("mem://1290233")  a memory row, in full
 //   find(query, kinds?)         what the catalogues hold for these words, strongest first, with how sure it is
 //   skill_load(name)            the old way in: the same as read_file("skill://name")
+//   skills_list(group, offset)  the NAMES behind the census: every group, a page at a time
 //
 // Every open is recorded: it is how the router knows a pointer was followed, and which skill the
 // model is working from when the window is rebuilt.
@@ -26,9 +27,11 @@ public:
     std::optional<std::string> read(const std::string& path);
     std::string find(const core::Json& args) const;
     std::string skill_load(const core::Json& args);
+    std::string skills_list(const core::Json& args) const;   // the names the census counts, a page at a time
 
     static core::Json find_schema();         // {description, parameters} for the registry
     static core::Json skill_load_schema();
+    static core::Json skills_list_schema();
 
 private:
     Router& router_;

@@ -74,6 +74,7 @@ public:
     // ---- facts for the prompt and the UI ----
     std::vector<std::string> map() const;           // one line per catalogue
     size_t skills() const { return cats_.skills ? cats_.skills->size() : 0; }
+    std::shared_ptr<SkillCatalogue> skill_catalogue() const { return cats_.skills; } // the enumeration route needs the cards, not just the census count
     int turn() const { return ws_.turn(); }          // agent thread
     const Policy& policy() const { return policy_; }
     Catalogue* catalogue(Kind k) const;

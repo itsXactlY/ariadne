@@ -905,6 +905,49 @@ static void test_router_tools(const fs::path& tmp) {
     core::Json sl = core::json_obj({{"name", std::make_shared<core::Json>(core::json_str("git-branch-workflow"))}});
     const auto l = core::json_parse(r.skill_load(sl));
     chk(core::json_get(l, "name")->str == "git-branch-workflow" && has(core::json_get(l, "text")->str, "Rebase before you merge"), "skill_load: still works, the same page");
+    // ---- the census names every group, and names the route to the names it counts ----
+    std::string smap;
+    for (const auto& l : s->router->map())
+        if (l.rfind("skills ", 0) == 0) smap = l;
+    chk(has(smap, "devops 2") && has(smap, "software-development 1") && has(smap, "creative 1"),
+        "the census names every group, not just the biggest few");
+    chk(!has(smap, "+ groups") && has(smap, "skills_list(") && has(smap, "skill://"),
+        "the census counts nothing silently: it says where the names come from");
+
+    // skills_list: the names behind a count, a page at a time, names only
+    core::Json g = core::json_obj({{"group", std::make_shared<core::Json>(core::json_str("devops"))}});
+    const auto gl = core::json_parse(r.skills_list(g));
+    chk(core::json_get(gl, "names") && core::json_get(gl, "names")->arr.size() == 2 && core::json_get(gl, "total")->num == 2.0,
+        "skills_list: one group gives exactly its names and the total");
+    chk(core::json_get(gl, "open") && has(core::json_get(gl, "open")->str, "skill://"),
+        "skills_list: it says how to open what it listed");
+
+    const std::string all_s = r.skills_list(core::json_obj());
+    const auto al = core::json_parse(all_s);
+    chk(core::json_get(al, "names")->arr.size() == 4 && core::json_get(al, "group")->str == "all",
+        "skills_list: no group means every group");
+    bool prefixed = true;
+    for (const auto& e : core::json_get(al, "names")->arr) prefixed = prefixed && e && has(e->str, "/");
+    chk(prefixed, "skills_list: across groups a name carries its group, so it is unambiguous");
+    chk(all_s.size() < 900, "skills_list: names only - no descriptions, no bodies");
+
+    core::Json pg = core::json_obj({{"k", std::make_shared<core::Json>(core::json_num(2))}});
+    const auto p1 = core::json_parse(r.skills_list(pg));
+    chk(core::json_get(p1, "names")->arr.size() == 2 && core::json_get(p1, "more"),
+        "skills_list: a page says what is behind it");
+    core::Json pg2 = core::json_obj({{"k", std::make_shared<core::Json>(core::json_num(2))},
+                                     {"offset", std::make_shared<core::Json>(core::json_num(2))}});
+    const auto p2j = core::json_parse(r.skills_list(pg2));
+    chk(core::json_get(p2j, "names")->arr.size() == 2 && !core::json_get(p2j, "more"),
+        "skills_list: the next page, and the last one promises nothing more");
+
+    core::Json bad = core::json_obj({{"group", std::make_shared<core::Json>(core::json_str("nosuchgroup"))}});
+    chk(core::json_get(core::json_parse(r.skills_list(bad)), "error"),
+        "skills_list: a group that is not one is an error, not an empty page");
+    core::Json far = core::json_obj({{"offset", std::make_shared<core::Json>(core::json_num(99))}});
+    chk(core::json_get(core::json_parse(r.skills_list(far)), "error"),
+        "skills_list: an offset past the end says so, it does not return empty");
+
 
     // every open is remembered: after a rebase the skill is pointed to again
     s->router->on(turn("something else entirely about nothing in particular"));

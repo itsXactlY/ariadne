@@ -530,11 +530,9 @@ std::string SkillCatalogue::map() const {
     std::stable_sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     std::string out = "skills " + std::to_string(s->census.cards) + ":";
     size_t shown = 0;
-    for (const auto& [g, n] : groups) {
-        if (shown++ == 10) break;
-        out += (shown == 1 ? " " : " · ") + g + " " + std::to_string(n);
-    }
-    if (groups.size() > 10) out += " · +" + std::to_string(groups.size() - 10) + " groups";
+    for (const auto& [g, n] : groups)
+        out += (shown++ == 0 ? " " : " · ") + g + " " + std::to_string(n);   // every group named: a census that hides a group cannot be searched by name
+    out += " · names: skills_list(\"<group>\") · open: read_file(\"skill://<name>\")";   // the route the census counts but never showed
     if (s->census.truncated) out += " · " + std::to_string(s->census.truncated) + " listings capped (more behind)";   // a hard cap is a warning, not silence
     return out;
 }

@@ -21,6 +21,8 @@ std::string str_arg(const Json& a, const char* k) {
     return v && v->type == Json::Str ? v->str : "";
 }
 
+constexpr size_t kSkillsListPage = 60;   // a page of names: ~200 tokens
+
 std::string kb(size_t bytes) {
     char b[24];
     std::snprintf(b, sizeof b, bytes >= 10240 ? "%.0f KB" : "%.1f KB", static_cast<double>(bytes) / 1024.0);
@@ -142,6 +144,53 @@ Json Resolver::skill_load_schema() {
          {"parameters", sp(core::json_obj({{"type", sp(core::json_str("object"))},
                                            {"properties", sp(std::move(props))},
                                            {"required", sp(core::json_arr({sp(core::json_str("name"))}))}}))}});
+}
+
+std::string Resolver::skills_list(const Json& args) const {
+    std::string group = str_arg(args, "group");
+    if (group == "*") group.clear();                              // every group
+    size_t offset = 0;
+    if (const Json* v = core::json_get(args, "offset"); v && v->type == Json::Num && v->num > 0)
+        offset = static_cast<size_t>(v->num);
+    size_t k = kSkillsListPage;
+    if (const Json* v = core::json_get(args, "k"); v && v->type == Json::Num)
+        k = static_cast<size_t>(std::clamp(static_cast<int>(v->num), 1, 200));
+    const auto cat = router_.skill_catalogue();
+    if (!cat || !cat->ready()) return tools::tool_error("no skill catalogue to list yet (off, or still warming up); find(\"what you need\") waits for it");
+    std::vector<std::string> names;
+    for (const auto& c : cat->cards())
+        if (group.empty() || c.group == group)
+            names.push_back(group.empty() && !c.group.empty() ? c.group + "/" + c.uri.id : c.uri.id);
+    std::sort(names.begin(), names.end());
+    if (names.empty())
+        return tools::tool_error("no skill carries the group '" + group + "': the groups are named in the catalogue map - match one exactly, or ask with no group for every one");
+    if (offset >= names.size())
+        return tools::tool_error("nothing behind offset " + std::to_string(offset) + " of " + std::to_string(names.size()) + " listed");
+    Json arr = core::json_arr();
+    size_t i = offset;
+    for (; i < names.size() && i - offset < k; ++i) core::arr_push(arr, core::json_str(names[i]));
+    Json out = core::json_obj({{"group", sp(core::json_str(group.empty() ? "all" : group))},
+                               {"offset", sp(core::json_num(static_cast<double>(offset)))},
+                               {"names", sp(std::move(arr))}});
+    core::obj_set(out, "total", core::json_num(static_cast<double>(names.size())));
+    if (i < names.size())
+        core::obj_set(out, "more", core::json_str("skills_list(group=\"" + group + "\", offset=" + std::to_string(i) + ")"));
+    core::obj_set(out, "open", core::json_str("read_file(\"skill://<name>\") - the name is what follows the last /; a long skill continues with #2, its own files with skill://<name>/<path>"));
+    return core::json_dump(out);
+}
+
+Json Resolver::skills_list_schema() {
+    Json props = core::json_obj(
+        {{"group", sp(core::json_obj({{"type", sp(core::json_str("string"))},
+                                      {"description", sp(core::json_str("one group exactly as the catalogue map prints it; empty for every group"))}}))},
+         {"offset", sp(core::json_obj({{"type", sp(core::json_str("integer"))},
+                                       {"description", sp(core::json_str("first name to return, from the last reply's more"))}}))},
+         {"k", sp(core::json_obj({{"type", sp(core::json_str("integer"))},
+                                  {"description", sp(core::json_str("how many names, default 60, max 200"))}}))}});
+    return core::json_obj(
+        {{"description", sp(core::json_str("List the skill NAMES the catalogue census counts, a page at a time, by group: the census names groups and counts them, this is how the names behind a count are read. For what a skill is FOR, use find instead."))},
+         {"parameters", sp(core::json_obj({{"type", sp(core::json_str("object"))},
+                                           {"properties", sp(std::move(props))}}))}});
 }
 
 }  // namespace know
