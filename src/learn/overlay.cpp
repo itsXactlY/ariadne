@@ -18,6 +18,17 @@ void LearnOverlay::learned_terms(const know::Uri& u, std::vector<know::Term>& ou
     if (it != r->terms.end()) out.insert(out.end(), it->second.begin(), it->second.end());
 }
 
+know::Demand LearnOverlay::demand(const know::Uri& u) const {
+    const auto r = demand_.read();
+    if (!r) return {};
+    const auto it = r->rows.find(u.str());
+    return it == r->rows.end() ? know::Demand{} : it->second;
+}
+
+void LearnOverlay::publish_demand(std::unique_ptr<const DemandSnapshot> s) {
+    demand_.publish(std::move(s));   // no version_: demand is the router's input, not a card's content
+}
+
 void LearnOverlay::publish(std::unique_ptr<const OverlaySnapshot> s) {
     cell_.publish(std::move(s));
     version_.fetch_add(1, std::memory_order_release);

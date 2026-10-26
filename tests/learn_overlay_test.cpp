@@ -48,6 +48,27 @@ static void give_efficacy(Stats& s, const std::string& card, double helped, doub
     c.failed.add(failed, kNow, kHlEfficacy);
 }
 
+static void test_demand_rows() {
+    // Demand is published every pass and must never bump the version: decayed counts change constantly, and a
+    // version bump rebuilds the catalogues. The router reads demand; the cards do not change.
+    Stats s;
+    CardStats& c = s.cards[skill("hub-no-open").str()];
+    for (int i = 0; i < 10; ++i) c.offered.add(1, kNow, kHlConversion);
+    auto ov = std::make_shared<LearnOverlay>();
+    Curator cur(ov);
+    cur.pass(s, kNow);   // nothing moves a prior here: the demand row must land regardless
+    const auto d = ov->demand(skill("hub-no-open"));
+    chk(d.offered == 10.0 && d.opened == 0.0 && d.lcb < 0.15, "demand: ten offers with none opened reads as refused");
+    chk(ov->version() == 0, "demand: demand alone does not move the version (no catalogue rebuild)");
+    chk(ov->demand(skill("never-offered")).offered == 0.0, "demand: a card nobody offered has no row");
+
+    // and the curator no longer boosts a card it offered a lot: its own demand says stop
+    CardStats& hub = s.cards[skill("hub-no-open").str()];
+    hub.shadow.add(5, kNow, kHlConversion);   // near misses that were not offered
+    cur.pass(s, kNow + 60);
+    chk(ov->prior(skill("hub-no-open")) <= 1.0 + 1e-9, "demand: a boosted prior needs a card nobody offered");
+}
+
 static void test_affinity_promotion() {
     Stats s;
     add_assoc(s, "podman-ops", "ship", 3, 2);      // confirmed
@@ -242,6 +263,7 @@ static void test_overlay_reaches_catalogue() {
 }
 
 int main() {
+    test_demand_rows();
     test_affinity_promotion();
     test_clamp_and_step();
     test_version_stable_on_noise();

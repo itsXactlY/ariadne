@@ -28,6 +28,10 @@ struct LifecycleParams {
     int64_t retire_after_s = 365 * 86400;   // Dormant, unused
     double demote_floor = 0.25;          // efficacy lower bound under this ...
     double demote_evidence = 5;          // ... with this much evidence (Helped + Failed) demotes once
+    // Demand: offered often, opened almost never. Its own channel, its own thresholds — it costs a card its
+    // cap, never its place. Retirement still needs efficacy draws, so a refused card goes quiet, not gone.
+    double refuse_offers = 8;            // decayed offers ...
+    double refuse_floor = 0.15;          // ... with a conversion lower bound under this demotes once
 };
 
 // A learned skill as the lifecycle sees it: its file and its card (null: no evidence yet).

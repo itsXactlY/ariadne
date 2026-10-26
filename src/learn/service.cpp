@@ -133,7 +133,7 @@ void LearnService::author_now(uint32_t turn) {
 
 void LearnService::curate() {
     ledger_->tick();
-    if (opt_.author) {   // learned skills live and die by what the ledger says of them; priors follow the state
+    if (opt_.govern) {   // learned skills live and die by what the ledger says of them; priors follow the state
         const auto changed = lifecycle_->step(ledger_->live(), now(), [this](const StateRec& r) { ledger_->record(Record{r}); });
         transitions_ += changed.size();
         if (!changed.empty() && opt_.on_skill) opt_.on_skill();

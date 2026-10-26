@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,9 @@ public:
     void end_turn();                                // the turn is over: learning closes its exposures
     void note_tripwire(const std::string& rule);   // a rule held a call
     void set_sink(std::shared_ptr<EventSink> s) { sink_ = s ? std::move(s) : std::make_shared<NullSink>(); }   // before the first signal
+    // Demand, from the same overlay the catalogues read for priors. It never moves version(), so asking it is
+    // free; without it every card's demand is unknown and the guard leaves everything alone.
+    void set_overlay(std::shared_ptr<const Overlay> o) { overlay_ = std::move(o); }   // before the first signal
 
     // ---- any thread ----
     std::string reattach() const;                   // the skills the model was working from, as pointers; "" if none
@@ -81,6 +85,7 @@ public:
 
     struct Stats {
         std::atomic<uint64_t> signals{0}, notes{0}, offered{0}, opened_for{0}, opened_by_model{0}, deep_in{0}, deep_late{0}, tokens{0};
+        std::atomic<uint64_t> refused{0};   // candidate slots the demand guard declined, over the process
     };
     const Stats& stats() const { return stats_; }
     std::function<void(const std::string&)> on_log;   // one JSON line per signal that said something
@@ -112,6 +117,11 @@ private:
     std::set<long> last_in_window_;
     std::vector<long> last_earlier_;
     core::SnapCell<std::string> reattach_;
+    std::shared_ptr<const Overlay> overlay_;
+    int declined_ = 0;   // slots the guard declined during the signal being run: the log line's own count
+    // One entry per card offered since its last open. The agent thread only: opens arrive through opened_q_.
+    struct Refusal { int offers = 0, opens = 0; int closed_until = 0; };
+    std::unordered_map<std::string, Refusal> refusal_;
     Stats stats_;
     std::shared_ptr<EventSink> sink_ = std::make_shared<NullSink>();
 
@@ -123,6 +133,9 @@ private:
     void submit_deep(const std::string& query);
     void log(const char* signal, const Delivery& d, const std::string& reason, const char* deep) const;
     bool seen(const Uri& u, Placement where) const;
+    bool refused(const Uri& u);      // demand refused: it may not take a slot this turn (the probe window moves it)
+    void note_offer(const Uri& u);   // an offer was made: it is the demand channel's numerator
+    void note_demand_open(const Uri& u);
 };
 
 }  // namespace know

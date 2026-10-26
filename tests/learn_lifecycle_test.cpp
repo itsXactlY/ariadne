@@ -121,26 +121,86 @@ static void test_retire_probation(const fs::path& base) {
     s2.cards[key("fix-d")].failed.add(3, T0, kHlEfficacy);
     chk(rg.step(s2, T0 + 11 * D).empty(), "retire: failures before the state began are not held against it");
 
-    // no win in 60 days
+    // no win in 60 days, but only for a card someone actually opened. A card nobody opened never had a chance
+    // to help: that is the demand channel's verdict, so it goes dormant, where it can come back, not retired.
     for (int64_t gap : {60 * D, 60 * D + 1}) {
         const fs::path r3 = fresh(base, "nowin" + std::to_string(gap));
         const auto m3 = make_skill(r3, "ops", "fix-e", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
         Rig r(r3);
         Stats s3;
-        s3.cards[key("fix-e")];
-        r.step(s3, T0 + gap);
-        chk(fs::exists(m3) == (gap == 60 * D), "retire: no win after " + std::to_string(gap) + " s");
+        s3.cards[key("fix-e")].opened.add(1, T0 + D, kHlConversion);   // read once, never helped
+        auto ch3 = r.step(s3, T0 + gap);
+        chk((ch3.size() == 1 && ch3[0].to == State::Retired) == (gap == 60 * D + 1),
+            "retire: opened and no win after " + std::to_string(gap) + " s");
     }
+    // never opened in probation, too few offers for the demand edge: the 60-day timer is what quiets it
+    const fs::path r5 = fresh(base, "never_opened");
+    const auto m5 = make_skill(r5, "ops", "fix-g", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
+    Rig r5rig(r5);
+    Stats s5;
+    s5.cards[key("fix-g")].offered.add(3, T0 + D, kHlConversion);   // offered three times, never opened: below the demand count
+    auto ch5 = r5rig.step(s5, T0 + 61 * D);
+    chk(ch5.size() == 1 && ch5[0].to == State::Dormant && ch5[0].why == std::string("never opened in probation"),
+        "quiet: a probation nobody opened goes dormant, not retired");
+    chk(fs::exists(m5) && file_state(m5) == State::Dormant, "quiet: the card is not moved and says dormant");
+    chk(!fs::exists(Lifecycle::retired_dir(r5, "ops", "fix-g") / "SKILL.md"), "quiet: nothing lands in .retired");
     // a win moves the clock
     const fs::path r4 = fresh(base, "nowin_reset");
     const auto m4 = make_skill(r4, "ops", "fix-f", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
     Rig r(r4);
     Stats s4;
+    s4.cards[key("fix-f")].opened.add(1, T0 + D, kHlConversion);   // read: retirement on no-win needs an open
     s4.cards[key("fix-f")].helped.add(1, T0 + 30 * D, kHlEfficacy);
     r.step(s4, T0 + 89 * D);
     chk(fs::exists(m4), "retire: a win at day 30 keeps it past day 60");
     r.step(s4, T0 + 90 * D + 1);
     chk(!fs::exists(m4), "retire: ... but not past day 90");
+}
+
+static void test_demand_refused(const fs::path& base) {
+    // Offered often, opened never: the demand channel demotes. Efficacy has no draws, so efficacy_lcb is 0.5 and
+    // the efficacy edge can never fire for this card — this is the exit the machine was missing.
+    const fs::path root = fresh(base, "demand");
+    const auto md = make_skill(root, "ops", "flow-hub", "state: active\nstate_since: " + std::to_string(T0) + "\n");
+    Rig rig(root);
+    Stats st;
+    auto& c = st.cards[key("flow-hub")];
+    c.state = State::Active;
+    const int64_t now = T0 + 3 * D;
+    for (int i = 0; i < 7; ++i) c.offered.add(1, now, kHlConversion);
+    chk(rig.step(st, now).empty(), "demand: seven refused offers are not yet the count the edge asks for");
+    c.offered.add(1, now, kHlConversion);   // eight, none of them opened
+    auto ch = rig.step(st, now);
+    chk(ch.size() == 1 && ch[0].to == State::Probation && ch[0].why == std::string("demand refused"),
+        "demand: eight offers with none opened demotes to probation");
+    chk(file_state(md) == State::Probation && slurp(md).find("demoted: 1") != std::string::npos,
+        "demand: the file says probation and the demotion is marked, so it happens once");
+    chk(!fs::exists(Lifecycle::retired_dir(root, "ops", "flow-hub") / "SKILL.md"), "demand: a refused card is never retired on demand alone");
+
+    // the same evidence inside probation ends it on day three: a hub drafted on a recurring shell pattern is
+    // offered from the day it is written, and waiting 60 days for the timer is not an exit condition.
+    const fs::path r3 = fresh(base, "demand_probation");
+    const auto md3 = make_skill(r3, "ops", "flow-hub-p", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
+    Rig rig3(r3);
+    Stats st3;
+    auto& c3 = st3.cards[key("flow-hub-p")];
+    for (int i = 0; i < 7; ++i) c3.offered.add(1, now, kHlConversion);
+    chk(rig3.step(st3, now).empty(), "demand: seven refused offers in probation are not yet the count the edge asks for");
+    c3.offered.add(1, now, kHlConversion);   // eight, none of them opened
+    auto ch3 = rig3.step(st3, now);
+    chk(ch3.size() == 1 && ch3[0].to == State::Dormant && ch3[0].why == std::string("demand refused in probation"),
+        "demand: eight offers with none opened ends probation on evidence, not on the 60-day clock");
+    chk(fs::exists(md3) && file_state(md3) == State::Dormant, "demand: a refused probation card goes dormant in place");
+    chk(!fs::exists(Lifecycle::retired_dir(r3, "ops", "flow-hub-p") / "SKILL.md"), "demand: dormant is not retired");
+    // a card that converts is not refused, however often it is offered
+    const fs::path r2 = fresh(base, "demand_converts");
+    make_skill(r2, "ops", "hub-that-works", "state: active\nstate_since: " + std::to_string(T0) + "\n");
+    Rig rg2(r2);
+    Stats s2;
+    auto& c2 = s2.cards[key("hub-that-works")];
+    for (int i = 0; i < 12; ++i) c2.offered.add(1, now, kHlConversion);
+    for (int i = 0; i < 6; ++i) c2.opened.add(1, now, kHlConversion);
+    chk(rg2.step(s2, now).empty(), "demand: twelve offers with six opens is demand met, not refused");
 }
 
 static void test_dormant(const fs::path& base) {
@@ -227,6 +287,7 @@ static void test_retired_unlisted(const fs::path& base) {
     Rig rig(root);
     Stats st;
     st.cards[key("keep-me")].last_used = T0 + 70 * D;
+    st.cards[key("lose-me")].opened.add(1, T0 + D, kHlConversion);   // read, never helped: that is a retirement
     rig.step(st, T0 + 70 * D);
     const auto cards = disk.list();
     bool lost = false, kept = false;
@@ -269,6 +330,29 @@ static void test_prior_uncapped() {
 }
 
 // a year, day by day: wins in the first days, use for a while, then silence
+// A hub-shaped card: offered hard, opened once, and the one open genuinely helped.
+// Demand alone can only end a card; execution is what pulls it out of probation, so
+// a card with eight offers and real efficacy must still promote — the refusal guard
+// reads conversion, not offers, and must not block this.
+static void test_hub_with_conversion_promotes(const fs::path& base) {
+    const fs::path root = fresh(base, "hub_conv");
+    const auto md = make_skill(root, "ops", "hub-opened", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
+    Rig rig(root);
+    Stats st;
+    auto& c = st.cards[key("hub-opened")];
+    c.state = State::Probation;
+    for (int i = 0; i < 8; ++i) c.offered.add(1, T0 + 5 + i, kHlConversion);
+    c.opened.add(1, T0 + 6, kHlConversion);
+    chk(c.conversion_lcb(T0 + 10) > 0.0, "hub: an open lands in conversion, which is what the router reads");
+    c.helped.add(3, T0 + 7, kHlEfficacy);
+    auto ch = rig.step(st, T0 + 10);
+    chk(ch.size() == 1 && ch[0].to == State::Active && file_state(md) == State::Active,
+        "hub: eight offers plus real efficacy promotes — the refusal guard is conversion, not offer count");
+    chk(rig.recs.size() == 1 && rig.recs[0].to == State::Active, "hub: the promote landed as a StateRec");
+    chk(std::string(ch[0].why) == "proven", "hub: the promote edge wins before the demand guard");
+    fs::remove_all(root);
+}
+
 static void test_year(const fs::path& base) {
     const fs::path root = fresh(base, "year");
     const auto md = make_skill(root, "ops", "fix-year", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
@@ -319,9 +403,17 @@ static void test_service_clock(const fs::path& base) {
     chk(svc != nullptr, "service: starts with an injected clock");
     if (!svc) return;
     const auto md = make_skill(o.skills_root, "ops", "svc-fix", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
+    const auto quiet = make_skill(o.skills_root, "ops", "svc-quiet", "state: probation\nstate_since: " + std::to_string(T0) + "\n");
     know::Event e;
     e.type = know::Event::Type::Rebase;
     svc->sink()->emit(std::move(e));
+    // svc-fix is read and never helps; svc-quiet is offered and never read. The two must end in different states.
+    know::Event oe;
+    oe.type = know::Event::Type::OpenedByModel;
+    oe.uri.kind = know::Kind::Skill;
+    oe.uri.id = "svc-fix";
+    oe.ts_ns = static_cast<uint64_t>(T0 + 5 * D) * 1000000000ull;
+    svc->sink()->emit(std::move(oe));
     svc->wait_idle(std::chrono::seconds(2));
     svc->curate_now();
     for (int i = 0; i < 400 && svc->status().passes < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -330,7 +422,9 @@ static void test_service_clock(const fs::path& base) {
     const uint64_t p = svc->status().passes;
     svc->curate_now();
     for (int i = 0; i < 400 && svc->status().passes <= p; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    chk(!fs::exists(md) && svc->status().transitions == 1, "service: 61 days without a win retires it");
+    // two transitions at day 61: the read one retires, the never-opened one goes dormant
+    chk(!fs::exists(md) && svc->status().transitions == 2, "service: 61 days without a win, after being read, retires it");
+    chk(fs::exists(quiet), "service: 61 days nobody opened it goes dormant, not retired");
     svc->stop();
     svc.reset();   // restart means the old holder is gone: its fd closes and releases the ledger lock
 
@@ -369,6 +463,7 @@ int main() {
     test_retire_probation(base);
     test_dormant(base);
     test_demote(base);
+    test_demand_refused(base);
     test_files(base);
     test_retired_unlisted(base);
     test_reconcile(base);
@@ -376,6 +471,7 @@ int main() {
     test_year(base);
     test_service_clock(base);
     test_yaml_block(base);
+    test_hub_with_conversion_promotes(base);
 
     fs::remove_all(base);
     if (g_fail) std::printf("%d FAILED\n", g_fail);

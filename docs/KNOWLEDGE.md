@@ -218,6 +218,15 @@ line with `read_file("skill://x")`; at or above `open` and `body_bytes <= auto_m
 opened for the model in the same note. The ladder exists because the model will not follow pointers
 reliably; `opened/offered` tells us when to move the thresholds.
 
+**Demand guard** (`knowledge.refusal.*`). A card whose fold says *offered often, opened almost never*
+(`offered >= offers` decayed, `conversion_lcb < floor`) stops taking slots: it is offered once every
+`probe_turns`, then its window closes. The guard has two sources of the same verdict — the fold's decayed
+counts, which survive a restart, and this process's own offers since the card's last open, which act the
+moment the eighth refusal lands. An open by the model clears the window immediately. The invariant is
+two-sided: **attention without demand is capped, and starvation is bounded** — with no probe floor the
+guard would recreate the deadlock with the polarity flipped (the 180-day soak is what caught that: thirteen
+cards holding 99% of the offers, seven starved). Declined slots are counted in `Router::Stats::refused`.
+
 What the model sees:
 
 ```

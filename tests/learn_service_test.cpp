@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <ctime>
 #include <sstream>
 
 #include "learn_tmp.hpp"
@@ -175,6 +176,44 @@ int main() {
             svc->wait_idle(std::chrono::seconds(10));
             const auto st = svc->status();
             chk(st.processed == st.pushed, "the burst drained");
+            svc->stop();
+        }
+    }
+
+    // ---- governance without drafting: a learned skill is governed even when author is off ----
+    {
+        const fs::path g = base / "govern";
+        fs::create_directories(g / "skills" / "ops" / "flow-hub");
+        std::ofstream(g / "skills" / "ops" / "flow-hub" / "SKILL.md")
+            << "---\nname: flow-hub\ncategory: ops\norigin: learned\nstate: probation\n"
+               "state_since: " << std::time(nullptr) << "\n---\nbody\n";
+        ServiceOptions o = opts(g);
+        o.author = false;
+        std::string err;
+        auto svc = LearnService::start(o, &err);
+        chk(svc != nullptr, "govern: the service starts with drafting off: " + err);
+        if (svc) {
+            const know::Uri hub = skill_uri("flow-hub");
+            const int64_t wall = std::time(nullptr);   // this run's own clock: decayed counts must still read as eight
+            for (int i = 0; i < 8; ++i) {
+                know::Event off = ev(know::Event::Type::Offered, 1, i);
+                off.ts_ns = 1000000000ull * wall;
+                off.uri = hub;
+                off.matched = 3;
+                off.mass = 9;
+                off.score = 0.4f;
+                svc->sink()->emit(std::move(off));
+            }
+            chk(svc->wait_idle(std::chrono::seconds(3)), "govern: every offer was processed");
+            svc->curate_now();
+            chk(wait_for([&] { return svc->status().transitions >= 1; }),
+                "govern: eight offers with none opened ends probation even with drafting off");
+            std::ifstream md(g / "skills" / "ops" / "flow-hub" / "SKILL.md");
+            std::stringstream body;
+            body << md.rdbuf();
+            chk(body.str().find("state: dormant") != std::string::npos, "govern: the hub went dormant in place, on demand evidence");
+            chk(body.str().find("state: retired") == std::string::npos, "govern: demand alone never retires");
+            chk(svc->status().drafts == 0 && skill_files(g / "skills") == 1, "govern: nothing was drafted while drafting is off");
             svc->stop();
         }
     }

@@ -46,6 +46,17 @@ struct Confidence {
     bool opens(const Hit& h, size_t catalogue = 0) const { return offers(h, catalogue) && h.score >= open_score; }
 };
 
+// Demand refusal. A card the offer bar keeps surfacing and the model keeps not opening holds a slot nothing
+// reads. The fold's decayed conversion is the evidence; the probe floor is the exit condition — without it the
+// guard becomes the deadlock it replaces, since a card never offered can never earn the evidence that would let
+// it back. Shares the thresholds with learn::LifecycleParams, which demotes on the same evidence.
+struct Refusal {
+    bool on = true;
+    double refuse_offers = 8;    // decayed offers at the fold's now ...
+    double refuse_floor = 0.15;  // ... with conversion lower bound under this: refused
+    int probe_turns = 6;         // ... and it is offered once every this many turns, never silenced
+};
+
 struct Policy {
     Confidence skills;
     Confidence memory{3, 6.5, 0.20, 2.0};   // curated rows are many and long: three terms, and never opened for the model
@@ -62,6 +73,7 @@ struct Policy {
     bool auto_route = true;                  // skills.auto_route: offers on its own at all
     bool auto_open = true;                   // the head of a confident skill is opened for the model
     bool shift = true, failure = true, stall = true;
+    Refusal refusal;
 
     static Policy from(const core::Config& cfg);
 };

@@ -56,6 +56,35 @@ bool Router::offers(const Hit& h) const {
     return (h.card.uri.kind == Kind::Memory ? policy_.memory : policy_.skills).offers(h, c ? c->size() : 0);
 }
 
+// The demand guard. Two sources of the same verdict: the fold's decayed conversion, which survives a restart,
+// and this process's own offers since the card's last open, which acts the moment the eighth refusal lands.
+// A refused card is not silenced — it is offered once every probe_turns turns, so it can still earn its way back.
+bool Router::refused(const Uri& u) {
+    const auto& g = policy_.refusal;
+    if (!g.on) return false;
+    Refusal& r = refusal_[u.str()];
+    const Demand d = overlay_ ? overlay_->demand(u) : Demand{};
+    const bool by_fold = d.offered >= g.refuse_offers && d.lcb < g.refuse_floor;
+    const bool by_local = r.offers >= g.refuse_offers && r.opens == 0;
+    if (!by_fold && !by_local) {
+        r.closed_until = 0;   // demand came back: the window is open again
+        return false;
+    }
+    const int t = ws_.turn();
+    if (r.closed_until > t) { ++stats_.refused; ++declined_; return true; }
+    r.closed_until = t + g.probe_turns;   // the probe: this turn may say it once, then the window closes
+    return false;
+}
+
+void Router::note_offer(const Uri& u) { ++refusal_[u.str()].offers; }
+
+void Router::note_demand_open(const Uri& u) {
+    Refusal& r = refusal_[u.str()];
+    ++r.opens;
+    r.offers = 0;
+    r.closed_until = 0;
+}
+
 bool Router::seen(const Uri& u, Placement where) const {
     if (ws_.open_in_window(u)) return true;   // its text is in the window already
     return where == Placement::QuestionNote ? ws_.offered_this_turn(u) : ws_.offered_this_epoch(u);
@@ -86,6 +115,7 @@ void Router::drain_opened() {
     Opened o;
     bool any = false;
     while (opened_q_.pop(o)) {
+        note_demand_open(o.uri);   // it was read: demand is satisfied, whatever the decayed counts still say
         ws_.opened(o.uri, o.title, o.bytes / 4);
         sink_->emit(ev(Event::Type::OpenedByModel, o.uri));
         any = true;
@@ -156,6 +186,7 @@ void Router::submit_deep(const std::string& query) {
 }
 
 void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes) {
+    declined_ = 0;   // the count is this signal's, not the process's
     Shown shown;
     std::vector<Hit> kept_skills;
 
@@ -176,6 +207,7 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
                     sink_->emit(std::move(e));
                 }
                 if (!conf.offers(h, cat->size()) || seen(h.card.uri, in.where)) continue;
+                if (refused(h.card.uri)) continue;   // offered often, opened rarely: it does not get this slot
                 if (k == Kind::Skill && !h.card.has_body) continue;   // a pointer to nothing
                 bucket.push_back(std::move(h));
             }
@@ -210,6 +242,7 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
         ws_.spend(deliver_.tokens(text));
         for (const auto& u : offered) {
             std::string title = u.id;
+            note_offer(u);
             ws_.offered(u, title, 40);
             {
                 Event e = ev(Event::Type::Offered, u, in.reason);
@@ -231,6 +264,7 @@ void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes)
         }
         if (head_in) {
             Uri u = shown.skills.front().card.uri;
+            note_demand_open(u);   // the router opened it for the model: that is demand satisfied, not an offer
             ws_.opened(u, shown.head_title, deliver_.tokens(shown.head->text));
             d.opened.push_back(u);
             sink_->emit(ev(Event::Type::OpenedByRouter, u, in.reason));
@@ -395,6 +429,7 @@ void Router::log(const char* signal, const Delivery& d, const std::string& reaso
                                            {"reason", sp(core::json_str(utf8_head(reason, 120)))},
                                            {"offered", sp(std::move(offered))},
                                            {"opened", sp(std::move(opened))},
+                                           {"declined", sp(core::json_num(static_cast<double>(declined_)))},
                                            {"tokens", sp(core::json_num(static_cast<double>(deliver_.tokens(d.note))))},
                                            {"deep", sp(core::json_str(deep))},
                                            {"ms", sp(core::json_num(d.ms))}})));

@@ -28,6 +28,10 @@ Policy Policy::from(const core::Config& cfg) {
     num("knowledge.confidence.memory_offer_mass", p.memory.offer_mass);
     num("knowledge.open_max_bytes", p.open_max_bytes);
     num("knowledge.top_k", p.top_k);
+    flag("knowledge.refusal.enabled", p.refusal.on);
+    num("knowledge.refusal.offers", p.refusal.refuse_offers);
+    num("knowledge.refusal.floor", p.refusal.refuse_floor);
+    num("knowledge.refusal.probe_turns", p.refusal.probe_turns);
     flag("knowledge.auto_open", p.auto_open);
     flag("knowledge.mid_turn.shift", p.shift);
     flag("knowledge.mid_turn.failure", p.failure);

@@ -151,10 +151,24 @@ no embedder, every learned term inspectable with `dd learn why <skill>`. If P6 s
 
 ```
 Draft ──review ok──► Probation ──N Helped, 0 Failed──► Active ──idle 120 d──► Dormant ──idle 365 d──► Retired
-   │ review fail           │ 2 Failed or 60 d without a win        │ efficacy < floor                      (kept in journal)
-   ▼                       ▼                                       ▼
- Rejected               Retired                                 Probation (demoted, once)
+   │ review fail           │ 2 Failed, 60 d without a win,         │ efficacy < floor                      (kept in journal)
+   │                       │ demand refused, never opened          │                         ▲
+   ▼                       ▼                                       ▼                         │ last_used again
+ Rejected               Retired / Dormant                       Probation (demoted, once)   Active
 ```
+
+Two channels drive those edges, and they own different verdicts:
+
+| channel | what it measures | what it may do |
+|---|---|---|
+| **efficacy** = `helped / (helped + failed)` | did the skill's content help the work | promote, demote, retire |
+| **demand** = `opened / offered` | did the model read what the offer bar surfaced | demote to Probation, or send a card Dormant — **never Retired** |
+
+A hub — a card the offer bar surfaces on almost every terminal-flavoured turn and nobody opens — has zero efficacy
+draws forever, so `efficacy_lcb = 0.5` sits above the demote floor and no efficacy edge can ever fire. Demand is the
+channel that sees it: `refuse_offers = 8` decayed offers with `conversion_lcb < refuse_floor = 0.15` moves an Active
+card to Probation and a Probation card to Dormant. Retirement still requires efficacy draws, because refusal is
+evidence about the *selector*, not about the skill: a card nobody read is not a card that failed.
 
 `Lifecycle` is a table of `Transition{from, to, Guard, Action}` evaluated by the `Curator`; guards read `Stats` only, so
 the policy is data and each transition is a one-line test. Nothing is deleted by the harness: Retired skills move to
@@ -165,7 +179,12 @@ is why).
 
 `Curator` runs on the learn thread when idle (at most once per 10 minutes, and after a Compactor pass): folds `Stats`
 into a new `OverlaySnapshot` (priors, learned terms), publishes it through a `SnapCell`, and bumps `Overlay::version()`
-only when something moved by more than a threshold, so the catalogue does not rebuild on noise. It also writes
+only when something moved by more than a threshold, so the catalogue does not rebuild on noise. Every pass also
+publishes a separate `DemandSnapshot` (decayed `offered`, `opened`, conversion lower bound per card) through its own
+cell: it deliberately does **not** bump `version()`, because decayed counts change every turn and a version bump would
+rebuild the catalogues for evidence the ranking does not use. `Router` reads that snapshot; nothing else decides whether
+a card is offered. The near-miss boost now applies only to a card nobody offered — a card offered a lot and opened never
+is refused, not starved, so the curator no longer pushes a hub up while its own demand says stop. It also writes
 `<home>/learn/report.md` (top movers, dormant cards, rejected drafts and why, hubs). `Governor` holds the budgets: at most
 3 drafts per day, 40 learned skills active, 1 sidekick call in flight, and the kill switches (`learn.enabled`,
 `learn.author`, `learn.feedback`, and a `<home>/learn/OFF` file checked by presence, no polling).

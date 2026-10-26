@@ -667,6 +667,63 @@ static void test_router_open_head(const fs::path& tmp) {
     chk(s3->router->on(turn("the podman symlink container mess needs to stop")).opened.empty(), "router: a skill past open_max_bytes is only pointed to");
 }
 
+// A demand stand-in: the fold says this card was offered often and opened never. FixedOverlay lives further down
+// this file, so the guard test carries its own.
+struct DemandOverlay : Overlay {
+    std::map<std::string, Demand> rows;
+    Demand demand(const Uri& u) const override {
+        const auto it = rows.find(u.str());
+        return it == rows.end() ? Demand{} : it->second;
+    }
+};
+
+// Demand refusal: a card the fold says is offered often and opened never stops taking slots, and the probe
+// floor is what keeps it from being buried forever — a card never offered can never earn its way back.
+static void test_demand_guard(const fs::path& tmp) {
+    Policy p;
+    p.auto_open = false;   // pointers only: an opened head would satisfy demand and release the guard
+    auto s = make_stack(tmp, "demand_guard", p);
+    Uri hub;
+    hub.kind = Kind::Skill;
+    hub.id = "podman-quadlet-ops";
+    auto ov = std::make_shared<DemandOverlay>();
+    ov->rows["skill://podman-quadlet-ops"] = Demand{20.0, 0.0, 0.03};   // twenty offers, none opened
+    s->router->set_overlay(ov);
+
+    int said = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto d = s->router->on(turn("restart the podman quadlet systemd unit"));
+        if (std::find(d.offered.begin(), d.offered.end(), hub) != d.offered.end()) ++said;
+    }
+    chk(said == 1, "guard: a refused card is offered once, then its window closes (" + std::to_string(said) + " of 6)");
+    chk(s->router->stats().refused.load() >= 5, "guard: the declined slots are counted");
+
+    // the probe: once the window has run out it is offered again, once
+    int probe = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto d = s->router->on(turn("restart the podman quadlet systemd unit again"));
+        if (std::find(d.offered.begin(), d.offered.end(), hub) != d.offered.end()) ++probe;
+    }
+    chk(probe == 1, "guard: the probe floor says it once per window, never zero forever (" + std::to_string(probe) + " of 6)");
+
+    // The model reads it. That clears the closed window, but the fold's decayed counts still say refused, so it
+    // comes back on the probe cadence rather than every turn — one open does not erase nineteen refusals.
+    s->router->open(hub);
+    s->router->on(turn("restart the podman quadlet systemd unit once more"));   // drains the open; its body is in the window
+    s->router->on(Rebased{1, "q"});                                             // ... and leaves it
+    int again = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto d = s->router->on(turn("restart the podman quadlet systemd unit again", 1));
+        if (std::find(d.offered.begin(), d.offered.end(), hub) != d.offered.end()) ++again;
+    }
+    chk(again == 1, "guard: an open clears the closed window but keeps the probe cadence (" + std::to_string(again) + " of 6)");
+
+    // a card the overlay knows nothing about is left alone
+    auto bare = make_stack(tmp, "demand_bare", p);
+    auto b = bare->router->on(turn("restart the podman quadlet systemd unit"));
+    chk(std::find(b.offered.begin(), b.offered.end(), hub) != b.offered.end(), "guard: no demand row, no verdict, no suppression");
+}
+
 static void test_router_budget(const fs::path& tmp) {
     Policy p;
     p.max_turn_tokens = 30;   // far too little
@@ -1031,10 +1088,15 @@ static void test_policy() {
 // the learn overlay's curated weights reach the maze's rows too, not only the skills
 struct FixedOverlay : Overlay {
     std::map<std::string, double> priors;
+    std::map<std::string, Demand> demands;
     uint64_t ver = 1;
     double prior(const Uri& u) const override {
         const auto it = priors.find(u.str());
         return it == priors.end() ? 1.0 : it->second;
+    }
+    Demand demand(const Uri& u) const override {
+        const auto it = demands.find(u.str());
+        return it == demands.end() ? Demand{} : it->second;
     }
     uint64_t version() const override { return ver; }
 };
@@ -1110,6 +1172,7 @@ int main() {
     test_router_budget(tmp);
     test_router_deep(tmp);
     test_router_deep_turns(tmp);
+    test_demand_guard(tmp);
     test_router_midturn(tmp);
     test_router_events(tmp);
     test_router_tools(tmp);

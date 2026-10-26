@@ -35,6 +35,10 @@ struct ServiceOptions {
     std::filesystem::path skills_root;   // <home>/skills
     std::string home_dir, project_dir;   // for the reviewer's private-path rule
     bool feedback = true, author = true;
+    // Governance is not drafting. Probation, dormancy and demand demotion read the journal and rewrite a
+    // SKILL.md's state; they must keep running when drafting is off, or a hub the offer bar keeps surfacing
+    // sits in probation until a 60-day timer clears it.
+    bool govern = true;
     std::chrono::seconds curate_every{600};
     int max_drafts_per_day = 3;
     Reviewer::SearchFn search;           // the catalogue, for the duplicate check

@@ -32,9 +32,11 @@ double target_prior(const CardStats& c, int64_t now, const CuratorParams& p) {
         // ... plus an error bar, so a card that had bad luck early is tried again instead of being buried by one that had good luck
         const double sigma = std::sqrt(std::max(0.0, est * (1.0 - est)) / (evidence + p.shrink));
         t = p.lo + std::clamp(est + p.explore * sigma, 0.0, 1.0) * (p.hi - p.lo);
-    } else {   // never exposed enough to judge: near misses say it was under-offered
+    } else {   // never exposed enough to judge: near misses say it was under-offered — but only for a card
+               // nobody offered. One that was offered a lot and never opened is refused, not starved, and a
+               // boost here is the curator pushing a hub up while its own demand says stop.
         const double s = c.shadow.at(now, kHlConversion);
-        t = 1.0 + p.shadow_boost * s / (s + 3.0);
+        t = c.offered.at(now, kHlConversion) >= 1.0 ? 1.0 : 1.0 + p.shadow_boost * s / (s + 3.0);
     }
     return std::clamp(t, p.lo, p.hi);
 }
@@ -86,6 +88,18 @@ bool Curator::pass(const Stats& s, int64_t now) {
         const double was = it == prev->prior.end() ? 1.0 : it->second;
         next[static_cast<size_t>(i)] = next_prior(r.second, now, was, p_);
     }
+
+    auto demand = std::make_unique<DemandSnapshot>();
+    for (const Row* r : rows) {
+        const double off = r->second.offered.at(now, kHlConversion);
+        if (off <= 0.0) continue;   // nothing was offered: no demand to report, and the guard leaves it alone
+        know::Demand dd_;
+        dd_.offered = off;
+        dd_.opened = r->second.opened.at(now, kHlConversion);
+        dd_.lcb = r->second.conversion_lcb(now);
+        demand->rows.emplace(r->first, dd_);
+    }
+    overlay_->publish_demand(std::move(demand));   // refreshed whether or not a prior moved
 
     auto snap = std::make_unique<OverlaySnapshot>();
     for (size_t i = 0; i < rows.size(); ++i)

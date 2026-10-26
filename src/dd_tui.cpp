@@ -748,6 +748,7 @@ int main(int argc, char** argv) {
     if (learn_on && skill_cat) skill_cat->set_overlay(learn_overlay);
     if (learn_on && memory_cat) memory_cat->set_overlay(learn_overlay);   // the maze's rows are curated too, not just the skills
     if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call, with the overlay already in place
+    if (learn_on) router.set_overlay(learn_overlay);   // the router reads demand from it: offered vs opened, the guard's evidence
     // each catalogue fed by the maze refreshes on its own thread, again when a source comes back. Declared after the deck
     // and the router, so they are stopped before either goes.
     std::vector<std::unique_ptr<dd::know::Refresher>> refreshers;
@@ -772,6 +773,7 @@ int main(int argc, char** argv) {
         if (const char* h = std::getenv("HOME")) lo.home_dir = h;
         lo.feedback = !cfg.has("learn.feedback") || cfg.get_bool("learn.feedback");
         lo.author = cfg.has("learn.author") && cfg.get_bool("learn.author");   // drafting skills is opt-in
+        lo.govern = !cfg.has("learn.govern") || cfg.get_bool("learn.govern");   // governing them is not: quiet by default
         if (cfg.has("learn.max_drafts_per_day")) lo.max_drafts_per_day = static_cast<int>(cfg.get_int("learn.max_drafts_per_day"));
         lo.search = [&router](const dd::know::Query& q) {   // the duplicate check asks the catalogue
             std::string text;
@@ -782,6 +784,11 @@ int main(int argc, char** argv) {
         std::string lerr;
         learner = dd::learn::LearnService::start(std::move(lo), &lerr);
         if (learner) router.set_sink(learner->sink());
+        // An off learning loop is not a silent condition: priors, drafts, the lifecycle and the router's demand
+        // guard all read the journal, so say why it is off rather than letting the router guess from empty demand.
+        else if (!lerr.empty())
+            boot_errors.push_back("learning is off: " + lerr +
+                                  " — no fold, so the router judges demand by this run's own offers only");
     }
     const std::string work = home.state().string();   // spill and the soak spool: beside the binary, not the launch dir
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");

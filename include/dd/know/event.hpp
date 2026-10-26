@@ -53,12 +53,22 @@ public:
     void emit(Event&&) noexcept override {}
 };
 
+// What a card was offered for, and what the model actually opened. Decayed, folded by the curator: a card
+// offered often and opened almost never is a card the offer bar surfaced and the demand channel refused.
+struct Demand {
+    double offered = 0, opened = 0;   // decayed counts at the fold's now
+    double lcb = 0.5;                 // Wilson lower bound of opened/offered; 0.5 when there is no evidence
+};
+
 class Overlay {
 public:
     virtual ~Overlay() = default;
     virtual double prior(const Uri&) const { return 1.0; }                 // multiplies Card::prior; in [0.5, 1.5]
     virtual void learned_terms(const Uri&, std::vector<Term>&) const {}    // the Bm25f `learned` field
     virtual uint64_t version() const { return 0; }                         // a catalogue rebuilds when this moves
+    // Demand is not card content: it never moves version(), so the router can ask it every turn without
+    // rebuilding a catalogue. Nothing else decides whether a card may be offered.
+    virtual Demand demand(const Uri&) const { return {}; }
 };
 
 }  // namespace know

@@ -92,14 +92,37 @@ Lifecycle::Lifecycle(fs::path root, LifecycleParams p) : root_(std::move(root)),
              if (!s.card || helped(s) < p.promote_wins * p.decay_allowance - 1e-9 || !win_after(*s.card, s.since)) return false;
              return s.card->failed.v <= 0 || s.now - s.card->failed.t > p.promote_quiet_s;
          }},
+        {State::Probation, State::Dormant, "demand refused in probation",
+         [=](const Subject& s, const LifecycleParams& p) {
+             // A hub drafted on a recurring shell pattern is offered from the day it is written, so the 60-day
+             // timer below is the only exit it has — and it reads no evidence until then. This fires on the
+             // demand channel instead: many offers, none opened. Dormant keeps the file and its terms, and a
+             // real open brings it back, so it is the quiet state, not the gone state.
+             return s.card && s.card->offered.at(s.now, kHlConversion) >= p.refuse_offers - 1e-9
+                    && s.card->conversion_lcb(s.now) < p.refuse_floor;
+         }},
+        {State::Probation, State::Dormant, "never opened in probation",
+         [=](const Subject& s, const LifecycleParams& p) {
+             // Nobody opened it, so it never had a chance to help. That is the demand channel's verdict, not the
+             // skill's: a card nobody read is not a card that failed, so it goes where it can come back.
+             return s.now - s.since > p.probation_max_s && (!s.card || s.card->opened.t <= s.since);
+         }},
         {State::Probation, State::Retired, "no win in probation",
          [=](const Subject& s, const LifecycleParams& p) {
-             const int64_t last_win = s.card && win_after(*s.card, s.since) ? s.card->helped.t : s.since;
+             if (!s.card || s.card->opened.t <= s.since) return false;   // never opened: the edge above owns it
+             const int64_t last_win = win_after(*s.card, s.since) ? s.card->helped.t : s.since;
              return s.now - last_win > p.probation_max_s;
          }},
         {State::Active, State::Probation, "efficacy fell",
          [=](const Subject& s, const LifecycleParams& p) {
              return s.card && !s.demoted && helped(s) + failed(s) >= p.demote_evidence - 1e-9 && s.card->efficacy_lcb(s.now) < p.demote_floor;
+         }},
+        {State::Active, State::Probation, "demand refused",
+         [=](const Subject& s, const LifecycleParams& p) {
+             // The offer bar matched its terms and the model never read them. Evidence about the terms that
+             // surfaced it, not about the skill: a demotion, with the state's cap, never a retirement.
+             return s.card && !s.demoted && s.card->offered.at(s.now, kHlConversion) >= p.refuse_offers - 1e-9
+                    && s.card->conversion_lcb(s.now) < p.refuse_floor;
          }},
         {State::Active, State::Dormant, "idle",
          [](const Subject& s, const LifecycleParams& p) { return s.now - s.last_used() > p.dormant_after_s; }},
