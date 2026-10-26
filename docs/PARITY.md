@@ -20,12 +20,33 @@ on branch `fix/audit-20261024`, not read out of a README.
 
 ## What is missing — measured, not assumed
 
-### Tool output budget
-A result gets no size bound anywhere: `tool_output_limits` is ported
-(`include/dd/tools/tool_output_limits.hpp`) and wired into no binary, so the
-only cap is the UI card — the whole string still enters the tape and costs
-context. A per-tool budget plus a spill read verb would close this; verbose
-currently shows what the card kept, not what the tool produced.
+### Tool output budget — closed at the tool layer
+The bound now sits where the result is produced, not in the card. `tool_output`
+(`max_bytes`, `max_lines`, `max_line_length`, `read_bytes`) resolves from the
+config the process actually loaded — `tools::resolve_tool_output_from(cfg)`,
+`src/tools/tool_output_limits.cpp` — into `ShellOptions::max_output` and
+`FsLimits`, so `run_terminal` and `read_file` cut what they hand back before it
+enters the tape. Absent or unusable values keep the numbers the tools shipped
+before the section existed (8000 bytes / 2000 lines / 4000 bytes per line /
+1 MiB per read), NOT `DEFAULT_MAX_*` (50000), which mirror the Python module: a
+config without the section must not widen the context cost of every result
+sixfold. `get_tool_output_limits()` reads the home copy and stays the parity
+path; the tool layer uses the loaded config so a `--config` override counts.
+A cut now names itself and how to continue: `[truncated: N of M bytes dropped]`
+plus `bytes_dropped` on a terminal result, `lines_dropped` / `lines_cut` /
+`next_offset` on a read, and a window that stops inside a file reports
+`truncated` rather than reading as whole. Proof:
+`make build/dd_tools_output_envelope_tests`.
+Measured on the local server with `DD_TAPE_LOG` — two homes whose config
+differs by exactly one line, same prompt, `grep -R TODO` over 1200 files
+producing 1,009,800 bytes: the call that carries the result costs **9207 prompt
+tokens** bounded against **22151** unbounded, and the call after it **9403**
+against **22308**. That is **12,944 prompt tokens per call** for bytes the
+model never reads. `level` stayed `ok` in both arms, so this is window cost,
+not compaction.
+Still open: a spill read verb (the dropped tail cannot be recovered from the
+reply, only re-fetched by narrowing), and verbose, which renders the card
+instead of `bytes_dropped` — see W2.
 
 ### Mid-turn steering
 Input typed while a turn runs lands in `queued` (`src/dd_tui.cpp:1080`, pushed at `:1401-1402`) and is

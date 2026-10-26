@@ -37,6 +37,7 @@
 #include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
 #include "dd/tools/skill_provenance.hpp"
 #include "dd/tools/todo_tool.hpp"
@@ -173,15 +174,18 @@ static bool result_failed(const std::string& r) {
 }
 
 // ---- file and shell tools: dd/tools/fs_tools.hpp, dd/tools/shell.hpp ----
-static dd::know::Resolver* g_resolver = nullptr;   // skill://name, mem://id: one verb reads everything the catalogues hold
+static dd::know::Resolver* g_resolver = nullptr;
+
+static dd::tools::FsLimits g_fs_limits;      // resolved from tool_output at startup
+static size_t g_shell_max_output = 8000;      // ditto; the shipped default until the config says otherwise   // skill://name, mem://id: one verb reads everything the catalogues hold
 
 static std::string h_read_file(const Json& args) {
     if (const Json* p = json_get(args, "path"); p && p->type == Json::Str && g_resolver)
         if (auto internal = g_resolver->read(p->str)) return *internal;
-    return dd::tools::fs_read(args);
+    return dd::tools::fs_read(args, g_fs_limits);
 }
 static std::string h_write_file(const Json& args) { return dd::tools::fs_write(args); }
-static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args); }
+static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args, g_fs_limits); }
 
 // the agent's interrupt flag: Esc, and a SIGINT/SIGTERM/SIGHUP, reach a running shell command through it
 static std::atomic<std::atomic<bool>*> g_cancel{nullptr};
@@ -207,6 +211,7 @@ static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
         for (const auto& sp : d->arr)
             if (sp && sp->type == Json::Str) policy.extra_deny.push_back(sp->str);
     dd::tools::ShellOptions opt;
+    opt.max_output = g_shell_max_output;
     opt.cancel = g_cancel.load(std::memory_order_relaxed);
     return dd::tools::run_shell(c->str, opt, policy);
 }
@@ -446,6 +451,15 @@ int main(int argc, char** argv) {
     try { cfg = ddcore::load_config(config_path); }
     catch (const std::exception& ex) { std::cerr << "config: " << ex.what() << "\n"; }
     dd::know::configure(cfg);
+
+    // The tool-output envelope, resolved once from the config this process loaded: run_terminal's
+    // byte cap and read_file's line window come from `tool_output`. Absent values keep the numbers
+    // the tools shipped before the section existed, so an unset config changes nothing.
+    const auto tool_output = dd::tools::resolve_tool_output_from(cfg);
+    g_fs_limits.max_lines = static_cast<size_t>(tool_output.at("max_lines"));
+    g_fs_limits.max_line_length = static_cast<size_t>(tool_output.at("max_line_length"));
+    g_fs_limits.max_read_bytes = static_cast<size_t>(tool_output.at("read_bytes"));
+    g_shell_max_output = static_cast<size_t>(tool_output.at("max_bytes"));
 
     auto env_or = [](const char* k, const std::string& def) -> std::string {
         const char* v = std::getenv(k);

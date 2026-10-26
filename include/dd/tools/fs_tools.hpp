@@ -13,6 +13,8 @@ namespace tools {
 struct FsLimits {
     size_t max_read_bytes = 1u << 20;   // bytes a read returns in one call
     size_t max_entries = 2000;          // directory entries one list returns
+    size_t max_lines = 2000;            // lines a read returns when the call asks for no limit
+    size_t max_line_length = 4000;      // bytes of one line, then a cut marker names the rest
 };
 
 // {path, content as "     N|text" lines, total_lines, offset, lines} or {"error"}.

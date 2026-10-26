@@ -75,6 +75,15 @@ const std::map<std::string, int>& get_tool_output_limits() {
     return *g_limits_cache;
 }
 
+std::map<std::string, int> resolve_tool_output_from(const core::Config& cfg) {
+    std::map<std::string, int> env;
+    env["max_bytes"] = _coerce_positive_int(cfg.get("tool_output.max_bytes"), SHIPPED_MAX_BYTES);
+    env["max_lines"] = _coerce_positive_int(cfg.get("tool_output.max_lines"), SHIPPED_MAX_LINES);
+    env["max_line_length"] = _coerce_positive_int(cfg.get("tool_output.max_line_length"), SHIPPED_MAX_LINE_LENGTH);
+    env["read_bytes"] = _coerce_positive_int(cfg.get("tool_output.read_bytes"), SHIPPED_READ_BYTES);
+    return env;
+}
+
 void _reset_tool_output_limits_cache() { g_limits_cache.reset(); }
 
 int get_max_bytes() { return get_tool_output_limits().at("max_bytes"); }

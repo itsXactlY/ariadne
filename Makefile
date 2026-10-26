@@ -119,16 +119,16 @@ $(BUILD)/dd_know_rules_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT) $(wildcard 
 $(BUILD)/dd: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/dd
 
-$(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
-	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
+$(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
 
 install: | $(BUILD)/dd_tui
 	@install -m 0755 $(BUILD)/dd_tui $(INSTALL_DIR)/dd_tui
 	@echo "dd is at $(INSTALL_DIR)/dd_tui; that folder owns config.yaml and is the home"
 	@echo "dd's home is $(INSTALL_DIR) — not build/, which holds only what this Makefile built"
 
-$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
+$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
@@ -180,6 +180,9 @@ $(BUILD)/dd_sticker_tests: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CON
 
 $(BUILD)/dd_pairing_tests: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) $(GATEWAY) $(RETRY) $(CLASSIFICATION) $(PROMPT_CACHE) $(BOUNDARY) $(TAPE) $(CRON) $(CRON_JOBS) $(STICKER) $(PAIRING) tests/gateway_pairing_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(AGENT) $(CONFIG) $(GATEWAY) $(RETRY) $(CLASSIFICATION) $(PROMPT_CACHE) $(BOUNDARY) $(TAPE) $(CRON) $(CRON_JOBS) $(STICKER) $(PAIRING) tests/gateway_pairing_test.cpp -o $(BUILD)/dd_pairing_tests
+
+$(BUILD)/dd_tools_output_envelope_tests: $(CORE) $(TOOLS) $(TOOLRUN) $(CONFIG) $(COREHOME) $(TOOLLIMITS) $(THINTS) tests/tools_output_envelope_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(TOOLS) $(TOOLRUN) $(CONFIG) $(COREHOME) $(TOOLLIMITS) $(THINTS) tests/tools_output_envelope_test.cpp -o $(BUILD)/dd_tools_output_envelope_tests
 
 $(BUILD)/dd_tools_security_tests: $(CORE) $(TOOLS) $(PATH_SEC) $(BIN_EXT) tests/tools_security_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(TOOLS) $(PATH_SEC) $(BIN_EXT) tests/tools_security_test.cpp -o $(BUILD)/dd_tools_security_tests
@@ -363,6 +366,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_cron_jobs_tests \
   $(BUILD)/dd_sticker_tests \
   $(BUILD)/dd_pairing_tests \
+  $(BUILD)/dd_tools_output_envelope_tests \
   $(BUILD)/dd_tools_security_tests \
   $(BUILD)/dd_tools_interrupt_tests \
   $(BUILD)/dd_debug_tests \

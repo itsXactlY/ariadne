@@ -119,5 +119,15 @@ mcp_servers:
     tools:                                # optional per-tool switch
       mazemaker_prune: {enabled: false}
 
+# What one tool result may carry into the tape. These are the numbers the harness shipped before the
+# section existed, so leaving them alone changes nothing; raising one raises the context cost of every
+# result that hits it. read_bytes is the byte budget a single read_file call returns; max_line_length
+# cuts one long line and names how much was cut.
+tool_output:
+  max_bytes: 8000          # run_terminal: bytes handed back; the rest is read and dropped, never held
+  max_lines: 2000          # read_file: lines handed back when the call asks for no limit
+  max_line_length: 4000    # read_file: bytes of one line, then a cut marker
+  read_bytes: 1048576      # read_file: bytes a single call returns
+
 # run_terminal is a guard, not a sandbox: it refuses obviously destructive commands (sudo, recursive rm on broad paths, force-push, ...); add command words here.
 command_denylist: []

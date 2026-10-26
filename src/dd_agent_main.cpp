@@ -17,6 +17,7 @@
 #include "dd/core/message.hpp"
 #include "dd/tools/todo_tool.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
 
@@ -114,10 +115,13 @@ struct HttpLLMClient : dd::agent::LLMClient {
     }
 };
 
+static dd::tools::FsLimits g_fs_limits;      // resolved from tool_output at startup
+static size_t g_shell_max_output = 8000;      // ditto; the shipped default until the config says otherwise
+
 // ---- working filesystem tool handlers (real I/O) ----
-static std::string h_read_file(const Json& args) { return dd::tools::fs_read(args); }
+static std::string h_read_file(const Json& args) { return dd::tools::fs_read(args, g_fs_limits); }
 static std::string h_write_file(const Json& args) { return dd::tools::fs_write(args); }
-static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args); }
+static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args, g_fs_limits); }
 static ddcore::Json fs_schema(const std::vector<std::string>& props, const std::string& desc) { return dd::tools::fs_tool_schema(props, desc); }
 static void register_fs_tools(dd::tools::ToolRegistry& reg) {
     { ToolEntry e; e.name = "read_file"; e.schema = fs_schema({"path"}, "Read a file's UTF-8 text content."); e.handler = h_read_file; reg.register_tool(e); }
@@ -148,6 +152,15 @@ int main(int argc, char** argv) {
     ddcore::Config cfg{ddcore::Json{}};
     try { cfg = ddcore::load_config(config_path); }
     catch (const std::exception& ex) { std::cerr << "config: " << ex.what() << "\n"; }
+
+    // The tool-output envelope, resolved once from the config this process loaded: run_terminal's
+    // byte cap and read_file's line window come from `tool_output`. Absent values keep the numbers
+    // the tools shipped before the section existed, so an unset config changes nothing.
+    const auto tool_output = dd::tools::resolve_tool_output_from(cfg);
+    g_fs_limits.max_lines = static_cast<size_t>(tool_output.at("max_lines"));
+    g_fs_limits.max_line_length = static_cast<size_t>(tool_output.at("max_line_length"));
+    g_fs_limits.max_read_bytes = static_cast<size_t>(tool_output.at("read_bytes"));
+    g_shell_max_output = static_cast<size_t>(tool_output.at("max_bytes"));
 
     auto env_or = [](const char* k, const std::string& def) -> std::string {
         const char* v = std::getenv(k);

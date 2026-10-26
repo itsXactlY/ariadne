@@ -25,7 +25,6 @@ JsonSP jsp(Json v) { return std::make_shared<Json>(std::move(v)); }
 std::string jerr(const std::string& m) { return json_dump(json_obj({{"error", jsp(json_str(m))}})); }
 std::string errno_text() { return std::strerror(errno); }
 
-constexpr size_t kMaxLine = 4000;               // bytes of one line handed back
 constexpr size_t kScanCap = 64u << 20;          // bytes scanned to count lines
 constexpr size_t kBinaryProbe = 8192;
 constexpr size_t kMaxListed = 100000;           // names held to sort one directory
@@ -82,7 +81,7 @@ std::string fs_read(const Json& args, const FsLimits& limits) {
         ::close(fd);
         return jerr(std::string(kind_of(st.st_mode)) + ", not a file: refusing to read " + path);
     }
-    long offset = 1, limit = 2000;
+    long offset = 1, limit = static_cast<long>(limits.max_lines);
     if (const Json* o = json_get(args, "offset"); o && o->type == Json::Num) offset = std::max(1L, static_cast<long>(o->num));
     if (const Json* l = json_get(args, "limit"); l && l->type == Json::Num) limit = std::max(1L, static_cast<long>(l->num));
 
@@ -97,7 +96,7 @@ std::string fs_read(const Json& args, const FsLimits& limits) {
     auto finish_line = [&]() {
         if (n >= offset && shown < limit && !stopped) {
             std::string text = line;
-            if (line_bytes > kMaxLine) {
+            if (line_bytes > limits.max_line_length) {
                 text += " ...[line cut: " + std::to_string(line_bytes) + " bytes]";
                 ++cuts;
             }
@@ -142,7 +141,8 @@ std::string fs_read(const Json& args, const FsLimits& limits) {
             const bool in_window = n >= offset && shown < limit && !stopped;
             if (in_window) {
                 line_bytes += end - pos;
-                if (line.size() < kMaxLine) line.append(buf.data() + pos, std::min(end - pos, kMaxLine - line.size()));
+                if (line.size() < limits.max_line_length)
+                    line.append(buf.data() + pos, std::min(end - pos, limits.max_line_length - line.size()));
             }
             have_data = true;
             if (nl) {
@@ -162,6 +162,14 @@ std::string fs_read(const Json& args, const FsLimits& limits) {
     if (have_data) finish_line();   // a last line without a newline
     const long total = n - 1;
     if (!truncated && shown >= limit && offset + shown <= total) next_offset = offset + shown;
+    // What the call did not hand back. Lines before `offset` were asked for nothing, so they are not
+    // a loss; only the lines past the window are. When the scan hit its cap the file's true length is
+    // unknown, so this is a floor and total_lines_capped says so rather than pretending it is final.
+    const long last_shown = offset + shown - 1;
+    const long dropped = total > last_shown ? total - last_shown : 0;
+    // Either kind of cut makes this a partial read: a byte budget or a line window. A caller that
+    // checks `truncated` must see the line-window case too, or it reads a cut file as a whole one.
+    if (dropped > 0) truncated = true;
 
     Json res = json_obj({{"path", jsp(json_str(path))},
                          {"content", jsp(json_str(out))},
@@ -171,6 +179,7 @@ std::string fs_read(const Json& args, const FsLimits& limits) {
     if (truncated) obj_set(res, "truncated", json_bool(true));
     if (next_offset > 0) obj_set(res, "next_offset", json_num(static_cast<double>(next_offset)));
     if (cuts > 0) obj_set(res, "lines_cut", json_num(static_cast<double>(cuts)));
+    if (dropped > 0) obj_set(res, "lines_dropped", json_num(static_cast<double>(dropped)));
     if (capped) obj_set(res, "total_lines_capped", json_bool(true));
     return json_dump(res);
 }

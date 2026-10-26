@@ -22,14 +22,16 @@ special-cased.
 
 ## W1 — the tool-result envelope (highest cost, one seam)
 
-Today: caps are compile-time constants and truncation is announced with no way
-back. `include/dd/tools/shell.hpp:25` `max_output = 8000`; `src/tools/fs_tools.cpp:85`
-`offset = 1, limit = 2000`; no `tool_output` section exists in any config and
-`config.cpp` has no such key; `src/tools/shell.cpp:1122-1137` appends
-`...(truncated)` and reports `output_bytes` but never the offset to continue
-from; `fs_tools.cpp:164-171` computes `next_offset` but never a per-line cap —
-`line_length` has zero hits in `fs_tools.cpp`, so a single 100 KB line is handed
-back whole. `PARITY.md` "Tool output budget" already names this.
+**Closed.** The caps are config-driven and a cut names itself. `tool_output`
+ships in `src/core/default_config.cpp` and `examples/daedalus/config.yaml`;
+`tools::resolve_tool_output_from(cfg)` resolves it against the config the
+process loaded, and both mains hand the result to `ShellOptions::max_output`
+and `FsLimits` (`max_lines`, `max_line_length`, `max_read_bytes`) instead of
+header constants. `run_terminal` reports `bytes_dropped` with the marker
+`[truncated: N of M bytes dropped]`; `read_file` reports `lines_dropped`,
+`lines_cut` and `next_offset`, and counts lines before `offset` as asked-for,
+not lost. `terminal_hints::annotate_failure` rides a non-zero exit, with the
+two rules the port lacks.
 
 | step | change | proof |
 |---|---|---|
@@ -39,11 +41,24 @@ back whole. `PARITY.md` "Tool output budget" already names this.
 | 1d | `terminal_hints::annotate_failure(cmd, exit, output)` on non-zero exit, plus two rules the port lacks: **empty output with exit 0**, and **output truncated, N dropped — narrow the command**. The port has 4 rules (`gh` JSON field, `command not found`, `ModuleNotFoundError`, import) and neither of these is among them | the two classes that cost real work this session: `cp -r` producing a 0-byte "before" with exit 0, and a hunk that appended at EOF. Each must now come back with a hint naming the cause |
 
 Exit criterion (number, not prose): one binary, one prompt, `DD_TAPE_LOG`, config
-differs only by `tool_output`. Report prompt tokens per turn for an unbounded
-`grep -R` arm vs the bounded arm, and the turn count the model needs to finish
-the same task once the reply names the resume offset. This is the same method as
-`bench/ab-edit-file.sh` (`DD_DISABLE_TOOLS` gave +260 prompt tokens/call and
-−22,277 net on a two-place edit of a 129-line file).
+differs only by `tool_output`. **Achieved** — two homes, config differing by the
+single `max_bytes` line (8000 vs 2000000), `grep -R TODO` over 1200 files
+producing 1,009,800 bytes:
+
+| call | bounded | unbounded | delta |
+|---|---|---|---|
+| 1, no result yet | 4315 | 4315 | 0 |
+| 2, carries the result | 9207 | 22151 | +12944 |
+| 3, result still in tape | 9403 | 22308 | +12905 |
+
+`level` stayed `ok` in both arms: the bound buys window cost, not a compaction.
+Two premises in this wave were falsified on the way and fixed at the source
+rather than worked around: `get_tool_output_limits()` re-reads the home
+`config.yaml`, so a `--config` override was ignored, and its defaults (50000 /
+2000 / 2000) would have widened an unset config sixfold; and hint detection
+matches English wording while `/bin/sh` is bash under a German locale, so
+`annotate_failure` never fired — the child is pinned to `LC_MESSAGES=C`.
+Turn count was not a lever here: both arms finished in 3 calls, 2 tools.
 
 ## W2 — verbose tells the truth about a result
 

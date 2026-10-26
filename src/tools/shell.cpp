@@ -1,5 +1,6 @@
 // dd::tools shell: the denylist guard and the bounded command runner. A guard, not a sandbox.
 #include "dd/tools/shell.hpp"
+#include "dd/tools/terminal_hints.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -39,6 +40,22 @@ bool ends_with(const std::string& s, const char* p) {
 std::string upper(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return s;
+}
+
+// Verbs whose silence is information: an empty output from them means nothing matched. `cp`, `mv`,
+// `sed -i`, `test` and a build legitimately print nothing on success, so they are not here.
+bool is_query_command(const std::string& cmd) {
+    static const std::set<std::string> verbs = {
+        "grep", "egrep", "fgrep", "rg", "ag", "find", "ls", "cat", "head", "tail", "wc",
+        "diff", "sort", "uniq", "cut", "md5sum", "sha1sum", "sha256sum", "du", "stat"};
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '{' || cmd[i] == '(')) ++i;
+    size_t j = i;
+    while (j < cmd.size() && cmd[j] != ' ' && cmd[j] != '\n' && cmd[j] != '|' && cmd[j] != ';') ++j;
+    std::string first = cmd.substr(i, j - i);
+    const size_t slash = first.find_last_of('/');
+    if (slash != std::string::npos) first = first.substr(slash + 1);
+    return verbs.count(first) != 0;
 }
 
 // ---------------- reading a command the way a shell would ----------------
@@ -1015,8 +1032,13 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
         const std::string kv = *e;
         const size_t eq = kv.find('=');
         if (eq != std::string::npos && secret_env_name(kv.substr(0, eq))) continue;
+        // Message wording is what the failure hints match on. In a non-English locale bash prints
+        // "Kommando nicht gefunden" and every hint silently misses, so messages are pinned to C.
+        // Only messages: LC_ALL would also change collation and number formatting in command output.
+        if (eq != std::string::npos && kv.substr(0, eq) == "LC_MESSAGES") continue;
         env.push_back(kv);
     }
+    env.push_back("LC_MESSAGES=C");
     std::vector<char*> envp;
     for (auto& s : env) envp.push_back(s.data());
     envp.push_back(nullptr);
@@ -1120,8 +1142,10 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     if (!background && !group_alive(pid)) forget_group(pid);
 
     const bool truncated = total > keep;
+    const size_t dropped = truncated ? total - keep : 0;
     trim_partial_utf8(head);
-    if (truncated) head += "...(truncated)";
+    if (truncated)
+        head += "...[truncated: " + std::to_string(dropped) + " of " + std::to_string(total) + " bytes dropped]";
     Json out = json_obj({{"cmd", jsp(json_str(cmd))}});
     if (!error.empty()) {
         obj_set(out, "error", json_str(error));
@@ -1135,8 +1159,38 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     if (truncated) {
         obj_set(out, "truncated", json_bool(true));
         obj_set(out, "output_bytes", json_num(static_cast<double>(total)));
+        obj_set(out, "bytes_dropped", json_num(static_cast<double>(dropped)));
     }
     if (background) obj_set(out, "background_still_running", json_bool(true));
+
+    // A hint only where there is something to act on. A failure names the next move; a cut output
+    // names what was lost and that narrowing beats rerunning; a query that printed nothing says the
+    // silence means "no match", which is the case that reads as success and is not.
+    if (error.empty()) {
+        const int code = WIFEXITED(status) ? WEXITSTATUS(status)
+                       : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 0;
+        if (code != 0) {
+            std::string hint;
+            if (const auto h = annotate_failure(cmd, code, head)) hint = *h;
+            if (truncated) {
+                if (!hint.empty()) hint += " ";
+                hint += "The output was cut at " + std::to_string(keep) + " bytes (" +
+                        std::to_string(dropped) + " dropped), so the reason may sit past the cut — narrow "
+                        "the command instead of rerunning it whole.";
+            }
+            if (!hint.empty()) obj_set(out, "hint", json_str(hint));
+        } else if (truncated) {
+            obj_set(out, "hint", json_str("Output cut at " + std::to_string(keep) + " bytes: " +
+                        std::to_string(dropped) + " of " + std::to_string(total) + " dropped. Narrow the "
+                        "command (a path, `grep -n`, `head`) rather than rerunning it — the dropped tail "
+                        "cannot be recovered from this result."));
+        } else if (head.empty() && is_query_command(cmd)) {
+            obj_set(out, "stdout_empty", json_bool(true));
+            obj_set(out, "hint", json_str("Exit 0 with no output: the command ran and printed nothing. For a "
+                        "query verb that means nothing matched — check the path and the pattern before "
+                        "treating this as success."));
+        }
+    }
     return json_dump(out);
 }
 
