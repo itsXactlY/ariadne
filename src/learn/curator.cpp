@@ -45,6 +45,18 @@ double cap_of(State s, const CuratorParams& p) {
     return p.hi;
 }
 
+// The prior the next snapshot gives a card: what the evidence says, bounded by the state's cap and by the
+// per-pass step. The cap is folded in BEFORE the step window, not after it — applying it after let a demotion
+// jump 1.0 -> probation_cap in a single pass (-30%), which is exactly the move rate the step exists to forbid:
+// one noisy round of evidence would strand a card. A card on probation now descends by step per pass and stays
+// recoverable. Retired and Rejected are terminal, so they pin to the floor at once: a card that is gone must
+// stop being offered now, not six passes later.
+double next_prior(const CardStats& c, int64_t now, double was, const CuratorParams& p) {
+    const double want = std::min(target_prior(c, now, p), cap_of(c.state, p));
+    if (c.state == State::Retired || c.state == State::Rejected) return std::clamp(want, p.lo, p.hi);
+    return std::clamp(want, was * (1.0 - p.step), was * (1.0 + p.step));
+}
+
 bool same_terms(const std::vector<know::Term>& a, const std::vector<know::Term>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i)
@@ -72,9 +84,7 @@ bool Curator::pass(const Stats& s, int64_t now) {
         const Row& r = *rows[static_cast<size_t>(i)];
         const auto it = prev->prior.find(r.first);
         const double was = it == prev->prior.end() ? 1.0 : it->second;
-        double v = std::clamp(target_prior(r.second, now, p_), was * (1.0 - p_.step), was * (1.0 + p_.step));
-        v = std::min(v, cap_of(r.second.state, p_));
-        next[static_cast<size_t>(i)] = std::clamp(v, p_.lo, p_.hi);
+        next[static_cast<size_t>(i)] = next_prior(r.second, now, was, p_);
     }
 
     auto snap = std::make_unique<OverlaySnapshot>();

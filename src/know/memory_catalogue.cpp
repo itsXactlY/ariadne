@@ -131,10 +131,15 @@ void MemoryCatalogue::publish() {
         c.group = colon == std::string::npos ? "other" : r.label.substr(0, colon);
         c.source = "maze";
         c.has_body = true;
+        if (overlay_) {
+            c.prior = overlay_->prior(c.uri);
+            overlay_->learned_terms(c.uri, c.learned);
+        }
         ++snap->by_group[c.group];
         cards.push_back(std::move(c));
     }
     snap->generation = gen_.fetch_add(1) + 1;
+    published_overlay_v_ = overlay_ ? overlay_->version() : 0;
     snap->index = std::make_unique<Bm25f>(std::move(cards));
     snap_.publish(std::move(snap));
 }
@@ -201,9 +206,12 @@ void MemoryCatalogue::refresh() {
             changed = true;
         }
     }
-    if (changed || snap_.empty()) {
+    // a new overlay pass changes the priors and terms without changing a single row: the index must be rebuilt,
+    // or the curated weights would sit in the overlay forever and never reach a score
+    const bool overlay_moved = overlay_ && overlay_->version() != published_overlay_v_;
+    if (changed || overlay_moved || snap_.empty()) {
         publish();
-        save_cache();
+        if (changed) save_cache();
     }
 }
 

@@ -20,7 +20,7 @@ namespace learn {
 
 struct CuratorParams {
     double lo = 0.5, hi = 1.5;
-    double step = 0.05;              // the most a prior may move, relative, per pass
+    double step = 0.05;              // the most a prior may move, relative, per pass — including toward a state cap; terminal states pin at once
     double move = 0.01;              // a pass publishes when a prior moved this much from the published one
     double shadow_boost = 0.1;       // the most a card with near misses and no efficacy evidence gains
     double shrink = 2;               // the prior is the efficacy shrunk toward 0.5 by this many pseudo-observations (not a lower bound: see curator.cpp)

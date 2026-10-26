@@ -21,6 +21,7 @@
 #include "dd/core/snap_cell.hpp"
 #include "dd/know/bm25.hpp"
 #include "dd/know/catalogue.hpp"
+#include "dd/know/event.hpp"
 
 namespace dd {
 namespace know {
@@ -40,6 +41,9 @@ public:
     std::optional<Body> open(const Uri& u) override;
     std::string map() const override;
     void refresh() override;
+    // The learn overlay: priors and learned terms for the rows. Like SkillCatalogue, it must be
+    // set before the first publish (preload() or refresh()) or the first snapshot ships priors the next pass already dropped.
+    void set_overlay(std::shared_ptr<Overlay> o) { overlay_ = std::move(o); }
     // The cached rows, searchable before any pod call (refresh() starts with the same). Call it before the refresher
     // thread starts, or from it: the rows are the refreshing thread's alone.
     void preload();
@@ -76,6 +80,8 @@ private:
     void load_cache();
     void save_cache() const;
     void publish();
+    std::shared_ptr<Overlay> overlay_;
+    uint64_t published_overlay_v_ = 0;   // the overlay version the published snapshot was built with
 };
 
 }  // namespace know

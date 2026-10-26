@@ -741,12 +741,13 @@ int main(int argc, char** argv) {
 
     deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list", "todo"});
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
-    if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call
-    // the router learns what was worth offering (priors, terms for the skills that were found by other words); the overlay
+    // the router learns what was worth offering (priors, terms for the cards that were found by other words); the overlay
     // must be in place before the first refresh, the service itself starts after the refreshers (it is stopped first)
     const bool learn_on = !cfg.has("learn.enabled") || cfg.get_bool("learn.enabled");
     auto learn_overlay = std::make_shared<dd::learn::LearnOverlay>();
     if (learn_on && skill_cat) skill_cat->set_overlay(learn_overlay);
+    if (learn_on && memory_cat) memory_cat->set_overlay(learn_overlay);   // the maze's rows are curated too, not just the skills
+    if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call, with the overlay already in place
     // each catalogue fed by the maze refreshes on its own thread, again when a source comes back. Declared after the deck
     // and the router, so they are stopped before either goes.
     std::vector<std::unique_ptr<dd::know::Refresher>> refreshers;

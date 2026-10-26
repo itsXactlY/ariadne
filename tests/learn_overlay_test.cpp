@@ -92,8 +92,23 @@ static void test_clamp_and_step() {
     prob.cards[skill("new").str()].state = State::Probation;
     auto ov2 = std::make_shared<LearnOverlay>();
     Curator c2(ov2);
+    chk(c2.pass(prob, kNow), "a demotion publishes");
+    const double p1 = ov2->prior(skill("new"));
+    chk(std::fabs(p1 - 0.95) < 1e-9, "a demotion costs one step, not the whole cap");
+    chk(p1 > 0.7, "the cap is not reached in the pass the demotion landed");
+    c2.pass(prob, kNow);
+    const double p2 = ov2->prior(skill("new"));
+    chk(p2 < p1 && p1 - p2 <= 0.05 * p1 + 1e-9, "the descent toward the cap is rate-limited");
     for (int i = 0; i < 60; ++i) c2.pass(prob, kNow);
     chk(ov2->prior(skill("new")) <= 0.7 + 1e-9, "a card on probation is held under its cap");
+
+    // terminal states are not noise: a card that is gone must stop being offered in this pass
+    Stats gone;
+    give_efficacy(gone, "dead", 400, 0);
+    gone.cards[skill("dead").str()].state = State::Retired;
+    auto ov3 = std::make_shared<LearnOverlay>();
+    Curator c3(ov3);
+    chk(c3.pass(gone, kNow) && ov3->prior(skill("dead")) == 0.5, "a retired card pins to the floor at once");
 }
 
 static void test_version_stable_on_noise() {

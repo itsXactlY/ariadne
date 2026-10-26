@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1027,6 +1028,70 @@ static void test_policy() {
     chk(!d.skills.offers(h), "policy: little evidence is not enough");
 }
 
+// the learn overlay's curated weights reach the maze's rows too, not only the skills
+struct FixedOverlay : Overlay {
+    std::map<std::string, double> priors;
+    uint64_t ver = 1;
+    double prior(const Uri& u) const override {
+        const auto it = priors.find(u.str());
+        return it == priors.end() ? 1.0 : it->second;
+    }
+    uint64_t version() const override { return ver; }
+};
+
+static void test_memory_priors_reach_the_score() {
+    auto pod = std::make_shared<FakePod>();
+    pod->add("fact:quadlet-dir", "quadlet units live in the config dir, linked from the repo");
+    pod->add("fact:quadlet-dir-again", "quadlet units live in the config dir, linked from the repo");
+    auto ov = std::make_shared<FixedOverlay>();
+    MemoryCatalogue cat(pod, {});   // no cache file: the rows come from the pod alone
+    cat.set_overlay(ov);
+    cat.refresh();
+    const uint64_t g0 = cat.generation();
+
+    Query q;
+    q.terms.push_back({"quadlet", 1.0f});
+    q.terms.push_back({"config", 1.0f});
+    const auto flat = cat.search(q, 2);
+    chk(flat.size() == 2, "memory: both rows match the query");
+    chk(flat[0].card.prior == 1.0 && flat[0].card.uri.id == "500", "memory: with no curated prior the row with the higher raw wins");
+
+    ov->priors["mem://500"] = 0.6;   // the curator punished this row; the uri key is mem://<id>
+    ov->ver = 2;
+    cat.refresh();
+    chk(cat.generation() > g0, "memory: a moved overlay version rebuilds the index with no row changed");
+    const auto cut = cat.search(q, 2);
+    chk(cut.size() == 2 && cut[0].card.uri.id == "501", "memory: a curated prior reorders the rows");
+    chk(cut[1].card.prior == 0.6, "memory: the prior lands on the card the router sees");
+    // the prior multiplies the score outright: the punished row keeps 0.6 of what it scored before
+    chk(std::fabs(cut[1].score - 0.6 * flat[0].score) < 1e-3, "memory: the prior scales the score, not just the order");
+
+    const uint64_t g1 = cat.generation();
+    cat.refresh();
+    chk(cat.generation() == g1, "memory: no new overlay version, no rebuild");
+
+    // learned terms reach the maze's rows the same way priors do
+    auto pod2 = std::make_shared<FakePod>();
+    pod2->add("fact:nothing-matches", "quadlet units live in the config dir");
+    Query far;
+    far.terms.push_back({"symlink", 1.0f});
+    MemoryCatalogue plain(pod2, {});
+    plain.refresh();
+    chk(plain.search(far, 1).empty(), "memory: the vocabulary gap: nothing matches before learning");
+
+    struct TermOverlay : Overlay {
+        std::vector<Term> t;
+        uint64_t version() const override { return 1; }
+        void learned_terms(const Uri&, std::vector<Term>& out) const override { out = t; }
+    };
+    auto ov2 = std::make_shared<TermOverlay>();
+    ov2->t = {{"symlink", 2.0f}};
+    MemoryCatalogue lifted(pod2, {});
+    lifted.set_overlay(ov2);
+    lifted.refresh();
+    chk(!lifted.search(far, 1).empty(), "memory: a promoted term lifts the row over the gap");
+}
+
 int main() {
     const fs::path tmp = fs::temp_directory_path() / ("dd_know_router_test_" + std::to_string(::getpid()));
     fs::remove_all(tmp);
@@ -1037,6 +1102,7 @@ int main() {
     test_triggers();
     test_deliverer();
     test_memory_catalogue(tmp);
+    test_memory_priors_reach_the_score();
     test_cancel();
     test_refresher_parks();
     test_router_turn(tmp);
