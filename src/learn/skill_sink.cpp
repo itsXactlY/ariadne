@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "dd/core/yaml.hpp"
+#include "dd/tools/skill_provenance.hpp"
 
 namespace fs = std::filesystem;
 
@@ -89,6 +90,12 @@ DraftRec SkillSink::write(const Draft& d, const Verdict& v, State state) const {
             rec.verdict = "exists: not learned, left alone";
             return rec;
         }
+        // a learned skill the model edited carries who edited it. A draft is a guess from the
+        // transcript; an edit the model made through edit_file is work already done. The draft loses.
+        if (const auto it = fm.find("edited_by"); it != fm.end()) {
+            rec.verdict = "edited_by: " + core::unquote(it->second) + " outranks a draft, left alone";
+            return rec;
+        }
         if (auto it = fm.find("digest"); it != fm.end() && core::unquote(it->second) == d.digest) {
             rec.accepted = true;
             rec.verdict = "unchanged";
@@ -101,6 +108,7 @@ DraftRec SkillSink::write(const Draft& d, const Verdict& v, State state) const {
     std::string text = "---\nname: " + d.name + "\ndescription: " + d.gist + "\ntags: [" + tags + "]\norigin: learned\nstate: " + state_text(state) +
                        "\nkind: " + d.kind + "\nepisode: " + d.episode.substr(0, 16) + "\ndigest: " + d.digest + "\ncreated: " + date_of(rec.ts) + "\n---\n\n" + d.body;
 
+    const dd::tools::WriteOriginScope scope("learn_loop");   // this write is ours, not the model's
     fs::create_directories(target.parent_path(), ec);
     if (ec) {
         rec.verdict = "write failed: " + ec.message();

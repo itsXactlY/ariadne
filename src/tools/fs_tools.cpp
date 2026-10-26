@@ -278,6 +278,47 @@ std::string fs_list(const Json& args, const FsLimits& limits) {
     return json_dump(res);
 }
 
+std::string fs_read_raw(const std::string& path, std::size_t cap, std::string& err) {
+    err.clear();
+    if (path.empty()) { err = "path required"; return {}; }
+    if (has_traversal_component(path)) { err = "path contains '..': " + path; return {}; }
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0) { err = "not found: " + path; return {}; }
+    if (!S_ISREG(st.st_mode)) { err = "cannot edit " + path + ": " + kind_of(st.st_mode); return {}; }
+    if (cap && static_cast<std::size_t>(st.st_size) > cap) {
+        err = "too large to edit: " + path + " is " + std::to_string(st.st_size) +
+              " bytes, the patch cap is " + std::to_string(cap);
+        return {};
+    }
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { err = "cannot open " + path + ": " + errno_text(); return {}; }
+    std::string data;
+    std::vector<char> buf(64u << 10);
+    bool first = true;
+    for (;;) {
+        const ssize_t r = ::read(fd, buf.data(), buf.size());
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            const std::string why = errno_text();
+            ::close(fd);
+            err = "read failed on " + path + ": " + why;
+            return {};
+        }
+        if (r == 0) break;
+        if (first) {
+            first = false;
+            if (std::memchr(buf.data(), 0, std::min(static_cast<size_t>(r), kBinaryProbe))) {
+                ::close(fd);
+                err = "binary file (" + std::to_string(st.st_size) + " bytes): not text, refusing to edit " + path;
+                return {};
+            }
+        }
+        data.append(buf.data(), static_cast<size_t>(r));
+    }
+    ::close(fd);
+    return data;
+}
+
 Json fs_tool_schema(const std::vector<std::string>& props, const std::string& desc) {
     Json props_map = json_obj();
     for (const auto& k : props) {

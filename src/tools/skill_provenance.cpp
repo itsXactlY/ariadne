@@ -7,8 +7,10 @@
 namespace dd {
 namespace tools {
 
-static std::string g_origin = "foreground";
-static std::vector<std::string> g_stack;
+// thread_local, not global: Python's ContextVar is per-context, and the C++ contexts here are
+// threads. Two writers on two threads must not see each other's origin.
+thread_local std::string g_origin = "foreground";
+thread_local std::vector<std::string> g_stack;
 
 int set_current_write_origin(const std::string& origin) {
     g_stack.push_back(g_origin);

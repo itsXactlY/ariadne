@@ -1,5 +1,5 @@
 # dd::learn soak (tsan builds without -fopenmp: ThreadSanitizer does not understand libgomp): a time-compressed half year with injected faults (the sanitizer runs are shorter)
-LEARN_SOAK_SRC := $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard src/learn/*.cpp) src/core/crc32c.cpp)
+LEARN_SOAK_SRC := $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(PROVENANCE) $(wildcard src/learn/*.cpp) src/core/crc32c.cpp)
 LEARN_SOAK_H := $(wildcard include/dd/know/*.hpp include/dd/learn/*.hpp)
 
 $(BUILD)/dd_learn_soak_tests: $(LEARN_SOAK_SRC) $(LEARN_SOAK_H) tests/learn_soak_test.cpp tests/learn_tmp.hpp

@@ -317,6 +317,18 @@ static void test_sink_and_catalogue() {
     const auto r5 = sink.write(clash, ok);
     chk(!r5.accepted && r5.verdict.rfind("exists", 0) == 0 && !fs::exists(skills / "learned" / "email-style"), "sink: nor shadows it from another folder");
 
+    // provenance: edit_file annotates a skill it touched, and the sink then hands it back
+    auto touched = draft;
+    touched.body += "\n5. measure the tokens\n";
+    touched.digest = "fedcba9876543210";
+    std::string annotated = slurp(f);
+    annotated.insert(annotated.find("origin: learned"), "edited_by: model_edit\n");
+    std::ofstream(f, std::ios::binary) << annotated;
+    const auto r7 = sink.write(touched, ok);
+    chk(!r7.accepted && r7.verdict.rfind("edited_by", 0) == 0, "sink: a model-edited learned skill is handed back, not overwritten");
+    chk(slurp(f).find("measure the tokens") == std::string::npos, "sink: the model's edit survives");
+    chk(slurp(f).find("edited_by: model_edit") != std::string::npos, "sink: the annotation stays");
+
     const auto r6 = sink.write(draft, learn::Verdict{false, "secret: x"});
     chk(!r6.accepted && r6.verdict == "secret: x", "sink: a refused draft is only a record");
 

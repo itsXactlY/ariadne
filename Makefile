@@ -64,6 +64,8 @@ MCP := src/tools/mcp_client.cpp $(URLSAFE)
 DELEG := src/tools/delegation_output_schema.cpp
 PATCH := src/tools/patch_parser.cpp
 FUZZY := src/tools/fuzzy_match.cpp
+APPLY := src/tools/patch_apply.cpp
+FS := src/tools/fs_tools.cpp $(PATH_SEC)
 TODO := src/tools/todo_tool.cpp
 TSEARCH := src/tools/tool_search.cpp
 WP := src/tools/website_policy.cpp
@@ -79,7 +81,7 @@ MS := src/agent/message_sanitization.cpp
 HOMEINIT := src/core/home_init.cpp src/core/default_config.cpp
 KNOW := src/know/types.cpp src/know/text.cpp src/know/bm25.cpp src/know/catalogue.cpp src/know/skills.cpp src/know/wiring.cpp src/know/signal.cpp src/know/working_set.cpp src/know/trigger.cpp src/know/deliver.cpp src/know/prompt.cpp src/know/memory_catalogue.cpp src/know/tool_catalogue.cpp src/know/router.cpp src/know/policy.cpp src/know/resolver.cpp src/know/tripwire.cpp src/know/scan.cpp
 # what the know module links against: the skill scanner, sha256, config, the home; and the pod's side (recall, maze, deck)
-LEARN := $(wildcard src/learn/*.cpp) src/core/crc32c.cpp
+LEARN := $(wildcard src/learn/*.cpp) src/core/crc32c.cpp $(PROVENANCE)   # the sink names its writer
 KNOWDEP := $(KNOW) $(SKILLS) $(SHA256) $(CONFIG) $(COREHOME)
 KNOWPOD := src/context/recall.cpp src/context/maze.cpp src/context/deck.cpp $(NET) $(MCP) $(TSEARCH) $(TOOLS)
 
@@ -114,8 +116,8 @@ $(BUILD)/dd_know_router_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/
 $(BUILD)/dd_know_rules_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT) $(wildcard include/dd/know/*.hpp) tests/know_rules_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT)) tests/know_rules_test.cpp -pthread -lcurl -o $(BUILD)/dd_know_rules_tests
 
-$(BUILD)/dd: $(LEARN) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/dd
+$(BUILD)/dd: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/dd
 
 $(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
@@ -125,8 +127,8 @@ install: | $(BUILD)/dd_tui
 	@echo "dd is at $(INSTALL_DIR)/dd_tui; that folder owns config.yaml and is the home"
 	@echo "dd's home is $(INSTALL_DIR) — not build/, which holds only what this Makefile built"
 
-$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
+$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
@@ -241,6 +243,14 @@ $(BUILD)/dd_patch_parser_tests: $(CORE) $(PATCH) tests/tools_patch_parser_test.c
 
 $(BUILD)/dd_fuzzy_match_tests: $(CORE) $(FUZZY) tests/tools_fuzzy_match_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(FUZZY) tests/tools_fuzzy_match_test.cpp -o $(BUILD)/dd_fuzzy_match_tests
+
+# The V4A application layer: the patch parser's operations applied to real files. fs_edit reads the
+# provenance stack, so that TU is in the link.
+$(BUILD)/dd_patch_apply_tests: $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp -o $(BUILD)/dd_patch_apply_tests
+
+$(BUILD)/dd_patch_apply_asan: $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp
+	$(CXX) $(CXXFLAGS) -pipe -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp -o $(BUILD)/dd_patch_apply_asan
 $(BUILD)/dd_todo_tests: $(CORE) $(TODO) tests/tools_todo_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(TODO) tests/tools_todo_test.cpp -o $(BUILD)/dd_todo_tests
 $(BUILD)/dd_tool_search_tests: $(CORE) $(TSEARCH) tests/tools_tool_search_test.cpp
@@ -368,6 +378,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_delegation_schema_tests \
   $(BUILD)/dd_patch_parser_tests \
   $(BUILD)/dd_fuzzy_match_tests \
+  $(BUILD)/dd_patch_apply_tests \
   $(BUILD)/dd_todo_tests \
   $(BUILD)/dd_tool_search_tests \
   $(BUILD)/dd_website_policy_tests \

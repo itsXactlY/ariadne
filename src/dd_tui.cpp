@@ -37,6 +37,8 @@
 #include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/patch_apply.hpp"
+#include "dd/tools/skill_provenance.hpp"
 #include "dd/tools/todo_tool.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/shell.hpp"
@@ -485,11 +487,28 @@ int main(int argc, char** argv) {
         else if (v == "full" || v == "verbose") scene.set_verbosity(Verbosity::Verbose);
     }
 
+    // A/B knob: names to leave out of the deck entirely (comma-separated). The prompt, the tape and
+    // the binary stay identical, so the delta measures the tool and not the build.
+    std::set<std::string> disabled_tools;
+    if (const char* v = std::getenv("DD_DISABLE_TOOLS"); v && *v) {
+        std::string tok;
+        for (const char* c = v; ; ++c) {
+            if (*c == ',' || *c == '\0') {
+                if (!tok.empty()) disabled_tools.insert(tok);
+                tok.clear();
+                if (*c == '\0') break;
+            } else if (*c != ' ') {
+                tok.push_back(*c);
+            }
+        }
+    }
+
     // ---- the registry; every handler reports its run to the scene ----
     dd::tools::ToolRegistry reg;
     dd::tools::TodoStore todos;              // one ledger per session, model-owned
     std::function<void()> publish_plan;      // bound below, once the agent exists
     auto add_tool = [&](ToolEntry e) {
+        if (disabled_tools.count(e.name)) return;   // never registered, so never deckable
         auto inner = std::move(e.handler);
         e.handler = [inner, name = e.name, &scene](const Json& a) {
             const uint64_t tok = scene.tool_begin(name);
@@ -525,6 +544,18 @@ int main(int argc, char** argv) {
     }
     { ToolEntry e; e.name = "write_file"; e.schema = dd::tools::fs_tool_schema({"path", "content"}, "Write text content to a file."); e.handler = h_write_file; add_tool(e); }
     { ToolEntry e; e.name = "list_dir"; e.schema = dd::tools::fs_tool_schema({"path"}, "List entries of a directory."); e.handler = h_list_dir; add_tool(e); }
+    {
+        ToolEntry e;
+        e.name = "edit_file";
+        e.schema = dd::tools::edit_tool_schema();
+        e.handler = [&home](const Json& a) {
+            dd::tools::ApplyOptions opt;
+            opt.skills_root = home.skills().string();   // a learned skill the model edits is annotated
+            const dd::tools::WriteOriginScope scope("model_edit");
+            return dd::tools::fs_edit(a, opt);
+        };
+        add_tool(e);
+    }
     {
         ToolEntry e;
         e.name = "run_terminal";
@@ -739,7 +770,9 @@ int main(int argc, char** argv) {
         add_tool(e);
     }
 
-    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list", "todo"});
+    std::set<std::string> core_set{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list", "todo"};
+    for (const auto& n : disabled_tools) core_set.erase(n);
+    deck.arrange(core_set);
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
     // the router learns what was worth offering (priors, terms for the cards that were found by other words); the overlay
     // must be in place before the first refresh, the service itself starts after the refreshers (it is stopped first)
