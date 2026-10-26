@@ -28,13 +28,13 @@ context. A per-tool budget plus a spill read verb would close this; verbose
 currently shows what the card kept, not what the tool produced.
 
 ### Mid-turn steering
-Input typed while a turn runs lands in `queued` (`src/dd_tui.cpp:1039`) and is
-sent in order when the turn ends (`:1360-1361`); only `/interrupt` acts during
+Input typed while a turn runs lands in `queued` (`src/dd_tui.cpp:1080`, pushed at `:1401-1402`) and is
+sent only by the idle loop (`:1499-1502`), gated on `!running`; only `/interrupt` acts during
 it. The loop never drains the queue between tool rounds, so steering cannot
 redirect work mid-turn.
 
 ### Sub-agents
-None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:343`) caps
+None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:101`, applied at `:352`) caps
 delegated calls the harness cannot execute: they are recorded, never run.
 
 ### Calibration
