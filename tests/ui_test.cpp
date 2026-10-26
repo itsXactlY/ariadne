@@ -201,6 +201,121 @@ int main() {
         chk(rest.find("cancelled") != std::string::npos && rest.find("turn 1") != std::string::npos, "turn end resolves");
     }
 
+    // ---- verbosity: quiet folds a turn to a glance, verbose opens what it carried ----
+    {
+        const std::string long_cmd = std::string(120, 'x');
+        auto card = [&](Verbosity v) {
+            Scene s{Theme{}};
+            s.set_verbosity(v);
+            s.turn_begin();
+            s.tool_call("c1", "run_terminal", "{\"cmd\":\"ls -la " + long_cmd + "\"}");
+            s.tool_result("c1", "{\"exit\":0,\"stdout\":\"" + std::string(4000, 'y') + "\"}");
+            return lines_of(s.drain_inline(80, false, false));
+        };
+        const auto quiet = card(Verbosity::Minimal);
+        const auto normal = card(Verbosity::Normal);
+        const auto loud = card(Verbosity::Verbose);
+        chk(quiet.size() < normal.size() && normal.size() < loud.size(), "verbosity grows a tool card");
+        auto xs = [](const std::vector<std::string>& ls) {
+            size_t n = 0;
+            for (const auto& l : ls)
+                for (char ch : l) if (ch == 'x') ++n;
+            return n;
+        };
+        chk(xs(quiet) < xs(normal) && xs(normal) < xs(loud), "arguments widen with verbosity");
+        chk(xs(loud) >= long_cmd.size(), "verbose carries the whole argument value");
+        chk(loud.size() > normal.size() + 12, "verbose opens the result past the normal cap");
+
+        auto reason = [&](Verbosity v) {
+            Scene s{Theme{}};
+            s.set_verbosity(v);
+            s.turn_begin();
+            s.llm_begin();
+            for (int i = 0; i < 30; ++i) s.llm_reasoning("line " + std::to_string(i) + "\n");
+            s.llm_end(LlmStats{});
+            return lines_of(s.drain_inline(80, false, false));
+        };
+        chk(reason(Verbosity::Minimal).size() == 2, "quiet folds reasoning to its header row");
+        chk(reason(Verbosity::Verbose).size() == 30 + 3, "verbose shows every reasoning line");
+        chk(reason(Verbosity::Normal).size() == Scene::kReasonRows + 3, "normal keeps the tail cap");
+    }
+    {   // the accounting a verbose run asks for is not on the status row otherwise
+        auto status_has = [&](Verbosity v) {
+            Scene s{Theme{}};
+            s.set_verbosity(v);
+            Info info;
+            info.model = "m";
+            info.endpoint = "http://127.0.0.1:9/v1";
+            info.tools = 4;
+            info.max_turns = 10;
+            s.set_info(info);
+            s.turn_begin();
+            s.llm_begin();
+            s.llm_content("hi");
+            LlmStats st;
+            st.completion_tokens = 400;
+            st.cached_tokens = 2000;
+            s.llm_end(st);
+            s.turn_end();
+            s.present(120, 30, true);
+            bool acct = false, mode = false;
+            for (int y = 0; y < 30; ++y) {
+                const std::string t = s.row_text(y);
+                if (t.find("calls ") != std::string::npos && t.find("out ") != std::string::npos && t.find("cache ") != std::string::npos) acct = true;
+                if (t.find("mode ") != std::string::npos) mode = true;
+            }
+            return acct && mode;
+        };
+        chk(status_has(Verbosity::Verbose), "verbose status carries calls, out, cache, mode");
+        chk(!status_has(Verbosity::Normal), "normal status carries no accounting");
+    }
+    {   // the todo ledger: a sidebar panel in every mode, a count on the status row in verbose
+        auto with_plan = [&](Verbosity v) {
+            Scene s{Theme{}};
+            s.set_verbosity(v);
+            Info info;
+            info.model = "m";
+            info.endpoint = "http://127.0.0.1:9/v1";
+            info.tools = 4;
+            info.max_turns = 10;
+            s.set_info(info);
+            PlanView p;
+            p.items.emplace_back(PlanView::Done, "build the panel");
+            p.items.emplace_back(PlanView::Active, "wire the ephemeral prompt");
+            p.open = 1;
+            p.total = 2;
+            s.set_plan(p);
+            s.turn_begin();
+            s.llm_begin();
+            s.llm_content("hi");
+            s.llm_end(LlmStats{});
+            s.turn_end();
+            s.present(120, 30, true);
+            bool panel = false, active = false, status = false;
+            for (int y = 0; y < 30; ++y) {
+                const std::string t = s.row_text(y);
+                if (t.find("plan · 1 open of 2") != std::string::npos) panel = true;
+                if (t.find("wire the ephemeral prompt") != std::string::npos && t.find("▶") != std::string::npos) active = true;
+                if (t.find("plan 1/2") != std::string::npos) status = true;
+            }
+            return std::make_tuple(panel, active, status);
+        };
+        auto [panel, active, status] = with_plan(Verbosity::Verbose);
+        chk(panel, "the plan panel shows in verbose");
+        chk(active, "the active item carries its marker");
+        chk(status, "verbose status carries the plan count");
+        auto [p2, a2, s2] = with_plan(Verbosity::Normal);
+        chk(p2 && a2, "the plan panel shows in normal too");
+        chk(!s2, "normal status carries no plan count");
+        Scene s{Theme{}};
+        s.set_verbosity(Verbosity::Verbose);
+        s.present(120, 30, true);
+        bool gone = true;
+        for (int y = 0; y < 30; ++y)
+            if (s.row_text(y).find("plan ·") != std::string::npos) gone = false;
+        chk(gone, "an empty ledger draws no panel");
+    }
+
     // ---- memory card: fixed columns, one row per memory, the skill last ----
     {
         Scene s{Theme{}};

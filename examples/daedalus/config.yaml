@@ -19,13 +19,15 @@ model:
 
 agent:
   max_turns: 50            # LLM calls per turn; keep it low on a slow local model
-  system_prompt: ""        # appended after the built-in tool preamble
+  system_prompt: ""        # the operator's own voice; the composer adds role, workflow, retrieval
   reasoning_effort: none   # off | low | medium | high | xhigh | max | ultra (only what the template has)
   thinking_budget: 1024    # max thinking tokens per call on a local server; 0 = no cap
+  contract: true           # the short workflow contract: plan first, verify by running, close the turn
 
 display:
   skin: neural             # ./skins/<skin>.yaml if present, else the built-in neural palette
   show_reasoning: true     # false starts with reasoning cards folded to one line
+  verbose: normal          # off | normal | full — /verbose at runtime, DD_VERBOSE for the environment
 
 # The context tape: what each request carries.
 context:

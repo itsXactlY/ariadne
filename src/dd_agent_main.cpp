@@ -15,6 +15,7 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
+#include "dd/tools/todo_tool.hpp"
 #include "dd/tools/fs_tools.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
@@ -178,6 +179,34 @@ int main(int argc, char** argv) {
     agent.quiet_mode = true;
     agent.registry = &reg;
     agent.llm = &llm;
+
+    // the same ledger the TUI keeps: the plan rides the ephemeral prompt, not the tape
+    dd::tools::TodoStore todos;
+    {
+        auto j = [](Json v) { return std::make_shared<Json>(std::move(v)); };
+        ToolEntry e;
+        e.name = "todo";
+        Json item = json_obj({{"id", j(json_obj({{"type", j(json_str("string"))}}))},
+                              {"content", j(json_obj({{"type", j(json_str("string"))}}))},
+                              {"status", j(json_obj({{"type", j(json_str("string"))},
+                                                     {"enum", j(json_arr({j(json_str("pending")), j(json_str("in_progress")), j(json_str("completed")), j(json_str("cancelled"))}))}}))}});
+        Json props = json_obj({{"todos", j(json_obj({{"type", j(json_str("array"))}, {"items", j(std::move(item))}}))},
+                               {"merge", j(json_obj({{"type", j(json_str("boolean"))}}))}});
+        e.schema = json_obj({{"description", j(json_str("Work ledger for a multi-step task. Write the plan before acting, "
+                                                        "update statuses as you go; omit todos to read the list back. "
+                                                        "merge=true updates only the items named."))},
+                             {"parameters", j(json_obj({{"type", j(json_str("object"))}, {"properties", j(std::move(props))}}))}});
+        e.handler = [&todos, &agent](const Json& a) {
+            const Json* t = json_get(a, "todos");
+            const Json* m = json_get(a, "merge");
+            const bool merge = m && m->type == Json::Bool && m->b;
+            const std::string r = dd::tools::todo_tool(t ? *t : Json{}, merge, todos);
+            const auto inj = todos.format_for_injection();
+            agent.ephemeral_system_prompt = inj ? *inj : "";
+            return r;
+        };
+        reg.register_tool(e);
+    }
 
     std::string user_message;
     if (!msg_words.empty()) {

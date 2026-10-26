@@ -20,7 +20,7 @@ CXXFLAGS += $(MOLD_FLAG)
 $(shell mkdir -p $(BUILD))
 CORE := src/core/path.cpp src/core/yaml.cpp src/core/json.cpp src/core/message.cpp
 SKILLS := src/skills/scanner.cpp src/skills/registry.cpp
-TOOLS := src/tools/registry.cpp
+TOOLS := src/tools/registry.cpp src/tools/todo_tool.cpp
 TOOLRUN := src/tools/shell.cpp src/tools/fs_tools.cpp src/tools/path_security.cpp
 AGENT := src/agent/agent.cpp src/agent/chat_stream.cpp
 CONFIG := src/core/config.cpp

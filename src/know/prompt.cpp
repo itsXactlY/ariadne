@@ -43,6 +43,19 @@ std::string PromptComposer::retrieval_contract(const Contract& c) {
     return s;
 }
 
+std::string PromptComposer::workflow_contract(const Contract& c) {
+    std::string s =
+        "## Workflow\n"
+        "- A task with more than one step gets a plan first: a few lines saying what will change, then work it in order.\n"
+        "- Facts come from running, not guessing. Read the file, run the command, look at what it actually returned.\n"
+        "- A change is not done when it compiles; it is done when the thing that changed was run and its result was looked at.\n"
+        "- Fix the cause. Suppressing an error or special-casing an input to make a symptom disappear is not a fix.\n"
+        "- Independent steps run together; steps that depend on an earlier result run in order.\n"
+        "- Skills are guidelines you read and adapt, not a ritual to follow exactly.\n";
+    if (c.learn) s += "- Close a turn by recording what is true now: the decision, the path, the number — not a retelling of the work.\n";
+    return s;
+}
+
 std::string PromptComposer::catalogue_map(const std::vector<std::string>& lines) {
     std::string body;
     for (const auto& l : lines)

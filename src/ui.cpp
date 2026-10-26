@@ -157,7 +157,7 @@ uint32_t tri(uint32_t a, uint32_t b, uint32_t c, double t) {
 }
 
 // `key="v"  n=3` from a JSON object; anything else as given.
-std::string flat_args(const std::string& raw) {
+std::string flat_args(const std::string& raw, int val_w) {
     bool repaired = false;
     const core::Json j = core::json_parse_args(raw, repaired);
     if (j.type != core::Json::Obj) return raw;  // not an object at all: show it as given
@@ -165,8 +165,8 @@ std::string flat_args(const std::string& raw) {
     for (const auto& [k, v] : j.obj) {
         if (!o.empty()) o += "  ";
         o += k + "=";
-        if (v && v->type == core::Json::Str) o += "\"" + clip(v->str, 60) + "\"";
-        else if (v) o += clip(core::json_dump(*v), 60);
+        if (v && v->type == core::Json::Str) o += "\"" + clip(v->str, val_w) + "\"";
+        else if (v) o += clip(core::json_dump(*v), val_w);
     }
     if (o.empty()) o = "{}";
     if (repaired) o += "  …cut";  // the model stopped mid-value: no half-values shown
@@ -688,6 +688,13 @@ void Scene::set_tape(const TapeView& t) {
     post(std::move(e));
 }
 
+void Scene::set_plan(const PlanView& p) {
+    Event e;
+    e.ev = Ev::Plan;
+    e.plan = std::make_shared<const PlanView>(p);
+    post(std::move(e));
+}
+
 void Scene::llm_end(const LlmStats& s) {
     Event e;
     e.ev = Ev::LlmEnd;
@@ -804,6 +811,9 @@ void Scene::apply(Event& e) {
         break;
     case Ev::Tape:
         if (e.tape) tape_ = *e.tape;
+        break;
+    case Ev::Plan:
+        if (e.plan) plan_ = *e.plan;
         break;
     case Ev::Recall:
         if (e.ok) {
@@ -951,7 +961,7 @@ bool Scene::stale(size_t i, int w) const {
     if (c.tw != static_cast<int>(e.text.size())) return true;   // streamed text grew
     const int spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
     const int view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
-    return c.w != w || c.ver != e.ver || c.spin != spin || c.view != view;
+    return c.w != w || c.ver != e.ver || c.spin != spin || c.view != view || c.verb != static_cast<int>(verb_);
 }
 
 const Canvas& Scene::block(size_t i, int w) {
@@ -964,6 +974,7 @@ const Canvas& Scene::block(size_t i, int w) {
         c.ver = e.ver;
         c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
         c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
+        c.verb = static_cast<int>(verb_);
     }
     return c.block;
 }
@@ -971,7 +982,7 @@ const Canvas& Scene::block(size_t i, int w) {
 Canvas Scene::render(const Entry& e, int w) const {
     switch (e.kind) {
     case Kind::User: {
-        const auto lines = wrap(e.text, w - 3, 10);
+        const auto lines = wrap(e.text, w - 3, verb_ == Verbosity::Minimal ? 4 : verb_ == Verbosity::Verbose ? 30 : 10);
         Canvas c(w, static_cast<int>(lines.size()) + 2);
         const Style bar{th_.gold};
         c.put(0, 0, U'▍', bar);
@@ -986,7 +997,7 @@ Canvas Scene::render(const Entry& e, int w) const {
     case Kind::Say: {
         // dynamic height: the box grows with the stream as it writes (capped),
         // then shrinks to the wrapped answer once resolved.
-        const int cap = e.resolved ? 0 : 24;
+        const int cap = e.resolved ? 0 : (verb_ == Verbosity::Minimal ? 8 : verb_ == Verbosity::Verbose ? 64 : 24);
         const auto lines = wrap(e.text, w - 4, cap);
         const int h = static_cast<int>(lines.size()) + 3;
         Canvas c(w, h);
@@ -1002,18 +1013,22 @@ Canvas Scene::render(const Entry& e, int w) const {
         return c;
     }
     case Kind::Tool: {
-        // dynamic height: args up to 6 rows, result preview up to 12.
-        const int aw = std::clamp(w - 4, 40, 96);
+        // dynamic height: arguments and result previews are capped by verbosity:
+        // quiet shows a glance, verbose opens what the call actually carried.
+        const int aw = std::clamp(w - 4, 40, verb_ == Verbosity::Verbose ? 112 : 96);
         // flat_args first (it repairs a cut-off JSON blob into key="v" form),
         // then wrap: long args get their rows instead of one clipped line.
-        auto alines = wrap(flat_args(e.text), aw, 6);
+        const int arg_rows = verb_ == Verbosity::Minimal ? 2 : verb_ == Verbosity::Verbose ? 20 : 6;
+        const int arg_w = verb_ == Verbosity::Verbose ? 240 : verb_ == Verbosity::Minimal ? 40 : 60;
+        auto alines = wrap(flat_args(e.text, arg_w), aw, arg_rows);
         while (alines.size() > 1 && alines.front().empty()) alines.erase(alines.begin());
         bool err = false;
         std::vector<std::string> rlines;
         if (e.resolved) {
             const auto [e_, body] = preview(e.result);
             err = e_;
-            rlines = wrap(body.empty() ? std::string("(empty)") : body, w - 6, 12);
+            const int res_rows = verb_ == Verbosity::Minimal ? 3 : verb_ == Verbosity::Verbose ? 48 : 12;
+            rlines = wrap(body.empty() ? std::string("(empty)") : body, w - 6, res_rows);
         }
         const int h = static_cast<int>(alines.size()) + (e.resolved ? static_cast<int>(rlines.size()) + 1 : 1) + 3;
         Canvas c(w, h);
@@ -1058,14 +1073,14 @@ Canvas Scene::render(const Entry& e, int w) const {
         return c;
     }
     case Kind::Note: {
-        const auto lines = wrap(e.text, w - 2, 16);
+        const auto lines = wrap(e.text, w - 2, verb_ == Verbosity::Minimal ? 1 : verb_ == Verbosity::Verbose ? 40 : 16);
         Canvas c(w, static_cast<int>(lines.size()));
         c.put(0, 0, U'·', Style{th_.accent});
         for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k), lines[k], Style{th_.muted});
         return c;
     }
     case Kind::Error: {
-        const auto lines = wrap(e.text, w - 4, 8);
+        const auto lines = wrap(e.text, w - 4, verb_ == Verbosity::Minimal ? 3 : verb_ == Verbosity::Verbose ? 32 : 8);
         const int h = static_cast<int>(lines.size()) + 3;
         Canvas c(w, h);
         const Style b{th_.error};
@@ -1081,7 +1096,7 @@ Canvas Scene::render(const Entry& e, int w) const {
         std::string meta = std::to_string(e.n) + " tok";
         if (e.ms > 0) meta += " · " + fmt_ms(e.ms);
         const Style dim{th_.dim}, txt{th_.muted, kNone, kItalic};
-        if (view_ == ReasonView::Hide) {
+        if (view_ == ReasonView::Hide || verb_ == Verbosity::Minimal) {
             Canvas c(w, 2);
             const int n = c.text(0, 0, head, Style{th_.accent, kNone, kItalic});
             c.text(n + 1, 0, "· " + meta + " · /reasoning show", txt);
@@ -1093,7 +1108,7 @@ Canvas Scene::render(const Entry& e, int w) const {
         while (lines.size() > 1 && lines.front().empty()) lines.erase(lines.begin());
         while (lines.size() > 1 && lines.back().empty()) lines.pop_back();
         // how much the cap will hide has to be read off BEFORE the cut
-        const size_t first = (view_ == ReasonView::Full || static_cast<int>(lines.size()) <= kReasonRows)
+        const size_t first = (view_ == ReasonView::Full || verb_ == Verbosity::Verbose || static_cast<int>(lines.size()) <= kReasonRows)
             ? 0
             : lines.size() - static_cast<size_t>(kReasonRows);
         if (first > 0) lines.erase(lines.begin(), lines.begin() + first);
@@ -1120,7 +1135,7 @@ Canvas Scene::render(const Entry& e, int w) const {
     }
     case Kind::Memory: {
         // one row per memory the turn carries: what the model reads, by id
-        static constexpr int kRows = 12;
+        const int kRows = verb_ == Verbosity::Minimal ? 6 : verb_ == Verbosity::Verbose ? 24 : 12;
         const RecallView empty;
         const RecallView& v = e.recall ? *e.recall : empty;
         const int extra = v.skill.empty() ? 0 : 1;
@@ -1269,9 +1284,19 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         f.text(vx, ry, clip(v, vw), vs);
     };
 
-    const bool engine = h >= 20;
-    const bool tape = tape_.on && h >= 28;
-    const int sh = 8, eh = engine ? 7 : 0, tph = tape ? 7 : 0, th = h - sh - eh - tph;
+    // verbose lowers the height gates so token, cache and epoch readouts survive
+    // a short terminal; each panel needs its own box plus a border.
+    const bool verbose = verb_ == Verbosity::Verbose;
+    const int sh = 8;
+    // a plan takes rows the moment one exists; verbose opens it wider
+    const int pshown = plan_.items.empty() ? 0 : std::min<int>(static_cast<int>(plan_.items.size()), verbose ? 12 : 6);
+    const int ph = plan_.items.empty() ? 0 : pshown + 2;
+    const int rest = h - sh - ph;
+    const bool engine = rest >= (verbose ? 15 : 20);
+    const int eh = engine ? 7 : 0;
+    const bool tape = tape_.on && rest - eh >= (verbose ? 8 : 21);
+    const int tph = tape ? 7 : 0;
+    const int th = rest - eh - tph;
 
     f.box(x, y, w, sh, b, true);
     f.title(x + 2, y, "session", head, b);
@@ -1286,8 +1311,26 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     row(y + 5, "session", std::to_string(turns_) + " turns · " + std::to_string(calls_total_) + " calls", val);
     row(y + 6, "work", fmt_ms(work_ms()), busy_ ? Style{th_.hot, kNone, kBold} : val);
 
+    if (ph > 0) {   // the todo ledger: what the model said it would do, and where it stands
+        const int py = y + sh;
+        f.box(x, py, w, ph, b, true);
+        f.title(x + 2, py, "plan · " + std::to_string(plan_.open) + " open of " + std::to_string(plan_.total), head, b);
+        if (static_cast<int>(plan_.items.size()) > pshown)
+            f.title_right(x + w - 2, py, "↑ " + std::to_string(static_cast<int>(plan_.items.size()) - pshown), mut, b);
+        const size_t first = plan_.items.size() - static_cast<size_t>(pshown);   // newest last, oldest folded away
+        int ry = py + 1;
+        for (size_t i = first; i < plan_.items.size(); ++i) {
+            const auto [mk, text] = plan_.items[i];
+            const char32_t g = mk == PlanView::Active ? U'▶' : mk == PlanView::Done ? U'✓' : mk == PlanView::Dropped ? U'✗' : U'○';
+            const Style gs = mk == PlanView::Active ? Style{th_.hot, kNone, kBold} : mk == PlanView::Done ? Style{th_.ok}
+                           : mk == PlanView::Dropped ? Style{th_.dim} : mut;
+            f.put(x + 2, ry, g, gs);
+            f.text(x + 4, ry++, clip(text, w - 6), mk == PlanView::Active ? val : mut);
+        }
+    }
+
     if (engine) {
-        const int ey = y + sh;
+        const int ey = y + sh + ph;
         f.box(x, ey, w, eh, b, true);
         f.title(x + 2, ey, "engine", head, b);
         if (calls_total_ == 0) {
@@ -1328,7 +1371,7 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     }
 
     if (tape) {
-        const int py = y + sh + eh;
+        const int py = y + sh + ph + eh;
         f.box(x, py, w, tph, b, true);
         f.title(x + 2, py, "tape · epoch " + std::to_string(tape_.epoch), head, b);
         if (!tape_.prep.empty())
@@ -1374,7 +1417,7 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         if (it->kind == Kind::Tool) ++want;
     if (want == 0) want = std::max<int>(1, static_cast<int>(info_.sources.size()) + 1);
     const int th2 = std::min(th, want + 2);
-    const int ty = y + sh + eh + tph;
+    const int ty = y + sh + ph + eh + tph;
     f.box(x, ty, w, th2, b, true);
     f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
     int ry = ty + 1;
@@ -1496,6 +1539,15 @@ void Scene::paint_status(Frame& f, int y, int w) const {
         segs.push_back({"reuse ", std::to_string(static_cast<int>(100.0 * static_cast<double>(tape_.reused) /
                                                                    static_cast<double>(tape_.prompt) + 0.5)) + "%"});
     segs.push_back({"", std::to_string(info_.tools) + " tools"});
+    if (verb_ == Verbosity::Verbose) {   // accounting only verbose asks for; a narrow row drops these first
+        segs.push_back({"calls ", std::to_string(calls_total_)});
+        if (last_.completion_tokens > 0) segs.push_back({"out ", fmt_tok(last_.completion_tokens)});
+        if (last_.cached_tokens > 0) segs.push_back({"cache ", fmt_tok(last_.cached_tokens)});
+        if (tape_.on) segs.push_back({"epoch ", std::to_string(tape_.epoch) + " · " + fmt_tok(tape_.tokens)});
+        if (tape_.on && tape_.deferred > 0) segs.push_back({"deferred ", std::to_string(tape_.deferred)});
+        if (plan_.total > 0) segs.push_back({"plan ", std::to_string(plan_.open) + "/" + std::to_string(plan_.total)});
+        segs.push_back({"mode ", "verbose"});
+    }
     const std::string brand = "⟁ daedalus-cpp";
 
     auto width_of = [&](size_t n, bool with_brand) {

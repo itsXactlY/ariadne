@@ -17,7 +17,7 @@
 //   build/dd_tui --help | --version
 //   env: DD_HOME, DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
-//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
+//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full (bare toggles) /plan /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
@@ -37,6 +37,7 @@
 #include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/todo_tool.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/shell.hpp"
 #include "dd/tools/registry.hpp"
@@ -316,7 +317,7 @@ void size(int& cols, int& rows) {
 
 }  // namespace term
 
-static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/context", "/rebase",
+static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/verbose", "/plan", "/context", "/rebase",
                                         "/resume", "/clear", "/new", "/learn", "/interrupt", "/quit",
                                         "/mcp"};   // every live MCP server adds its own "/<server>" at boot
 
@@ -346,15 +347,19 @@ static std::vector<std::string> command_matches(const std::string& typed) {
     return m;
 }
 
-// "/effort x" / "/reasoning x": the arguments that fit the prefix x.
+// "/effort x" / "/reasoning x" / "/verbose x": the arguments that fit the prefix x.
 static std::vector<std::string> arg_matches(const std::string& typed, const std::vector<std::string>& efforts) {
     std::vector<std::string> m;
     const size_t sp = typed.find(' ');
     if (sp == std::string::npos || typed.find(' ', sp + 1) != std::string::npos) return m;
     const std::string cmd = typed.substr(0, sp), pre = typed.substr(sp + 1);
-    if (cmd != "/effort" && cmd != "/reasoning") return m;
-    std::vector<std::string> all = efforts;
-    if (cmd == "/reasoning") all.insert(all.end(), {"show", "full", "hide"});
+    std::vector<std::string> all;
+    if (cmd == "/verbose") all = {"quiet", "normal", "full"};
+    else if (cmd == "/effort") all = efforts;
+    else if (cmd == "/reasoning") {
+        all = efforts;
+        all.insert(all.end(), {"show", "tail", "full", "hide"});
+    } else return m;
     for (const auto& a : all)
         if (a.rfind(pre, 0) == 0) m.push_back(a);
     return m;
@@ -472,9 +477,18 @@ int main(int argc, char** argv) {
 
     const std::string skin = cfg.get_string("display.skin");
     dd::ui::Scene scene(dd::ui::Theme::load((home.skins() / ((skin.empty() ? "neural" : skin) + ".yaml")).string()));
+    {   // verbosity: config, then DD_VERBOSE, then /verbose at runtime
+        using dd::ui::Verbosity;
+        std::string v = cfg.has("display.verbose") ? cfg.get_string("display.verbose") : "normal";
+        if (const char* e = std::getenv("DD_VERBOSE")) v = e;
+        if (v == "off" || v == "quiet" || v == "minimal") scene.set_verbosity(Verbosity::Minimal);
+        else if (v == "full" || v == "verbose") scene.set_verbosity(Verbosity::Verbose);
+    }
 
     // ---- the registry; every handler reports its run to the scene ----
     dd::tools::ToolRegistry reg;
+    dd::tools::TodoStore todos;              // one ledger per session, model-owned
+    std::function<void()> publish_plan;      // bound below, once the agent exists
     auto add_tool = [&](ToolEntry e) {
         auto inner = std::move(e.handler);
         e.handler = [inner, name = e.name, &scene](const Json& a) {
@@ -697,8 +711,35 @@ int main(int argc, char** argv) {
         e.handler = [&resolver](const Json& a) { return resolver.skills_list(a); };
         add_tool(e);
     }
+    {
+        ToolEntry e;
+        e.name = "todo";
+        const std::string desc = "Work ledger for a multi-step task. Write the plan before acting, update statuses as "
+                                 "you go, keep one item active at a time. Provide `todos` to write the whole list (list "
+                                 "position is priority order); omit `todos` to read it back. `merge: true` updates only "
+                                 "the items named and keeps the rest. The list is re-attached to every model call until "
+                                 "it is empty.";
+        Json item = json_obj({{"id", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("short identifier you choose; keep it stable across merges"))}}))},
+                              {"content", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("the step, one line"))}}))},
+                              {"status", jsp(json_obj({{"type", jsp(json_str("string"))},
+                                                       {"enum", jsp(json_arr({jsp(json_str("pending")), jsp(json_str("in_progress")), jsp(json_str("completed")), jsp(json_str("cancelled"))}))}}))}});
+        Json props = json_obj({{"todos", jsp(json_obj({{"type", jsp(json_str("array"))}, {"items", jsp(std::move(item))},
+                                                       {"description", jsp(json_str("the whole list in priority order; omit to read"))}}))},
+                               {"merge", jsp(json_obj({{"type", jsp(json_str("boolean"))}, {"description", jsp(json_str("true: update the named items, keep the rest"))}}))}});
+        e.schema = json_obj({{"description", jsp(json_str(desc))},
+                             {"parameters", jsp(json_obj({{"type", jsp(json_str("object"))}, {"properties", jsp(std::move(props))}}))}});
+        e.handler = [&todos, &publish_plan](const Json& a) {
+            const Json* t = json_get(a, "todos");
+            const Json* m = json_get(a, "merge");
+            const bool merge = m && m->type == Json::Bool && m->b;
+            const std::string r = dd::tools::todo_tool(t ? *t : Json{}, merge, todos);
+            if (publish_plan) publish_plan();
+            return r;
+        };
+        add_tool(e);
+    }
 
-    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list"});
+    deck.arrange({"read_file", "write_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list", "todo"});
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck
     if (memory_cat) memory_cat->preload();   // the cache is local too: searchable before any pod call
     // the router learns what was worth offering (priors, terms for the skills that were found by other words); the overlay
@@ -786,6 +827,9 @@ int main(int argc, char** argv) {
         dd::know::PromptComposer::Contract contract;
         contract.memory = maze->configured();
         contract.skills = skill_cat != nullptr;
+        contract.learn = learner != nullptr;
+        if (!cfg.has("agent.contract") || cfg.get_bool("agent.contract"))
+            composer.section(dd::know::PromptComposer::workflow_contract(contract));
         composer.section(dd::know::PromptComposer::retrieval_contract(contract));
         composer.section(dd::know::PromptComposer::catalogue_map(router.map()));
         if (std::ifstream bf(home.root / "brief.md", std::ios::binary); bf) {   // the operator's own standing notes, if there are any
@@ -880,6 +924,25 @@ int main(int argc, char** argv) {
     agent.llm = &llm;
     agent.context = &engine;
     agent.gate = &gate;
+
+    // The plan reaches the model as an ephemeral prompt, never through the tape: the
+    // cached prefix stays byte-identical, only the tail moves. An empty ledger empties
+    // the prompt, so the weight disappears the moment the work is done.
+    publish_plan = [&todos, &scene, &agent] {
+        const auto inj = todos.format_for_injection();
+        agent.ephemeral_system_prompt = inj ? *inj : "";
+        dd::ui::PlanView p;
+        for (const auto& it : todos.items) {
+            dd::ui::PlanView::Marker m = dd::ui::PlanView::Pending;
+            if (it.status == "in_progress") m = dd::ui::PlanView::Active;
+            else if (it.status == "completed") m = dd::ui::PlanView::Done;
+            else if (it.status == "cancelled") m = dd::ui::PlanView::Dropped;
+            if (m == dd::ui::PlanView::Pending || m == dd::ui::PlanView::Active) ++p.open;
+            ++p.total;
+            p.items.emplace_back(m, it.content);
+        }
+        scene.set_plan(p);
+    };
 
     const int tool_count = static_cast<int>(reg.get_all_tool_names().size());
     {
@@ -1014,6 +1077,7 @@ int main(int argc, char** argv) {
         scene.turn_begin();
         scene.scroll_end();
         agent.interrupt_requested = false;
+        publish_plan();   // fresh ledger for this turn; clears a stale one
         running = true;
         worker = std::thread([&, prompt] {
             try {
@@ -1129,8 +1193,8 @@ int main(int argc, char** argv) {
                 quit = true;
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
-                           "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /context  /rebase  "
-                           "/resume  /tools  /turns N  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
+                           "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /verbose quiet|normal|full  /context  /rebase  "
+                           "/resume  /tools  /turns N  /plan  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
             } else if (cmd == "/learn") {
                 if (learn_pin) run_cmd("learn", [&] {
                     learn_pin();
@@ -1141,6 +1205,29 @@ int main(int argc, char** argv) {
                 std::string all;
                 for (const auto& n : reg.get_all_tool_names()) all += (all.empty() ? "" : "  ") + n;
                 scene.note(std::to_string(tool_count) + " tools: " + all);
+            } else if (cmd == "/verbose") {
+                const std::string arg = trim_ws(p.substr(cmd.size()));
+                using dd::ui::Verbosity;
+                Verbosity v = Verbosity::Normal;
+                if (arg == "off" || arg == "quiet" || arg == "minimal") v = Verbosity::Minimal;
+                else if (arg == "full" || arg == "verbose") v = Verbosity::Verbose;
+                else if (arg.empty()) v = scene.verbosity() == Verbosity::Verbose ? Verbosity::Normal : Verbosity::Verbose;
+                scene.set_verbosity(v);
+                scene.note(v == Verbosity::Minimal ? "verbose off — cards fold to a glance"
+                           : v == Verbosity::Verbose ? "verbose on — full arguments, results, reasoning, accounting"
+                           : "verbose normal");
+            } else if (cmd == "/plan") {
+                if (!todos.has_items()) {
+                    scene.note("no plan yet: the model writes one with the todo tool");
+                } else {
+                    std::string out;
+                    for (const auto& it : todos.items) {
+                        const char* g = it.status == "in_progress" ? "▶ " : it.status == "completed" ? "✓ "
+                                        : it.status == "cancelled" ? "✗ " : "○ ";
+                        out += (out.empty() ? "" : "\n") + std::string(g) + it.content;
+                    }
+                    scene.note(out);
+                }
             } else if (cmd == "/effort" || cmd == "/reasoning") {
                 const std::string arg = trim_ws(p.substr(cmd.size()));
                 using dd::ui::ReasonView;
@@ -1159,6 +1246,8 @@ int main(int argc, char** argv) {
                 } else {
                     engine.reset();
                     scene.clear();
+                    todos.items.clear();
+                    publish_plan();   // a new session starts with no plan
                     scene.note("new session " + engine.session().id() + " · the maze still has the last one");
                 }
             } else if (cmd == "/context") {
@@ -1377,7 +1466,7 @@ int main(int argc, char** argv) {
         if (const std::string typed = dd::ui::to_utf8(ed.buf); is_command(typed) && typed.find(' ') == std::string::npos) {
             for (const auto& m : command_matches(typed)) hint += (hint.empty() ? "" : "  ") + m;
             if (hint.empty()) hint = "no such command";
-        } else if (typed.rfind("/effort ", 0) == 0 || typed.rfind("/reasoning ", 0) == 0) {
+        } else if (typed.rfind("/effort ", 0) == 0 || typed.rfind("/reasoning ", 0) == 0 || typed.rfind("/verbose ", 0) == 0) {
             for (const auto& m : arg_matches(typed, efforts)) hint += (hint.empty() ? "" : "  ") + m;
             if (hint.empty()) hint = efforts.empty() ? "this model has no reasoning switch" : "not offered by this model";
         }

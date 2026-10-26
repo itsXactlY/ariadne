@@ -972,6 +972,15 @@ static void test_prompt() {
     c.skills = false;
     chk(!has(PromptComposer::retrieval_contract(c), "skill://"), "prompt: no skill catalogue, no skill://");
 
+    c.learn = false;
+    const std::string wf = PromptComposer::workflow_contract(c);
+    chk(has(wf, "## Workflow") && has(wf, "a plan first") && has(wf, "was run and its result was looked at"), "prompt: the workflow plans first and verifies by running");
+    chk(has(wf, "Fix the cause") && has(wf, "guidelines you read and adapt"), "prompt: fix the cause, skills are guidelines not a ritual");
+    chk(!has(wf, "Close a turn"), "prompt: no closing line when learning is off");
+    c.learn = true;
+    chk(has(PromptComposer::workflow_contract(c), "Close a turn"), "prompt: learning adds the close-the-turn line");
+    chk(wf.size() < 1500, "prompt: the workflow contract is short (" + std::to_string(wf.size()) + " chars)");
+
     chk(PromptComposer::instructions_mode("", true) == PromptComposer::Instructions::Harness, "prompt: the maze's own protocol is replaced by default");
     chk(PromptComposer::instructions_mode("", false) == PromptComposer::Instructions::Verbatim, "prompt: another server's notes stay");
     chk(PromptComposer::instructions_mode("verbatim", true) == PromptComposer::Instructions::Verbatim && PromptComposer::instructions_mode("OFF", false) == PromptComposer::Instructions::Off,

@@ -455,6 +455,77 @@ static void test_max_iterations_tool_summary() {
     chk(llm.calls == 3, "max iterations: two loop calls and one summary call");
 }
 
+// (g) the ephemeral prompt (the plan) reaches every call exactly once, behind the tape's
+// payload tail with a context engine and behind the standing system prompt without one.
+static int count_ephemeral(const std::vector<core::Message>& m, const std::string& text) {
+    int n = 0;
+    for (const auto& x : m)
+        if (x.role == "system" && x.content == text) ++n;
+    return n;
+}
+
+static void test_ephemeral_prompt_placement() {
+    // no context engine: the standing system prompt keeps slot 0, the plan sits behind it
+    {
+        Script script;
+        script.always_tools = false;
+        agent::Agent agent;
+        agent.system_prompt = "base prompt";
+        agent.ephemeral_system_prompt = "ACTIVE PLAN";
+        agent.max_iterations = 2;
+        tools::ToolRegistry reg;
+        add_tool(reg, "echo", [](const Json&) { return std::string("ok"); });
+        agent.registry = &reg;
+        agent.llm = &script;
+        agent.run("go");
+        chk(script.requests.size() == 1, "one call for a plain answer");
+        const auto& r = script.requests[0];
+        chk(r.size() == 3 && r[0].role == "system" && r[0].content == "base prompt", "standing prompt keeps slot 0");
+        chk(r[1].role == "system" && r[1].content == "ACTIVE PLAN", "plan sits behind the standing prompt");
+        chk(r[2].role == "user", "the user message follows");
+        chk(count_ephemeral(r, "ACTIVE PLAN") == 1, "the plan appears exactly once");
+    }
+    // empty ephemeral: no extra system message at all
+    {
+        Script script;
+        agent::Agent agent;
+        agent.system_prompt = "base prompt";
+        agent.max_iterations = 2;
+        agent.llm = &script;
+        agent.run("go");
+        chk(script.requests[0].size() == 2, "no ephemeral, no extra message");
+    }
+    // context engine (a tape): payload wins, plan lands at the tail, never in the payload
+    {
+        Script script;
+        script.always_tools = true;   // one loop call plus the summary call
+        Spy spy;
+        agent::Agent agent;
+        agent.system_prompt = "base prompt";
+        agent.ephemeral_system_prompt = "ACTIVE PLAN";
+        agent.max_iterations = 1;
+        tools::ToolRegistry reg;
+        add_tool(reg, "echo", [](const Json&) { return std::string("ok"); });
+        agent.registry = &reg;
+        agent.llm = &script;
+        agent.context = &spy;
+        agent.run("go");
+        chk(script.calls == 2, "one loop call and the summary call");
+        for (const auto& r : script.requests)
+            chk(count_ephemeral(r, "ACTIVE PLAN") == 1, "the plan rides every call exactly once");
+        const auto& loop = script.requests[0];
+        chk(loop.size() == 2 && loop[0].role == "user" && loop[0].content == "go",
+            "payload wins over messages");
+        chk(loop[1].role == "system" && loop[1].content == "ACTIVE PLAN",
+            "under a tape the plan rides the payload tail");
+        const auto& summary = script.requests.back();
+        chk(summary.size() == 3 && summary[0].role == "user" &&
+            summary[1].role == "system" && summary[1].content == "ACTIVE PLAN" &&
+            summary[2].role == "user" && summary[2].content.find("maximum") != std::string::npos,
+            "the summary call rides the tape, the plan, then its own request");
+    }
+}
+
 int main() {
     test_interrupt_sequential();
     test_interrupt_parallel();
@@ -464,6 +535,7 @@ int main() {
     test_end_turn();
     test_budget();
     test_max_iterations_tool_summary();
+    test_ephemeral_prompt_placement();
     std::cout << g_pass << " passed, " << g_fail << " failed\n";
     if (g_fail == 0) std::cout << "all agent run tests passed\n";
     return g_fail ? 1 : 0;

@@ -209,6 +209,22 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
     (void)api_call_count;
 }
 
+namespace {
+// The ephemeral prompt rides every call exactly once and is never stored in `messages`:
+// under a tape it goes after the rendered payload, so the cached prefix stays
+// byte-identical and only the part after it changes; without a tape the payload is
+// rebuilt anyway, so it sits behind the standing system prompt.
+void attach_ephemeral(std::vector<core::Message>& payload, const std::string& prompt,
+                      bool under_tape, bool standing_system) {
+    if (prompt.empty()) return;
+    core::Message ep;
+    ep.role = "system";
+    ep.content = prompt;
+    if (under_tape) payload.push_back(ep);
+    else payload.insert(payload.begin() + (standing_system ? 1 : 0), ep);
+}
+}  // namespace
+
 // ---- handle_max_iterations (run_agent.py:9617) ----
 std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, int api_call_count) {
     (void)api_call_count;
@@ -222,11 +238,14 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
     if (!llm) return "I reached the iteration limit and couldn't generate a summary.";
     try {
         core::Json tools = core::json_arr();  // no tools on the summary call
-        std::vector<core::Message> sent = messages;
-        if (context) {   // the tape plus the request: everything before it is already cached
+        std::vector<core::Message> sent = messages;   // req is already in messages
+        if (context) {   // the tape plus the plan plus the request: everything before it is already cached
             sent = context->payload();
+            attach_ephemeral(sent, ephemeral_system_prompt, true, false);
             sent.push_back(req);
             tools = context->tools();   // unchanged, or the server re-reads the whole prefix
+        } else {
+            attach_ephemeral(sent, ephemeral_system_prompt, false, !system_prompt.empty());
         }
         core::Message summary = llm->chat(sent, tools);
         std::string text = summary.content;
@@ -304,13 +323,6 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
         }
 
         std::vector<core::Message> payload = messages;
-        if (!ephemeral_system_prompt.empty()) {
-            core::Message ep;
-            ep.role = "system";
-            ep.content = ephemeral_system_prompt;
-            payload.insert(payload.begin() + (system_prompt.empty() ? 0 : 1), ep);
-        }
-
         core::Json tools = core::json_arr();
         if (context) {
             payload = context->payload();
@@ -319,6 +331,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
             for (auto& d : registry->get_definitions(registry->get_all_tool_names()))
                 core::arr_push(tools, d);
         }
+        attach_ephemeral(payload, ephemeral_system_prompt, context != nullptr, !system_prompt.empty());
 
         core::Message assistant;
         if (llm) {

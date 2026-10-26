@@ -23,9 +23,13 @@ public:
         bool memory = true;     // a maze answers: mem:// pointers, mazemaker_remember
         bool skills = true;     // a skill catalogue is there
         bool find = true;       // the find tool is registered
+        bool learn = false;     // learning is on, so the close-the-turn line is worth its tokens
     };
     // The harness's side of the memory protocol, in the model's terms. About 130 words.
     static std::string retrieval_contract(const Contract& c);
+    // The workflow the harness holds a turn to: plan, act on evidence, verify by running,
+    // finish. About 120 words; it says nothing about tools a session does not have.
+    static std::string workflow_contract(const Contract& c);
     // "skills 568: devops 149 · ..." lines, under one heading; "" when there are none
     static std::string catalogue_map(const std::vector<std::string>& lines);
 

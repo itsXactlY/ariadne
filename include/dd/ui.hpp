@@ -126,6 +126,9 @@ struct Theme {
 enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory };
 // How reasoning cards show: a fixed-height live tail, every line, or one line.
 enum class ReasonView { Tail, Full, Hide };
+// How much a card shows: Minimal folds a card to its headline, Normal is the
+// default glance, Verbose opens arguments, results, reasoning and accounting.
+enum class Verbosity { Minimal, Normal, Verbose };
 enum class Run { Pending, Running, Ok, Failed };
 
 // A turn recall as its card shows it: one row per memory the block carries.
@@ -172,6 +175,13 @@ struct TapeView {
     long ledger = 0, edges = 0;   // this session's nodes and edges in the graph
 };
 
+// The work ledger the model keeps with the todo tool, as the sidebar shows it.
+struct PlanView {
+    enum Marker : uint8_t { Pending, Active, Done, Dropped };
+    std::vector<std::pair<Marker, std::string>> items;   // the model's own order
+    int open = 0, total = 0;
+};
+
 struct Info {
     std::string model, endpoint, effort = "default";
     int tools = 0, max_turns = 0;
@@ -202,6 +212,7 @@ public:
     void llm_end(const LlmStats& s);
     void set_effort(const std::string& label);
     void set_tape(const TapeView& t);
+    void set_plan(const PlanView& p);   // the todo ledger; empty clears the panel
     void recall(bool active);                       // the turn's recall is running
     void turn_begin();
     void turn_end();
@@ -212,6 +223,8 @@ public:
     void scroll_end() { scroll_ = 0; }
     void set_reason_view(ReasonView v) { view_ = v; }
     ReasonView reason_view() const { return view_; }
+    void set_verbosity(Verbosity v) { verb_ = v; }
+    Verbosity verbosity() const { return verb_; }
     void redraw() { invalidate_all(); }
     // Drop every cached card block: geometry changed around the cards, so
     // all of them must go through render() again.
@@ -235,7 +248,7 @@ private:
     using clock = std::chrono::steady_clock;
     enum class Ev : uint8_t { Info, MaxTurns, User, Say, ToolCall, ToolBegin, ToolEnd, ToolResult,
                               Note, Error, Clear, LlmBegin, Reason, Content, LlmEnd, Effort,
-                              Tape, Recall, Memory, TurnBegin, TurnEnd };
+                              Tape, Recall, Memory, TurnBegin, TurnEnd, Plan };
     struct Event {
         Ev ev = Ev::Note;
         std::string a, b, c;
@@ -246,6 +259,7 @@ private:
         std::shared_ptr<const Info> info;
         std::shared_ptr<const TapeView> tape;
         std::shared_ptr<const RecallView> recall;
+        std::shared_ptr<const PlanView> plan;
         clock::time_point at{};
     };
     enum class Phase { Idle, Recalling, Thinking, Reasoning, Writing, Tools };
@@ -256,11 +270,12 @@ private:
 
     // everything below: render thread only
     std::deque<Entry> entries_;
-    struct Cache { int w = -1, tw = -1; unsigned ver = 0; int spin = -1, view = -1; Canvas block; };
+    struct Cache { int w = -1, tw = -1; unsigned ver = 0; int spin = -1, view = -1, verb = -1; Canvas block; };
     std::deque<Cache> cache_;
     size_t printed_ = 0;     // drain_inline cursor (index into entries_)
     Info info_;
     TapeView tape_;
+    PlanView plan_;
     LlmStats last_{};
     std::deque<double> tps_hist_;
     long calls_total_ = 0;
@@ -278,6 +293,7 @@ private:
     std::string hint_;
     int scroll_ = 0, tick_ = 0;
     ReasonView view_ = ReasonView::Tail;
+    Verbosity verb_ = Verbosity::Normal;
     std::unique_ptr<Frame> frame_;
     std::string last_tail_;
 
