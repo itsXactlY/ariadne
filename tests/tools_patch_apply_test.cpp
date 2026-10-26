@@ -155,6 +155,28 @@ int main() {
     CHECK(get(root + "/h.txt") == "head\ntail\n", "add-only hunk appended at the end");
     CHECK(notes_joined(r).find("appended") != std::string::npos, "note says appended");
 
+    // --- Context plus additions, no removals: the context is the anchor, not the end of file ---
+    put(root + "/i.txt", "1. first\n2. second\n3. third\n");
+    r = run("*** Begin Patch\n*** Update File: " + root + "/i.txt\n@@ 2. second @@\n 2. second\n 3. third\n+4. fourth\n*** End Patch", opts(root));
+    CHECK(!failed(r), "insert-after-context hunk applied");
+    CHECK(get(root + "/i.txt") == "1. first\n2. second\n3. third\n4. fourth\n", "additions landed after the context, not at EOF");
+    CHECK(notes_joined(r).find("appended") == std::string::npos, "note does not call it an append");
+    CHECK(notes_joined(r).find("inserted") != std::string::npos, "note says inserted");
+
+    // --- Additions ordered before the context keep that order ---
+    put(root + "/j.txt", "alpha\nbeta\n");
+    r = run("*** Begin Patch\n*** Update File: " + root + "/j.txt\n@@ beta @@\n+zero\n beta\n*** End Patch", opts(root));
+    CHECK(!failed(r), "insert-before-context hunk applied");
+    CHECK(get(root + "/j.txt") == "alpha\nzero\nbeta\n", "additions landed before the context");
+
+    // --- Unmatched context never silently appends ---
+    put(root + "/k.txt", "only line\n");
+    r = run("*** Begin Patch\n*** Update File: " + root + "/k.txt\n@@ missing @@\n missing\n+extra\n*** End Patch", opts(root));
+    CHECK(failed(r), "unmatched context with additions is an error, not an append");
+    CHECK(get(root + "/k.txt") == "only line\n", "no match left the bytes alone");
+    CHECK(err_text(r).find("hunk 1") != std::string::npos, "failure names the hunk");
+    CHECK(err_text(r).find("missing") != std::string::npos, "failure echoes the hint");
+
     // --- Delete and Move are refused without allow_delete ---
     put(root + "/del.txt", "gone\n");
     r = run("*** Begin Patch\n*** Delete File: " + root + "/del.txt\n*** End Patch", opts(root));

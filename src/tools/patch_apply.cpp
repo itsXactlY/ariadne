@@ -88,12 +88,23 @@ std::optional<std::string> apply_hunk(std::string& content, const Hunk& h, size_
         notes.push_back(where + ": context only, nothing to change");
         return std::nullopt;
     }
-    if (!t.removes) {  // additions with no line to anchor them: appended, and the note says so
-        std::string add = t.new_s;
-        if (!content.empty() && content.back() != '\n') add = "\n" + add;
-        content += add + "\n";
-        notes.push_back(where + ": appended at the end of the file (add-only hunk" +
-                        (h.context_hint ? ", hint " + *h.context_hint + " was not used as a position" : "") + ")");
+    if (!t.removes) {
+        if (t.old_s.empty()) {  // nothing to anchor to: appended, and the note says so
+            std::string add = t.new_s;
+            if (!content.empty() && content.back() != '\n') add = "\n" + add;
+            content += add + "\n";
+            notes.push_back(where + ": appended at the end of the file (add-only hunk" +
+                            (h.context_hint ? ", hint " + *h.context_hint + " was not used as a position" : "") + ")");
+            return std::nullopt;
+        }
+        // Context plus additions with no removals: the context IS the position. Replacing the
+        // matched region with new_s puts the additions where the hunk ordered them; falling back to
+        // an append would dump them at EOF and duplicate the context lines with them. An unmatched
+        // context fails here rather than silently landing somewhere else.
+        const FuzzyResult r = fuzzy_find_and_replace(content, t.old_s, t.new_s, false);
+        if (r.error) return where + ": " + *r.error + hint;
+        notes.push_back(where + ": inserted at " + std::to_string(r.match_count) + " place(s)" + hint);
+        content = r.content;
         return std::nullopt;
     }
 

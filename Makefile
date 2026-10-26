@@ -246,6 +246,12 @@ $(BUILD)/dd_fuzzy_match_tests: $(CORE) $(FUZZY) tests/tools_fuzzy_match_test.cpp
 
 # The V4A application layer: the patch parser's operations applied to real files. fs_edit reads the
 # provenance stack, so that TU is in the link.
+# bench tool, not a test: it needs a skills root on disk, so it is run against a live home rather
+# than a fixture. The sink's handback rule is asserted in dd_learn_author_tests; this is the live
+# proof that a skill the model edited through edit_file is handed back and its bytes do not move.
+$(BUILD)/dd_sink_handback_probe: $(LEARN_AUTHOR) $(LEARN_AUTHOR_DEPS) $(PROVENANCE) bench/sink-handback-probe.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN_AUTHOR) $(LEARN_AUTHOR_DEPS) $(PROVENANCE)) bench/sink-handback-probe.cpp -pthread -o $(BUILD)/dd_sink_handback_probe
+
 $(BUILD)/dd_patch_apply_tests: $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(FS) $(PROVENANCE) $(PATCH) $(FUZZY) $(APPLY) tests/tools_patch_apply_test.cpp -o $(BUILD)/dd_patch_apply_tests
 
