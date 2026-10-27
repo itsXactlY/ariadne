@@ -141,6 +141,24 @@ std::string fmt_tok(long n) {
     return b;
 }
 
+std::string group(long n) {   // 1009800 -> "1,009,800"; integers, no locale involved
+    const std::string d = std::to_string(n < 0 ? 0 : n);
+    std::string o;
+    for (size_t i = 0; i < d.size(); ++i) {
+        if (i && (d.size() - i) % 3 == 0) o += ',';
+        o += d[i];
+    }
+    return o;
+}
+
+std::string fmt_bytes(long n) {
+    char b[32];
+    if (n < 1024) return std::to_string(n) + " B";
+    if (n < (1 << 20)) std::snprintf(b, sizeof b, "%.1f KB", static_cast<double>(n) / 1024.0);
+    else std::snprintf(b, sizeof b, "%.1f MB", static_cast<double>(n) / (1024.0 * 1024.0));
+    return b;
+}
+
 std::string fmt1(double v) {
     char b[32];
     std::snprintf(b, sizeof b, "%.1f", v);
@@ -173,13 +191,30 @@ std::string flat_args(const std::string& raw, int val_w) {
     return o;
 }
 
-// The part of a tool result worth a glance; .first = it is an error.
-std::pair<bool, std::string> preview(const std::string& raw) {
+// What a result actually carried. The counts come from the reply's own accounting
+// (tools/shell.cpp, tools/fs_tools.cpp), so a cut is reported by the tool that made
+// it. Inferring one from how much the card happened to render would report the
+// card's verbosity as the tool's cap -- the old claim in docs/PARITY.md.
+struct ResultFacts {
+    bool err = false;
+    std::string body;
+    long produced = 0, kept = 0, dropped = 0;   // bytes: command produced / model got / cut
+    long lines_total = 0, lines_shown = 0, lines_dropped = 0, lines_cut = 0;
+    long resume = 0;                            // fs next_offset: the line a continuation starts at
+    bool scan_capped = false;                   // total_lines is a floor, not a fact
+};
+
+ResultFacts result_facts(const std::string& raw) {
+    ResultFacts f;
     std::string s = raw;
     bool err = false;
     try {
         const core::Json j = core::json_parse(raw);
         if (j.type == core::Json::Obj) {
+            const auto num = [&](const char* k) -> long {
+                const core::Json* v = core::json_get(j, k);
+                return v && v->type == core::Json::Num ? static_cast<long>(v->num) : 0;
+            };
             const core::Json* e = core::json_get(j, "error");
             const core::Json* out = core::json_get(j, "stdout");
             const core::Json* content = core::json_get(j, "content");
@@ -192,8 +227,22 @@ std::pair<bool, std::string> preview(const std::string& raw) {
                 const core::Json* ex = core::json_get(j, "exit");
                 s = "exit " + std::to_string(ex ? static_cast<long>(ex->num) : 0) + " · " + out->str;
                 err = ex && ex->num != 0;
+                // The budget's own split, not stdout's length: the truncation marker is
+                // appended to stdout, so stdout.size() is kept + marker and would not
+                // reconcile against produced - dropped.
+                f.produced = num("output_bytes");
+                f.dropped = num("bytes_dropped");
+                f.kept = f.produced > 0 ? f.produced - f.dropped : static_cast<long>(out->str.size());
             } else if (content && content->type == core::Json::Str) {
                 s = content->str;
+                f.kept = static_cast<long>(content->str.size());
+                f.lines_total = num("total_lines");
+                f.lines_shown = num("lines");
+                f.lines_dropped = num("lines_dropped");
+                f.lines_cut = num("lines_cut");
+                f.resume = num("next_offset");
+                if (const core::Json* c = core::json_get(j, "total_lines_capped"); c && c->type == core::Json::Bool)
+                    f.scan_capped = c->b;
             } else if (content && content->type == core::Json::Arr) {
                 s.clear();
                 for (const auto& part : content->arr)
@@ -223,11 +272,67 @@ std::pair<bool, std::string> preview(const std::string& raw) {
         if (line.find_first_not_of(" \t\r") != std::string::npos) o += (o.empty() ? "" : "\n") + line;
         i = nl + 1;
     }
-    return {err, o};
+    f.err = err;
+    f.body = o;
+    return f;
+}
+
+// The part of a tool result worth a glance; .first = it is an error.
+std::pair<bool, std::string> preview(const std::string& raw) {
+    const ResultFacts f = result_facts(raw);
+    return {f.err, f.body};
 }
 
 bool failed_result(const std::string& raw) {
     return preview(raw).first;
+}
+
+// The header's truth about a result: what the tool cut, riding the status so even a
+// folded card says it was cut. Forms run from most descriptive to tightest and the
+// first one that fits the budget wins; empty means nothing fits, so the header keeps
+// its timing and the accounting rows carry the number. A clipped "✓ done · …" is not
+// a degraded datum -- it is a lie with an ellipsis.
+std::string loss_datum(const ResultFacts& f, Verbosity v, int budget) {
+    std::vector<std::string> forms;
+    if (f.dropped > 0) {
+        if (v == Verbosity::Verbose) forms.push_back(group(f.dropped) + " bytes dropped");
+        forms.push_back(fmt_bytes(f.dropped) + " dropped");
+        forms.push_back(fmt_bytes(f.dropped) + " cut");
+    } else if (f.lines_dropped > 0) {
+        forms.push_back(group(f.lines_dropped) + " lines dropped");
+        forms.push_back(group(f.lines_dropped) + " lines cut");
+        forms.push_back(group(f.lines_dropped) + " cut");
+    } else if (f.lines_cut > 0) {
+        forms.push_back(group(f.lines_cut) + " lines byte-cut");
+        forms.push_back(group(f.lines_cut) + " cut");
+    }
+    for (const auto& form : forms)
+        if (text_width(form) <= budget) return form;
+    return {};
+}
+
+// The full split, verbose only: what reached the model, what the tool produced, and
+// where a continuation starts. An error result gets nothing -- an error card already
+// says what failed, and its bytes are not a truncated payload.
+std::string result_account(const ResultFacts& f) {
+    if (f.err) return {};
+    std::string s;
+    if (f.produced > 0)
+        s = group(f.kept) + " of " + group(f.produced) + " bytes reached the model · " + group(f.dropped) + " dropped";
+    else if (!f.body.empty())
+        s = group(f.kept) + " bytes · whole result shown";
+    else
+        s = "empty result";
+    if (f.lines_total > 0) {
+        if (!s.empty()) s += " · ";
+        s += group(f.lines_shown) + " of " + group(f.lines_total) + " lines";
+        if (f.lines_dropped > 0)
+            s += " · " + group(f.lines_dropped) + " dropped · continue at offset " +
+                 group(f.resume > 0 ? f.resume : f.lines_shown + 1);
+        if (f.lines_cut > 0) s += " · " + group(f.lines_cut) + " lines byte-cut";
+        if (f.scan_capped) s += " · line total is a floor";
+    }
+    return s;
 }
 
 // The three-row DAEDALUS mark, one column of space between letters.
@@ -302,6 +407,20 @@ std::string to_utf8(const std::u32string& s) {
     o.reserve(s.size());
     for (char32_t c : s) encode(o, c);
     return o;
+}
+
+// wrap, plus how many rows the cap did not show. One pass: wrap to full width-corrected
+// rows, then take the head and mark the cut the same way wrap() does. A cap that reports
+// nothing is a cap that reads as "that is the whole result".
+std::vector<std::string> wrap_rows(const std::string& s, int width, int max_rows, long& hidden) {
+    auto lines = wrap(s, width, 0);
+    hidden = 0;
+    if (max_rows > 0 && static_cast<int>(lines.size()) > max_rows) {
+        hidden = static_cast<long>(lines.size()) - max_rows;
+        lines.resize(static_cast<size_t>(max_rows));
+        lines.back() = cut(lines.back(), std::max(1, width - 1)) + "…";
+    }
+    return lines;
 }
 
 std::vector<std::string> wrap(const std::string& s, int width, int max_rows) {
@@ -1014,23 +1133,36 @@ Canvas Scene::render(const Entry& e, int w) const {
     }
     case Kind::Tool: {
         // dynamic height: arguments and result previews are capped by verbosity:
-        // quiet shows a glance, verbose opens what the call actually carried.
-        const int aw = std::clamp(w - 4, 40, verb_ == Verbosity::Verbose ? 112 : 96);
+        // quiet shows a glance, verbose opens what the call actually carried. Both caps
+        // announce themselves -- a card that hides its own cut tells the operator the
+        // tool produced what the card shows.
+        const bool verbose = verb_ == Verbosity::Verbose;
+        const int aw = std::clamp(w - 4, 40, verbose ? 112 : 96);
         // flat_args first (it repairs a cut-off JSON blob into key="v" form),
         // then wrap: long args get their rows instead of one clipped line.
-        const int arg_rows = verb_ == Verbosity::Minimal ? 2 : verb_ == Verbosity::Verbose ? 20 : 6;
-        const int arg_w = verb_ == Verbosity::Verbose ? 240 : verb_ == Verbosity::Minimal ? 40 : 60;
+        const int arg_rows = verb_ == Verbosity::Minimal ? 2 : verbose ? 20 : 6;
+        const int arg_w = verbose ? 240 : verb_ == Verbosity::Minimal ? 40 : 60;
         auto alines = wrap(flat_args(e.text, arg_w), aw, arg_rows);
         while (alines.size() > 1 && alines.front().empty()) alines.erase(alines.begin());
         bool err = false;
+        ResultFacts f;
         std::vector<std::string> rlines;
+        long rows_hidden = 0, acct_hidden = 0;
+        std::string acct;
+        std::vector<std::string> acct_rows;
         if (e.resolved) {
-            const auto [e_, body] = preview(e.result);
-            err = e_;
-            const int res_rows = verb_ == Verbosity::Minimal ? 3 : verb_ == Verbosity::Verbose ? 48 : 12;
-            rlines = wrap(body.empty() ? std::string("(empty)") : body, w - 6, res_rows);
+            f = result_facts(e.result);
+            err = f.err;
+            const int res_rows = verb_ == Verbosity::Minimal ? 3 : verbose ? 48 : 12;
+            rlines = wrap_rows(f.body.empty() ? std::string("(empty)") : f.body, w - 6, res_rows, rows_hidden);
+            acct = verbose ? result_account(f) : std::string();
+            // The account wraps rather than clips: a single row cut mid-sentence reads as
+            // a complete sentence, which is exactly the claim this card exists to retract.
+            if (!acct.empty()) acct_rows = wrap_rows(acct, w - 6, 2, acct_hidden);
         }
-        const int h = static_cast<int>(alines.size()) + (e.resolved ? static_cast<int>(rlines.size()) + 1 : 1) + 3;
+        // rows the card did not show, plus the tool's own accounting, when each has something to say
+        const int extra = (rows_hidden > 0 ? 1 : 0) + static_cast<int>(acct_rows.size()) + (acct_hidden > 0 ? 1 : 0);
+        const int h = static_cast<int>(alines.size()) + (e.resolved ? static_cast<int>(rlines.size()) + 1 : 1) + extra + 3;
         Canvas c(w, h);
         const uint32_t bc = e.run == Run::Failed ? th_.error : e.run == Run::Running ? th_.accent : th_.dim;
         const Style b{bc};
@@ -1038,8 +1170,6 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.put(1, 0, U' ', b);
         c.put(2, 0, U'▸', Style{th_.gold, kNone, kBold});
         c.put(3, 0, U' ', b);
-        const int n = c.text(4, 0, e.name, Style{th_.accent, kNone, kBold}, w - 26);
-        c.put(4 + n, 0, U' ', b);
         std::string st;
         Style ss{th_.muted};
         switch (e.run) {
@@ -1054,7 +1184,18 @@ Canvas Scene::render(const Entry& e, int w) const {
         case Run::Ok: st = "✓ " + (e.ms > 0 ? fmt_ms(e.ms) : std::string("done")); ss = Style{th_.ok}; break;
         case Run::Failed: st = "✗ " + (e.ms > 0 ? fmt_ms(e.ms) : std::string("failed")); ss = Style{th_.error}; break;
         }
-        const int sw = text_width(st);   // "─ ✓ 1.2s ┐"
+        // Header budget: the status keeps its ground and the name gives way, never the
+        // reverse. The old fixed name budget (w - 26) silently clipped a long status
+        // onto the name, so truth lost characters first at narrow widths.
+        const int max_sw = std::max(8, w - 34);
+        // The tool's cut rides the status, so a folded card still says it was cut.
+        if (e.resolved) {
+            const std::string loss = loss_datum(f, verb_, std::max(0, max_sw - text_width(st) - 3));
+            if (!loss.empty()) st += " · " + loss;
+        }
+        const int sw = text_width(st);   // "─ ✓ 1.2s · 978.3 KB dropped ┐"
+        const int n = c.text(4, 0, e.name, Style{th_.accent, kNone, kBold}, std::max(8, w - sw - 10));
+        c.put(4 + n, 0, U' ', b);
         c.put(w - sw - 3, 0, U' ', b);
         c.text(w - sw - 2, 0, st, ss);
         c.put(w - 2, 0, U' ', b);
@@ -1067,6 +1208,20 @@ Canvas Scene::render(const Entry& e, int w) const {
             c.text(2, ry++, "◂", Style{err ? th_.error : th_.ok, kNone, kBold});
             for (size_t k = 0; k < rlines.size(); ++k)
                 c.text(4, ry + static_cast<int>(k), rlines[k], Style{err ? th_.error : th_.text});
+            ry += static_cast<int>(rlines.size());
+            if (!acct_rows.empty()) {
+                for (size_t k = 0; k < acct_rows.size(); ++k)
+                    c.text(4, ry + static_cast<int>(k), acct_rows[k], Style{th_.muted});
+                ry += static_cast<int>(acct_rows.size());
+                if (acct_hidden > 0)
+                    c.text(4, ry++, "… +" + group(acct_hidden) + " rows of accounting not shown",
+                           Style{th_.muted, kNone, kDim});
+            }
+            if (rows_hidden > 0) {
+                const std::string t = verbose ? "… +" + group(rows_hidden) + " rows past the verbose cap"
+                                             : "… +" + group(rows_hidden) + " rows not shown (verbose opens them)";
+                c.text(4, ry++, t, Style{th_.muted, kNone, kDim});
+            }
         } else if (e.run == Run::Running) {
             c.text(2, ry, "◂ …", Style{th_.muted});
         }

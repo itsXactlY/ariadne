@@ -62,10 +62,26 @@ Turn count was not a lever here: both arms finished in 3 calls, 2 tools.
 
 ## W2 — verbose tells the truth about a result
 
-`PARITY.md`: verbose "shows what the card kept, not what the tool produced".
-W1's `bytes_dropped` is the missing datum; render the status row from it rather
-than from the card cap. Proof: `Scene::row_text(y)` assertion (`tests/ui_test.cpp:169`)
-showing produced bytes ≠ displayed bytes on a truncated result.
+**Closed.** `preview()` became `result_facts()`: the reply's own accounting
+(`output_bytes`/`bytes_dropped` on a shell reply, `total_lines`/`lines`/
+`lines_dropped`/`lines_cut`/`next_offset` on a read) drives the card. The header
+status carries the loss at every verbosity, verbose adds the reconciliation row
+and the resume offset, and the card's own row cap is announced (`wrap_rows`
+returns the rows its cap did not show). Two premises died in the run: the
+header's fixed name budget (`w - 26`) clipped a long status onto the name, so a
+tight header showed `✓ done · …` — the datum now degrades through a fit ladder
+and, when nothing fits, moves to the wrapped accounting rows; and the account
+was one clipped row, which reads as a finished sentence, so it wraps instead.
+
+| step | change | proof |
+|---|---|---|
+| 2a | `ResultFacts` from the reply; header status carries the dropped count | `row_text` finds `✓ done · 1,001,800 bytes dropped` on a truncated result, at 150 cols |
+| 2b | verbose reconciliation row + resume offset; the card's own cap names its hidden rows | `8,000 of 1,009,800 bytes reached the model · 1,001,800 dropped`, `300 of 1,312 lines · 1,012 dropped · continue at offset 301`, `… +N rows past the verbose cap` |
+| 2c | narrow-width degradation, not clipping | at 44 cols inline the header stays `✓ done ┐` and the account wraps to `model · 1,001,800 dropped` |
+
+Live: `DD_VERBOSE=verbose build/dd_tui --home /tmp/dd_ab/a -- "grep -R TODO
+/tmp/dd_ab/src"` printed both rows on the real card. Card height at normal
+verbosity grows by one row (16 → 17) because the cut row is real.
 
 ## W3 — fold duplicated inline logic into the ported modules (no new behavior)
 

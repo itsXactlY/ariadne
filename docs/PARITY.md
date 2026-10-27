@@ -14,7 +14,7 @@ on branch `fix/audit-20261024`, not read out of a README.
 | Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:807-815` |
 | Learning | `dd::learn` service: episodes, credit, priors, drafted skills, lifecycle | `docs/LEARN.md`, `src/learn/*` |
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:783-797` |
-| Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
+| Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:824-833`, `agent.contract` toggles it |
 | Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:490,716-742,928-944,1220-1249`, `src/dd_agent_main.cpp:183-205` |
 
@@ -45,8 +45,24 @@ against **22308**. That is **12,944 prompt tokens per call** for bytes the
 model never reads. `level` stayed `ok` in both arms, so this is window cost,
 not compaction.
 Still open: a spill read verb (the dropped tail cannot be recovered from the
-reply, only re-fetched by narrowing), and verbose, which renders the card
-instead of `bytes_dropped` — see W2.
+reply, only re-fetched by narrowing).
+
+### What a card says about a cut result
+
+The card renders the reply's own accounting, not its own cap. `result_facts()`
+(`src/ui.cpp`) reads `output_bytes` / `bytes_dropped` from a shell reply and
+`total_lines` / `lines` / `lines_dropped` / `lines_cut` / `next_offset` from a
+read reply. The header carries the loss so even a folded card says it was cut
+(`✓ 95ms · 1,001,800 bytes dropped`); verbose adds the reconciliation row
+(`8,000 of 1,009,800 bytes reached the model · 1,001,800 dropped`) and, for a
+cut read, the offset a continuation starts at
+(`300 of 1,312 lines · 1,012 dropped · continue at offset 301`). The card's own
+verbosity cap reports itself (`… +46 rows past the verbose cap`), so a shortened
+render cannot be read as a whole result. Where the header has no room for the
+number it moves to the wrapped accounting rows instead of being clipped: a
+clipped `✓ done · …` is not a degraded datum, it is a lie with an ellipsis.
+Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
+`DD_VERBOSE=verbose dd_tui` on the same 1,009,800-byte grep.
 
 ### Mid-turn steering
 Input typed while a turn runs lands in `queued` (`src/dd_tui.cpp:1080`, pushed at `:1401-1402`) and is

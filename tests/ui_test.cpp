@@ -187,10 +187,10 @@ int main() {
         s.tool_call("c2", "read_file", "{\"path\":\"/x\"}");
         s.tool_result("c2", "{\"path\":\"/x\",\"content\":\"y\"}");
         const auto out = lines_of(s.drain_inline(80, false, false));
-        // dynamic tool cards: header + wrapped args rows + result rows + footer.
-        // dynamic cards: header + args rows + result marker row + result rows + footer.
-        // card 1 wraps its 5000-char result to the 12-row cap (16 rows), card 2 is 5.
-        chk(out.size() == 16 + 1 + 5 + 1, "tool cards grow with their result (16 + 1 + 5 + trailing)");
+        // dynamic cards: header + args rows + result marker row + result rows + footer,
+        // plus a row naming the rows the cap did not show. card 1 wraps its 5000-char
+        // result to the 12-row cap and says so (17 rows); card 2 is whole, so 5.
+        chk(out.size() == 17 + 1 + 5 + 1, "tool cards grow with their result and their cut row (17 + 1 + 5 + trailing)");
         const std::string tail = "─ ✓ done ┐";
         chk(out[0].rfind("┌ ▸ run_terminal ─", 0) == 0 && out[0].size() > tail.size() &&
             out[0].compare(out[0].size() - tail.size(), tail.size(), tail) == 0, "tool card header");
@@ -238,6 +238,63 @@ int main() {
         chk(reason(Verbosity::Minimal).size() == 2, "quiet folds reasoning to its header row");
         chk(reason(Verbosity::Verbose).size() == 30 + 3, "verbose shows every reasoning line");
         chk(reason(Verbosity::Normal).size() == Scene::kReasonRows + 3, "normal keeps the tail cap");
+    }
+
+    // ---- verbose tells the truth about a result: the tool's cut, not the card's cap ----
+    {
+        const std::string cut = "{\"cmd\":\"grep\",\"exit\":0,\"stdout\":\"" + std::string(6000, 'x') +
+                                "\",\"truncated\":true,\"output_bytes\":1009800,\"bytes_dropped\":1001800}";
+        // Scene holds atomics, so it is built in place rather than returned.
+        auto filled = [&](Scene& s, Verbosity v, const std::string& result) {
+            s.set_verbosity(v);
+            s.turn_begin();
+            s.tool_call("c1", "run_terminal", "{\"cmd\":\"grep -R TODO\"}");
+            s.tool_result("c1", result);
+            s.turn_end();
+        };
+        auto frame = [](Scene& s, int cols, int rows) {
+            s.present(cols, rows, true);
+            std::string all;
+            for (int y = 0; y < rows; ++y) all += s.row_text(y);
+            return all;
+        };
+
+        Scene v{Theme{}};
+        filled(v, Verbosity::Verbose, cut);
+        // wide enough that the transcript column, not the sidebar, decides card width
+        const auto loud = frame(v, 150, 64);
+        chk(loud.find("✓ done · 1,001,800 bytes dropped") != std::string::npos, "header states the tool's dropped bytes");
+        chk(loud.find("8,000 of 1,009,800 bytes reached the model · 1,001,800 dropped") != std::string::npos,
+            "verbose states produced vs kept and they reconcile");
+        chk(loud.find("rows past the verbose cap") != std::string::npos, "the card's own cap announces itself");
+        chk(loud.find(std::string(1009800, 'x')) == std::string::npos, "a card never renders what the tool produced");
+
+        // a folded card still carries the cut: verbosity hides payload, not truth
+        Scene m{Theme{}};
+        filled(m, Verbosity::Minimal, cut);
+        chk(frame(m, 80, 24).find("978.3 KB dropped") != std::string::npos, "a folded card says its result was cut");
+
+        // narrow header: the number moves to the wrapped rows, it is never clipped away.
+        // Below kMinCols there is no transcript frame to read, so this is the inline path.
+        Scene n{Theme{}};
+        filled(n, Verbosity::Verbose, cut);
+        std::string narrow;
+        for (const auto& l : lines_of(n.drain_inline(44, false, false))) narrow += l + "\n";
+        chk(narrow.find("✓ done ┐") != std::string::npos, "a tight header degrades to timing, not to a clipped number");
+        chk(narrow.find("model · 1,001,800 dropped") != std::string::npos, "the account wraps instead of cutting mid-sentence");
+
+        // a cut read names the lines that went and the offset a continuation starts at
+        std::string body;
+        for (int i = 1; i <= 300; ++i) body += "  " + std::to_string(i) + "| line\n";
+        Scene f{Theme{}};
+        f.set_verbosity(Verbosity::Verbose);
+        f.turn_begin();
+        f.tool_call("c1", "read_file", "{\"path\":\"a.cpp\"}");
+        f.tool_result("c1", "{\"path\":\"a.cpp\",\"content\":\"" + body +
+                     "\",\"total_lines\":1312,\"offset\":1,\"lines\":300,\"truncated\":true,\"next_offset\":301,\"lines_dropped\":1012}");
+        f.turn_end();
+        chk(frame(f, 150, 64).find("300 of 1,312 lines · 1,012 dropped · continue at offset 301") != std::string::npos,
+            "a cut read says how many lines went and where to continue");
     }
     {   // the accounting a verbose run asks for is not on the status row otherwise
         auto status_has = [&](Verbosity v) {
