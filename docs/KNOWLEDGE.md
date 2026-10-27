@@ -26,7 +26,7 @@ model; we have 498 skills and a 54.6k rebase mark.
 
 | # | Finding | Evidence |
 |---|---|---|
-| F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:343`, `src/context/engine.cpp:404`, `src/context/engine.cpp:659` |
+| F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:344`, `src/context/engine.cpp:405`, `src/context/engine.cpp:660` |
 | F2 | The system prompt has three voices that contradict each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). | `dd_tui.cpp:727`, `:750`, `:893`; `initialize` reply |
 | F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../my-project/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
 | F4 | Closed: the catalogue is not read once. `dd_tui` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:763-768,834-836,856`, `src/know/wiring.cpp` |
@@ -446,7 +446,7 @@ bit into the pointer and spins. They sat on the per-turn search path. What repla
 between threads is a `core::SlotRing`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls. The three locks
 that survived the first audit are gone, each for a different reason: the retry jitter counter is one `fetch_add`
 (`src/agent/retry.cpp:17`) because the tick was the only value the counter ever held, so there was no invariant a lock
-could protect; the prompt-cache registry is `thread_local` (`src/agent/prompt_cache_boundary.cpp:14`) because a prefix is
+could protect; the prompt-cache registry is `thread_local` (`src/agent/prompt_cache_boundary.cpp:20`) because a prefix is
 registered and matched on the same thread, so the state never crosses a thread; and pairing takes the kernel's file lock
 for its whole read-modify-write (`include/dd/gateway/pairing.hpp:55`) because a userspace mutex cannot cover a second dd
 on the same home. Every `std::deque` left in a header names the one thread that owns it; the rest are hand-offs and
