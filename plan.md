@@ -145,14 +145,17 @@ Priority is low because `list_tools()` runs at boot (`dd_tui.cpp:626`) and on a 
 
 ## W7 — mid-turn steering
 
-Verified in the tree, not from `PARITY.md`: input typed during a turn lands in
-`queued` (`dd_tui.cpp:1080`, pushed at `:1401-1402`) and is drained only by the idle
-loop (`:1499-1502`), gated on `!running` — so steering cannot act between tool rounds.
-Drain at the tool-round boundary — before the next generation, not mid-stream, and never
-while a tool call is executing. Steering text joins as a user turn; `/interrupt` keeps its
-current meaning and stays the only mid-call action. Proof: a scripted turn where steering
-arrives after tool round 1 must be present in the prompt of round 2, and the queued text
-must never be sent twice.
+**Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:375`)
+runs at the round boundary — after the tool results are appended, before the next request,
+never while a tool call is executing — and what it returns rides as user messages, which
+`TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps `steered` so the fold is a fact
+of the tape. The count is the turn's (`begin_turn` resets it at `:317`). `/interrupt` keeps its
+meaning and stays the only mid-call action.
+
+| step | change | proof |
+|---|---|---|
+| 7a | the hook at the boundary; folded text joins as a user turn | `test_steering` (`tests/agent_loop_test.cpp:419`): two prompts typed mid-turn reach the engine at the boundary, the model sees both, neither twice |
+| 7b | the hand-off behind it: `818e37c` landed the seam, `7b570ab` replaced the mutex + `std::deque` with `dd::core::SlotRing<16`, drained by one `claim_all` per boundary, overflow held by the key handler alone | a prompt typed while an answer streams prints `◈ steered · 1 prompt entered this turn` in a tmux pane, and the answer carries it |
 
 ## W8 — calibration from measurement, not guesses
 
@@ -169,6 +172,47 @@ session (it claimed `patch_parser`/`fuzzy_match`/`skill_provenance` were linked 
 no binary after `5c1d207` wired them). After every wave, re-derive the list by grep
 (include lines + symbol use, excluding the module's own TU and its own test) and
 rewrite the line. Waves that falsify a claim must delete the claim.
+
+## W10 — no locks, no queues: every hand-off becomes atomic ownership
+
+Last, deliberately: its blast radius is every cross-thread site in the tree, so a wave that
+changes hand-off *shapes* has to land after the behaviour it carries is final. Inventory read
+from the tree, not from `PARITY.md`. It changes no capability, spends nothing, picks no backend,
+so it is engineer-decidable like every other wave:
+
+| what | where | why it is in scope |
+|---|---|---|
+| 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp:15` (jitter counter), `src/agent/prompt_cache_boundary.cpp:16` (x3), `include/dd/gateway/pairing.hpp:55` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere. Each is reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guards state no second thread reaches |
+| 5 queues | `src/context/maze.cpp:239` (`Job`), `:240` (`LedgerEntry`), `include/dd/know/router.hpp:115` (`opened_q_`), `include/dd/learn/sink.hpp:35` (`q_`), `include/dd/ui.hpp:269` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:799`) posts an event per streamed delta, so a long answer is thousands of nodes and thousands of string copies on the hot path |
+| 6 deques | `src/core/json.cpp:198`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:273/275/281` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
+| `core::park` / `unpark`, 10 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
+| `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:257/280/299`, `src/learn/ledger.cpp:20` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |
+
+**The shape.** `SlotRing<N>` gains a multi-producer side. One word per slot carries the stamp
+*and* the state — `free`, `writing`, `published`, `taken` — so no thread reaches a state it did
+not take. A producer stamps with one `fetch_add` on a shared counter, which makes publish order
+global rather than per-thread, then CASes `free -> writing(seq)` on the slot it picked and writes
+the payload only once it holds it. A consumer CASes `published(seq) -> taken` on the exact word it
+read, and resets the slot after moving the payload out. Wait-free on both sides, fixed slots
+reused, no node, no allocation in the steady state. The single-writer publish keeps its cheaper
+path (`stamp == 0` means the sole writer owns the slot): the two shapes differ exactly where
+ownership is taken, which is the whole difference between one producer and several.
+
+| step | change | proof |
+|---|---|---|
+| 10a | multi-producer `publish`: shared stamp counter, `free -> writing(seq)` before the payload exists | `core_slot_ring_test` gains 8 producers against one consumer: nothing lost, nothing claimed twice, a drain in stamp order; clean under `make tsan` |
+| 10b | `Scene` holds no queue: a streaming card's text lives in a fixed-capacity buffer its producing thread owns alone and only the **length** word is shared (bytes land before the length moves, release), so a delta costs no node and no copy; lifecycle events go through the ring | `MpscQueue` is gone from `ui.hpp`; the same answer streams in a tmux pane; an allocation counter in the test binary counts fewer allocations across a 200-delta turn than today, where every delta is a node plus a copy |
+| 10c | `opened_q_`, `QueueSink::q_`, `Soaker::State::q` and `out` move to the ring; a refused publish is counted and named in the reply, never dropped — the maze spool stays the durable overflow | the refusal counter reads 0 on a live turn with tools firing; a deliberately full ring counts and the reply says so |
+| 10d | the three mutexes go: the jitter counter becomes one `atomic<uint64_t>` (`fetch_add`); boundary and pairing are unwired, so their locks are **deleted** and their headers state the single owner instead of guarding state nobody else reaches | `src` and `include` contain no mutex, no `lock_guard`, no `condition_variable`; `make test` green |
+| 10e | every remaining `std::deque` names its owning thread in the header comment | a fresh `grep -n "std::deque" include` shows an owner line above each one |
+| 10f | `make tsan` grows past the ring to every site this wave touches | `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker` under ThreadSanitizer and reports no race |
+
+**Falsified, not asserted:** a ring is right only where the payload is owned by exactly one thread
+on each side of the hand-off and the volume is bounded. If a live turn shows *any* refused publish
+at a site, that site is not a ring: payload flow there becomes a `SnapCell` snapshot plus a park
+word, and the refusal count goes in `PARITY.md` rather than being special-cased away. A streaming
+delta is neither single-owner-per-side nor bounded, which is why 10b does not put it in a ring.
+Done means the invariant is greppable: no lock, no queue, and every deque left says who owns it.
 
 ---
 
@@ -204,3 +248,8 @@ The plan is finished when every wave is committed, `make test` reports
 `0 test binary(ies) failed`, `README.md:26` matches a fresh grep, `PARITY.md` carries a
 measured number for each wave, and the two falsified modules are documented as
 **not wired on purpose** rather than left in an "unwired" list.
+
+The hand-off invariant is part of done: `src` and `include` carry no mutex, no
+`lock_guard` and no `condition_variable`, no cross-thread hand-off uses a queue, and
+every `std::deque` left in a header names the one thread that owns it. `make tsan`
+covers every site W10 touches, not only the ring.
