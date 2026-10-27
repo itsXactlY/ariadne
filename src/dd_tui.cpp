@@ -848,6 +848,9 @@ int main(int argc, char** argv) {
     llm.model = model;
     llm.api_key = api_key;
     llm.cancel = &agent.interrupt_requested;
+    // Sends per call: a restarting server is answered by the second send. 1 turns the
+    // retry off, which is what a wire that must fail on the first try needs.
+    if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
     llm.effort = [&effort]() -> std::string {
         const int e = effort.load(std::memory_order_relaxed);
         return e < 0 ? std::string() : e == 0 ? std::string("none") : std::string(kEfforts[e]);
@@ -957,6 +960,7 @@ int main(int argc, char** argv) {
         u.prompt_tokens = st.prompt_tokens;
         u.completion_tokens = st.completion_tokens;
         u.cached_tokens = st.cached_tokens;
+        u.attempts = st.attempts;
         scene.llm_end(u);
         engine.on_call(st);
         if (const char* log = std::getenv("DD_TAPE_LOG")) {   // one line per call: is the prefix reused?

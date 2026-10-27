@@ -101,21 +101,23 @@ if the reply JSON changes it is not a refactor.
 
 ## W4 — transient retry on the wire (reliability)
 
-Today: one attempt, any failure throws — `http_llm.cpp:171-178`, `net/http.cpp:73-78`.
-`agent::jittered_backoff(attempt, base=5, max=120, jitter=0.5)` is ported and wired
-into nothing.
+**Closed.** One rule, in one place: `wire_failure(WireResult)` (`include/dd/agent/retry.hpp`)
+answers `None / Answer / Cancelled / Transient`, and only `Transient` is sent again. A
+fact about the socket can change on a second send; a fact about the server cannot, so a
+4xx, the byte cap, the stall clock and an error chunk inside the stream are answers.
+`HttpLLM::chat` (`src/agent/http_llm.cpp`) holds the send loop and `prime` takes the same
+rule through `net::Response`. `jittered_backoff` has a call site at last: `wire_backoff_ms`
+scales it to the wire — 250 ms base, 2 s cap — so a restarting server is answered by the
+second send instead of ending the turn.
 
-Wire it only around **transient** conditions: connect/timeout `CURLE_*`, 5xx, and a
-closed connection. Rules:
-- never retry a request cut by the cancel callback (`CURLE_ABORTED_BY_CALLBACK`) —
-  an interrupted turn is the operator's decision, not a retry
-- never retry a 4xx or a schema rejection — retrying those costs a whole turn for a
-  deterministic answer
-- bounded attempts, and the attempt count lands in the reply/error so a slow endpoint
-  is visible instead of mysterious
-
-Proof: a local fake endpoint that answers 500 then 200 — assert exactly two attempts,
-the backoff between them, and that a cancelled request produces zero retries.
+| rule | where | proof |
+|---|---|---|
+| a socket fact is re-sent: refused connect, a socket cut before the response line, a 5xx that handed nothing out | `wire_failure` | `build/dd_wire_retry_tests` — a fake loopback endpoint answers 500 then 200: exactly two connections, ≥245 ms between them, the answer lands |
+| a stream that already spoke is never re-sent | `StreamSink::spoke` | same suite: a delta handed out, then the socket cut — one connection, the caller keeps the words it got, nothing is spoken twice |
+| a 4xx, the byte cap, the stall clock and an error chunk are answers, not hiccups | `wire_failure` | one connection, no pause paid (<200 ms), the server's own words come back |
+| a call cut by Esc is never re-sent | `cancelled` in `WireResult` | one connection at most, no backoff paid, the error says `interrupted` |
+| the send count rides out, so a slow endpoint is visible | `CallStats.attempts` → `LlmStats.attempts`; `with_sends()` on the error | the suite asserts `attempts == 2` and that `latency_ms` counts the whole wait, not only the send that answered; the engine row renders it as `· ×2` and the verbose status row as `sent 2` (`dd_ui_tests`) |
+| `DD_WIRE_ATTEMPTS=1` is the old one-shot wire | `HttpLLM::retry_attempts` | the suite: one connection, and the error names the server's reason without a send count |
 
 ## W5 — redact untrusted server text at the point it enters the prompt
 

@@ -1519,8 +1519,26 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
             } else {
                 row(ey + 3, "ctx", fmt_tok(last_.prompt_tokens) + " tok", val);
             }
-            std::string out = fmt_tok(last_.completion_tokens) + " tok · " + fmt_ms(last_.latency_ms);
-            if (last_.cached_tokens > 0) out += " · " + fmt_tok(last_.cached_tokens) + " cached";
+            // The value column is 22 cells, so the forms are ranked rather than
+            // appended: a clipped "800 c…" or "2 se…" reports a fact without saying
+            // what it was. A re-sent call is the anomaly here, so the send count is
+            // never the segment that loses — the cache readout is the expendable one,
+            // and the spelled-out "sent N" rides the verbose status row.
+            const std::string base = fmt_tok(last_.completion_tokens) + " tok · " + fmt_ms(last_.latency_ms);
+            std::vector<std::string> forms;
+            if (last_.attempts > 1) {
+                const std::string sends = " · ×" + std::to_string(last_.attempts);
+                if (last_.cached_tokens > 0) forms.push_back(base + " · " + fmt_tok(last_.cached_tokens) + " cached" + sends);
+                forms.push_back(base + sends);
+                forms.push_back(base);
+            } else {
+                if (last_.cached_tokens > 0) forms.push_back(base + " · " + fmt_tok(last_.cached_tokens) + " cached");
+                forms.push_back(base);
+            }
+            std::string out;
+            for (const auto& form : forms)
+                if (text_width(form) <= vw) { out = form; break; }
+            if (out.empty()) out = forms.back();   // nothing fits: show the bare call
             row(ey + 5, "last", out, val);
         }
     }
@@ -1710,6 +1728,7 @@ void Scene::paint_status(Frame& f, int y, int w) const {
         segs.push_back({"calls ", std::to_string(calls_total_)});
         if (last_.completion_tokens > 0) segs.push_back({"out ", fmt_tok(last_.completion_tokens)});
         if (last_.cached_tokens > 0) segs.push_back({"cache ", fmt_tok(last_.cached_tokens)});
+        if (last_.attempts > 1) segs.push_back({"sent ", std::to_string(last_.attempts)});
         if (tape_.on) segs.push_back({"epoch ", std::to_string(tape_.epoch) + " · " + fmt_tok(tape_.tokens)});
         if (tape_.on && tape_.deferred > 0) segs.push_back({"deferred ", std::to_string(tape_.deferred)});
         if (plan_.total > 0) segs.push_back({"plan ", std::to_string(plan_.open) + "/" + std::to_string(plan_.total)});

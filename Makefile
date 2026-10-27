@@ -57,7 +57,7 @@ OSVPARSE := src/tools/osv_package_parse.cpp
 ANSI := src/tools/ansi_strip.cpp
 UI := src/ui.cpp src/ui_simd.cpp
 NET := src/net/http.cpp $(URLSAFE)
-HTTPLLM := src/agent/http_llm.cpp $(URLSAFE)
+HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
 CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp
 MCP := src/tools/mcp_client.cpp $(URLSAFE)
@@ -300,6 +300,11 @@ $(BUILD)/dd_ssl_guard_tests: $(SG) tests/agent_ssl_guard_test.cpp
 $(BUILD)/dd_retry_tests: $(RU) tests/agent_retry_utils_test.cpp
 	$(CXX) $(CXXFLAGS) $(RU) tests/agent_retry_utils_test.cpp -o $(BUILD)/dd_retry_tests
 
+# The retry policy's proof is a connection count, so it needs a real socket: a fake
+# endpoint on loopback answers 500 once and 200 on the second send, and nothing twice.
+$(BUILD)/dd_wire_retry_tests: $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM) include/dd/agent/retry.hpp include/dd/agent/http_llm.hpp tests/agent_wire_retry_test.cpp
+	$(CXX) $(CXXFLAGS) $(sort $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM)) tests/agent_wire_retry_test.cpp -pthread -lcurl -o $(BUILD)/dd_wire_retry_tests
+
 $(BUILD)/dd_kv_watermarks_tests: $(KVW) src/core/json.cpp tests/agent_kv_watermarks_test.cpp
 	$(CXX) $(CXXFLAGS) $(KVW) src/core/json.cpp tests/agent_kv_watermarks_test.cpp -o $(BUILD)/dd_kv_watermarks_tests
 
@@ -409,6 +414,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_errors_tests \
   $(BUILD)/dd_ssl_guard_tests \
   $(BUILD)/dd_retry_tests \
+  $(BUILD)/dd_wire_retry_tests \
   $(BUILD)/dd_kv_watermarks_tests \
   $(BUILD)/dd_state_errors_tests \
   $(BUILD)/dd_constants_tests \

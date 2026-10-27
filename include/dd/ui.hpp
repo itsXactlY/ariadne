@@ -162,6 +162,7 @@ struct Entry {
 struct LlmStats {
     double latency_ms = 0, gen_tps = 0, pp_tps = 0;
     long prompt_tokens = 0, completion_tokens = 0, cached_tokens = 0;
+    int attempts = 1;   // sends this call needed; shown only when the endpoint made it re-send
 };
 
 // The context tape as the sidebar shows it (dd/context TapeStats, flattened).

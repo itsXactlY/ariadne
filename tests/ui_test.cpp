@@ -509,6 +509,60 @@ int main() {
         chk(run(ReasonView::Full, 30).size() == 30 + 3, "full = every line");
     }
 
+    // ---- a re-sent call is named on screen, not mysterious (W4) ----
+    // The sidebar\'s value column is 22 cells, so the "last" row ranks its forms
+    // instead of appending them: a clipped "2 se…" or "800 c…" would report a fact
+    // without saying what it was. Both orders are asserted, so the ranking is proven
+    // rather than assumed.
+    {
+        Scene s{Theme{}};
+        Info info;
+        info.model = "qwen3.8-flash-next";
+        info.n_ctx = 4096;
+        info.tools = 34;
+        s.set_info(info);
+        s.turn_begin();
+        s.llm_begin();
+        s.llm_content("The answer.");
+        LlmStats st;
+        st.latency_ms = 1900;
+        st.gen_tps = 31.5;
+        st.prompt_tokens = 1200;
+        st.completion_tokens = 60;
+        st.cached_tokens = 800;
+        st.attempts = 2;   // the first send never reached an answer
+        s.llm_end(st);
+
+        // verbose opens the engine panel at a shorter height; the send count rides it
+        s.set_verbosity(Verbosity::Verbose);
+        s.present(160, 30, true);
+        std::string wide;
+        for (int y = 0; y < 30; ++y) wide += s.row_text(y);
+        chk(wide.find("last") != std::string::npos && wide.find("60 tok · 1.9s · ×2") != std::string::npos,
+            "engine panel names the re-send");
+        chk(wide.find("sent 2") != std::string::npos, "the status row carries the send count");
+        chk(wide.find("cache 800") != std::string::npos, "the cache readout rides the status row");
+
+        // one send: no marker. The row cannot hold tok + latency + cache in 22 cells,
+        // so the cache segment is dropped whole rather than clipped to "800 c…" — the
+        // spelled-out readout belongs to the status row, which has the room.
+        LlmStats once;
+        once.latency_ms = 1900;
+        once.gen_tps = 31.5;
+        once.prompt_tokens = 1200;
+        once.completion_tokens = 60;
+        once.cached_tokens = 800;
+        once.attempts = 1;
+        s.llm_end(once);
+        s.present(160, 30, true);
+        std::string again;
+        for (int y = 0; y < 30; ++y) again += s.row_text(y);
+        chk(again.find("×") == std::string::npos, "a single send is not marked");
+        chk(again.find("60 tok · 1.9s") != std::string::npos, "the bare call reads without a marker");
+        chk(again.find("800 c") == std::string::npos, "no cache segment is clipped mid-word");
+        chk(again.find("cache 800") != std::string::npos, "cache still reads on the status row");
+    }
+
     chk(g_early.width == 16, "text_width from a static initializer (lazy kernel pick)");
 
     // ---- decode: well-formed UTF-8 only (RFC 3629) ----

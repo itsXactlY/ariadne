@@ -41,5 +41,36 @@ double jittered_backoff(int attempt, double base_delay, double max_delay, double
     return delay + jitter;
 }
 
+WireFailure wire_failure(const WireResult& r) {
+    // A call the operator cut is not a failed call: re-sending it would ask for something
+    // nobody asked for, and would do so after they had already moved on.
+    if (r.cancelled) return WireFailure::Cancelled;
+
+    // Both of these are a guard answering, not a hiccup: the byte cap and the stall clock
+    // are the limits the caller set, and a second send reaches the same limit.
+    if (r.refused || r.stalled) return WireFailure::Answer;
+
+    if (r.code == 0) {   // curl reached the server and got a response line
+        // A 5xx is the server failing to answer, not answering: if nothing was handed out
+        // yet, the second send can get a different reply. A 4xx is an answer about the
+        // request, so it comes back identically; so does an error chunk inside a stream.
+        if (r.status >= 500 && !r.spoken) return WireFailure::Transient;
+        return r.status >= 400 || r.stream_error ? WireFailure::Answer : WireFailure::None;
+    }
+
+    // No response line at all: refused connect, a socket closed mid-call, a timeout before
+    // a byte. If the caller already has words, a second send would repeat them — the answer
+    // they were given is the answer they keep. If it has none, the socket is the fact.
+    if (r.spoken) return WireFailure::Answer;
+    return WireFailure::Transient;
+}
+
+bool transient(WireFailure f) { return f == WireFailure::Transient; }
+
+double wire_backoff_ms(int attempt, double base_ms, double max_ms) {
+    // jittered_backoff works in seconds; the wire speaks milliseconds.
+    return jittered_backoff(attempt, base_ms / 1000.0, max_ms / 1000.0, 0.5) * 1000.0;
+}
+
 }  // namespace agent
 }  // namespace dd
