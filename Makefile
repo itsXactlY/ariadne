@@ -1,6 +1,6 @@
 BUILD ?= build
 .DEFAULT_GOAL := $(BUILD)/dd_tui
-.PHONY: all test clean install
+.PHONY: all test clean install doc-audit
 all: $(BUILD)/dd_tui
 # The install is the folder the operator runs dd from, the one that owns
 # config.yaml; build/ is make's output and never a home (dd refuses it).
@@ -482,6 +482,9 @@ tsan: $(BUILD)/dd_slot_ring_tsan
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp ./$$t || { echo "FAILED: $$t"; fail=$$((fail+1)); }; done; \
 	echo "$$fail test binary(ies) failed"; [ $$fail -eq 0 ]
+
+doc-audit:
+	@python3 bench/doc_audit.py
 
 clean:
 	-rm -rf $(BUILD)

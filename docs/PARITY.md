@@ -10,13 +10,13 @@ on branch `fix/audit-20261024`, not read out of a README.
 |---|---|---|
 | Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:232,337,383-403,420` |
 | Retrieval | One `Router` at turn start, after tool batches, on failure; local BM25f catalogues + async pod leg | `src/know/trigger.cpp`, `src/know/router.cpp` |
-| Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `src/core/default_config.cpp:57-75` |
-| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:807-815` |
+| Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/daedalus/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
+| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:934-944` |
 | Learning | `dd::learn` service: episodes, credit, priors, drafted skills, lifecycle | `docs/LEARN.md`, `src/learn/*` |
-| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:783-797` |
+| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
-| Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:824-833`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:490,716-742,928-944,1220-1249`, `src/dd_agent_main.cpp:183-205` |
+| Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:524`, `src/dd_tui.cpp:787-807`, `src/dd_tui.cpp:1016-1029`, `src/dd_tui.cpp:1335-1341`, `src/dd_agent_main.cpp:197-218` |
 
 ## What is missing — measured, not assumed
 
@@ -66,7 +66,7 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. The
-TUI hands the running worker's queue to `Agent::steer_hook` (`src/dd_tui.cpp:1159`), which the
+TUI hands the running worker's queue to `Agent::steer_hook` (`src/dd_tui.cpp:1192`), which the
 loop calls at the tool-round boundary (`src/agent/agent.cpp:375`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
 `TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps each one with `steered`, so the
@@ -135,7 +135,7 @@ each step built, tested, then looked at:
    cards re-block only when it changes; render kernels and the MPSC feed stayed
    untouched.
 2. **Workflow contract.** `PromptComposer::workflow_contract()`, toggled by
-   `agent.contract`. `README.md:95` now names it; its old "built-in tool
+   `agent.contract`. `README.md:108` now names it; its old "built-in tool
    preamble" claim was drift — no such string ever existed.
 3. **Plan lifecycle.** `todo` registered in both binaries; the ledger rides
    `ephemeral_system_prompt`, never the tape, so the cached prefix stays
@@ -153,6 +153,6 @@ cannot be redirected is a turn the operator cannot steer.
 
 `make test` runs every binary in `$(TEST_BINS)` serially with
 `DD_TEST_TMP=$(BUILD)/tmp` (`mk/README.md`). The Scene renders offscreen, so
-visual checks are assertions on `Scene::row_text(y)` (`tests/ui_test.cpp:169`)
+visual checks are assertions on `Scene::row_text(y)` (`tests/ui_test.cpp:170-173`)
 — a card's rows are read back as plain text, which is the same frame a tty
 would blit.

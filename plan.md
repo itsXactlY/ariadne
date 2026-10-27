@@ -202,11 +202,21 @@ on asks that opened nothing at all, and was right at rank 1 only 23 of 70 times 
 
 ## W9 — keep the docs honest as each wave lands
 
-`README.md:26` is the "ported but not wired" list; it was already wrong once this
-session (it claimed `patch_parser`/`fuzzy_match`/`skill_provenance` were linked into
-no binary after `5c1d207` wired them). After every wave, re-derive the list by grep
-(include lines + symbol use, excluding the module's own TU and its own test) and
-rewrite the line. Waves that falsify a claim must delete the claim.
+**Closed.** Re-derivation is a tool, not a habit: `make doc-audit` (`bench/doc_audit.py`)
+expands the three product recipes from the `Makefile`, walks the transitive `#include`
+closure from them, and checks every path-and-line citation in `README.md` and
+`docs/*.md` against the tree. It fails on a claim the tree contradicts, so a wave that
+moves code cannot leave a doc pointing somewhere else.
+
+| what | where | proof |
+|---|---|---|
+| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `dd` 59 TUs, `dd_agent` 18, `dd_tui` 82; closure reaches **176 files** (83 TUs, 93 headers); **33 of 116** `src/*.cpp` linked into no product binary, **49 of 142** headers reached by none, 16 of 32 header-only ports unreached |
+| the README's unwired list is now bidirectional | `README.md` "Ported but not wired" | names every unwired TU by name or directory *and* rejects a name the closure reaches; `src/tools/mcp_schema_cache.cpp` was on the list and is **wired** since W6 (`Makefile:139-140`), so it is off it |
+| a citation must point at the thing it describes | `citations()` | 25 citations checked; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (12 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts (`brief.md`, `report.md`, `tape.jsonl`) are excluded |
+| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `524`, `787-807`, `1016-1029`, `1174`, `1335-1341`; steering `1159` → `1192`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/daedalus/config.yaml:71-79`, not the generated `default_config.cpp` |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`dd_tui.cpp:763-768,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+
+`make doc-audit`: clean — 25 citations, 0 unresolved or drifting, 0 wiring claims.
 
 ## W10 — no locks, no queues: every hand-off becomes atomic ownership
 

@@ -14,7 +14,7 @@ guessing happens) nothing looks anything up.
 The plan: one `Router` decides **when**, **what** and **how** to retrieve; every body of knowledge
 sits behind one `Catalogue` interface; the **harness retrieves, the model confirms by reading**.
 The model is a 1-bit coder: it does not volunteer retrieval, so the harness cannot leave it to
-the model's judgment (the Python Daedalus learned this: `agent/skill_router.py` docstring).
+the model's judgment (the Python Daedalus learned this: `py:agent/skill_router.py` docstring).
 
 Orientation is oh-my-pi (omp 18.12.1, read from its docs and prompts, section 3): it keeps
 retrieving first through a skills list the model MUST read from, `find` before any guessing,
@@ -26,16 +26,16 @@ model; we have 498 skills and a 54.6k rebase mark.
 
 | # | Finding | Evidence |
 |---|---|---|
-| F1 | Two retrieval moments only: turn start and rebase. After the first tool call nothing looks anything up. | `engine.cpp:263`, `engine.cpp:429` |
+| F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:343`, `src/context/engine.cpp:404`, `src/context/engine.cpp:659` |
 | F2 | The system prompt has three voices that contradict each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). | `dd_tui.cpp:727`, `:750`, `:893`; `initialize` reply |
 | F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../my-project/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
-| F4 | The catalogue is read once: `if (maze->up()) skills.load_async()`. Pod down at launch means empty for the whole session while 467 SKILL.md lie on disk. `skills::Scanner/Registry` (disk) feed only the `dd` CLI; `dd_tui` uses only `SkillIndex` (maze). | `dd_tui.cpp:827`, `cli_main.cpp` |
+| F4 | Closed: the catalogue is not read once. `dd_tui` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:763-768,834-836,856`, `src/know/wiring.cpp` |
 | F5 | Catalogue quality. 611 `skill:` rows are 498 skills + 5 notes posing as skills (`fix-i3-services-not-starting` was *offered* as one) + 1 AFE fragment. 107 names exist in both `builtin` and `local` (95 identical sha, 4 differ, 8 unknown). 101 cards have no body slices (`load()` then returns the 650-char card as "the skill"). 96 legacy cards carry raw frontmatter in the text. Only 134 cards have tags. | maze census |
 | F6 | A loaded skill is a tool result: it ages out (`tool_group_ttl`, rebase) and nothing re-attaches it, so the model forgets the procedure it was following. Bodies: median 6 KB (~1.7k tokens), p90 16.8 KB (~4.7k), max 55 KB (~15k), against a rebase mark of ~54.6k. | maze census |
 | F7 | Nothing is measured: no offered-to-opened counter. | |
-| F8 | Dead config: `skills.auto_route`, `skills.external_dirs`, `skills.disabled` are in the schema, nothing reads them. | `harness_config.hpp:289` |
+| F8 | Closed: `build_skills` in the config schema declares `enabled`, `auto_route`, `maze`, `external_dirs`, `disabled`, and every one of them is read — the wiring layer resolves them, and `auto_route` off is a policy, not a bug. | `src/core/harness_config.hpp:289`, `src/know/wiring.cpp:22-29`, `src/know/policy.cpp:24-28` |
 | F9 | The deep recall blocks the turn start: 6-8 s scoped to `skill:*`, 12-17 s for the pod's `lean`/`semantic` modes. The scope leaks (`auto:reasoning`, `skillsrc` rows come back) and one card (a security-diagnosis skill with a long description) is a hub: 6 of 8 queries. Unscoped, the top 8 held zero skills. | probes |
-| F10 | Home: the binary reads `~/.daedalus/{config.yaml,skins,logs}` (shared with the Python Daedalus) and writes spill and the soak spool to `<cwd>/.daedalus`, so state depends on where it was launched. | `dd_tui.cpp:374,628,667,854`, `dd_agent_main.cpp:176`, `cli_main.cpp:16`, `core/home.cpp` |
+| F10 | Closed: `resolve_home` puts every state beside the binary and refuses `~/.daedalus`; both binaries resolve it before anything is read, and spill and the soak spool ride that root rather than the cwd. | `src/core/home.cpp:106`, `src/dd_agent_main.cpp:145-150` |
 
 ### Replay: the current matcher on real prompts
 
@@ -64,16 +64,16 @@ operator prompts, so it stays out of git.
 
 | omp 18.12.1 | Source | daedalus-cpp |
 |---|---|---|
-| Skills as `name: description` in the system prompt; "Matching skill -> MUST read `skill://<name>` first" | `prompts/system/system-prompt.md` (Skills & Rules), `docs/skills.md` | 498 names would cost ~12.5k tokens, 23% of the window. Ship a **catalogue map** (46 groups, <= 250 tokens) plus top-k **cards per decision point**; keep the imperative. |
-| `skill://`, `rule://`, `memory://`, `history://` all resolved by the one `read` verb | `docs/skills.md`, `docs/rulebook-matching-pipeline.md` s.8 | `Uri` + `Resolver`; `read_file("skill://x#sec")` works; `skill_load` stays as an alias for a weak model. |
-| Rules in three buckets: always-apply (full text in the prompt), rulebook (listed, read on demand), TTSR (dormant until a pattern fires) | `docs/rulebook-matching-pipeline.md` s.5 | **Pins**, **Cards**, **Tripwires**. |
-| TTSR: match on the model's own output, inject the rule, retry; `once` / `after-gap`; survives compaction | `docs/ttsr-injection-lifecycle.md` | `Tripwires` as a pre-call gate on tool arguments (no stream abort in v1): veto the call, return the rule as the result; once/after-gap; the ledger survives a rebase. |
-| `find` FIRST: "NEVER guess grep/glob targets"; hits `path:range score`, below ~0.4 = weak, widen | `prompts/tools/find.md`, system prompt "Exploration" | `find(query, kinds)` over the catalogues with the same score semantics. Workspace code search later. |
-| Loop redirects: identical call x N; repeated reasoning | `prompts/system/tool-call-loop-redirect.md`, `thinking-loop-redirect.md` | `StallTrigger`: the stop-poking-blind guard. |
-| Memory: compact summary injected at session start; `recall`/`reflect`/`retain`/`learn`; "recalled rows changed" notice | `docs/memory.md`, `prompts/system/memory-recall-changes.md` | `OperatorBrief` pins in the prefix; the pod recall stays as the deep leg; `learn` becomes maze-native skills; staleness note after a rebase. |
+| Skills as `name: description` in the system prompt; "Matching skill -> MUST read `skill://<name>` first" | `py:prompts/system/system-prompt.md` (Skills & Rules), `py:docs/skills.md` | 498 names would cost ~12.5k tokens, 23% of the window. Ship a **catalogue map** (46 groups, <= 250 tokens) plus top-k **cards per decision point**; keep the imperative. |
+| `skill://`, `rule://`, `memory://`, `history://` all resolved by the one `read` verb | `py:docs/skills.md`, `py:docs/rulebook-matching-pipeline.md` s.8 | `Uri` + `Resolver`; `read_file("skill://x#sec")` works; `skill_load` stays as an alias for a weak model. |
+| Rules in three buckets: always-apply (full text in the prompt), rulebook (listed, read on demand), TTSR (dormant until a pattern fires) | `py:docs/rulebook-matching-pipeline.md` s.5 | **Pins**, **Cards**, **Tripwires**. |
+| TTSR: match on the model's own output, inject the rule, retry; `once` / `after-gap`; survives compaction | `py:docs/ttsr-injection-lifecycle.md` | `Tripwires` as a pre-call gate on tool arguments (no stream abort in v1): veto the call, return the rule as the result; once/after-gap; the ledger survives a rebase. |
+| `find` FIRST: "NEVER guess grep/glob targets"; hits `path:range score`, below ~0.4 = weak, widen | `py:prompts/tools/find.md`, system prompt "Exploration" | `find(query, kinds)` over the catalogues with the same score semantics. Workspace code search later. |
+| Loop redirects: identical call x N; repeated reasoning | `py:prompts/system/tool-call-loop-redirect.md`, `py:thinking-loop-redirect.md` | `StallTrigger`: the stop-poking-blind guard. |
+| Memory: compact summary injected at session start; `recall`/`reflect`/`retain`/`learn`; "recalled rows changed" notice | `py:docs/memory.md`, `py:prompts/system/memory-recall-changes.md` | `OperatorBrief` pins in the prefix; the pod recall stays as the deep leg; `learn` becomes maze-native skills; staleness note after a rebase. |
 | `intent` on every tool call ("Reading model role settings") | system prompt, Tool I/O | optional `intent` argument on the local tools: a query the model wrote itself, for free. |
-| Managed skills never overwrite authored ones; lowest precedence; colliding names: winner keeps the bare name, the other is namespaced, identical copies collapse | `docs/skills.md` | Same rules; sha256 collapses 95 of the 107 duplicates. |
-| Config in `~/.omp/agent`, `--profile`, `--config` overlay | `docs/config-usage.md` | We differ on purpose: beside the binary (s.10). `--config` overlay is worth keeping. |
+| Managed skills never overwrite authored ones; lowest precedence; colliding names: winner keeps the bare name, the other is namespaced, identical copies collapse | `py:docs/skills.md` | Same rules; sha256 collapses 95 of the 107 duplicates. |
+| Config in `~/.omp/agent`, `--profile`, `--config` overlay | `py:docs/config-usage.md` | We differ on purpose: beside the binary (s.10). `--config` overlay is worth keeping. |
 
 omp does not solve our scale problem: it has no semantic skill search (its `find` is for code) and
 lists every skill. That part is ours.

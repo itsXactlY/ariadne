@@ -4,3 +4,4 @@ cache/
 learn/
 logs/
 state/
+bench/__pycache__/
