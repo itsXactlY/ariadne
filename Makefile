@@ -1,6 +1,6 @@
 BUILD ?= build
 .DEFAULT_GOAL := $(BUILD)/dd_tui
-.PHONY: all test clean install doc-audit tsan
+.PHONY: all test clean install install-minimal doc-audit tsan
 all: $(BUILD)/dd_tui
 # The install is the folder the operator runs dd from, the one that owns
 # config.yaml; build/ is make's output and never a home (dd refuses it).
@@ -131,10 +131,22 @@ $(BUILD)/dd: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard inc
 $(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
 
-install: | $(BUILD)/dd_tui
-	@install -m 0755 $(BUILD)/dd_tui $(INSTALL_DIR)/dd_tui
-	@echo "dd is at $(INSTALL_DIR)/dd_tui; that folder owns config.yaml and is the home"
-	@echo "dd's home is $(INSTALL_DIR) — not build/, which holds only what this Makefile built"
+# The installer is built first, and built alone: one translation unit, bare $(CXX),
+# no other target in the tree. It then compiles the products, gates them with the
+# suites, installs them into INSTALL_DIR, seeds that folder with dd's own --init, and
+# smoke-tests the binary that landed there. `make install` therefore proves the
+# toolchain by exercising it, not by asserting it.
+$(BUILD)/dd_install: installer/dd_install.cpp
+	@$(CXX) $(CXXFLAGS) -Wshadow -o $@ $<
+
+install: $(BUILD)/dd_install
+	@$< --booted --root . --home $(INSTALL_DIR)
+
+# The minimal agent: dd_agent, config.yaml and the dogfood skills in the home. dd_tui is
+# still built — it is the only binary that can write the reference config — but it is
+# not installed.
+install-minimal: $(BUILD)/dd_install
+	@$< --booted --root . --home $(INSTALL_DIR) --minimal
 
 $(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui

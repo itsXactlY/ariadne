@@ -143,6 +143,10 @@ def citations():
     tree = {}
     for f in (glob.glob(str(ROOT / "src/**/*.cpp"), recursive=True)
               + glob.glob(str(ROOT / "include/dd/**/*.hpp"), recursive=True)
+              # The installer is a first-class TU, not make's output: docs cite it by
+              # path, so it has to be in the citable tree or the gate calls a real file
+              # "NO SUCH FILE" and pushes the doc toward wording that hides a dependency.
+              + glob.glob(str(ROOT / "installer/*.cpp"))
               + glob.glob(str(ROOT / "tests/*.cpp"))
               + glob.glob(str(ROOT / "docs/*.md"))
               + glob.glob(str(ROOT / "mk/*.md"))

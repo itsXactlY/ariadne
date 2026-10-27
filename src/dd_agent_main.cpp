@@ -232,7 +232,17 @@ int main(int argc, char** argv) {
     if (user_message.empty()) { std::cerr << "empty user message\n"; return 1; }
 
     std::cout << "[base=" << base_url << " model=" << model << " turns=" << max_iterations << "]\n";
-    std::string final = agent.run(user_message);
+    // A transport failure is a fact about the endpoint, not a reason to abort. Left
+    // uncaught it reaches std::terminate — the process dies with SIGABRT and the
+    // caller (an installer's smoke step, a script, a test) reads 134 and cannot tell
+    // "the endpoint refused" from "the binary is broken".
+    std::string final;
+    try {
+        final = agent.run(user_message);
+    } catch (const std::exception& ex) {
+        std::cerr << "agent: " << ex.what() << "\n";
+        return 1;
+    }
     std::cout << "=== final (" << agent.api_call_count << " LLM calls) ===\n" << final << "\n";
     return 0;
 }

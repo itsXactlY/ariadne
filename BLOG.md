@@ -140,6 +140,49 @@ and the MPSC header is deleted. The proof is a grep, not a memory.
 - `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker`: **no race reported**.
   `make test`: **1025 checks, 0 test binaries failed**.
 
+## Prompt 6 — "before i shut u down now … update/build an install script. compile ur own installer first. use that installer, to compile the rest."
+
+The old `make install` was two lines: `install -m 0755 build/dd_tui $(INSTALL_DIR)/dd_tui`,
+then an `echo` asserting the folder owns the config. That is a claim, not a proof — it
+copies one binary into a folder it never checked and prints a sentence about the result.
+
+`installer/dd_install.cpp` borrows mazemaker's `unicum` installer for the machinery —
+fork/exec with a real exit code, detection by probing, write-only-if-absent, a step list
+where a non-optional step failing **fails the install**, exit codes that separate bad
+arguments (`2`) from a step that ran and failed (`3`) — and drops its TUI, worker thread
+and log mutex. An installer that needs a screen and a thread is bigger than the thing it
+installs; dd's tree carries no mutex and no queue, and this one doesn't either.
+
+The order is the point: the TU is compiled by a bare `g++` before anything else exists,
+re-execs itself with `--booted`, and every step is reported by a binary that had to build
+itself to exist.
+
+```
+make install          → preflight · build · make test · install · seed · skills · smoke   exit 0
+make install-minimal  → dd_agent only                                                   exit 0
+--home ~/.daedalus    → refused in preflight                                            exit 3
+--home build/         → refused in preflight                                            exit 3
+second run            → dogfood skills: seeded 0, left untouched 3                      exit 0
+```
+
+Full run into a scratch home: suites green, `doc-audit` clean, `config.yaml` 7412 bytes
+written by `dd_tui --init`, 3 dogfood skills seeded, smoke reports 70 catalogue entries
+from the installed home, census `catalogue healthy` with `no gist: 0`. The seeded cards
+land in `fact/`, `invariant/`, `ops/` because `category_from_path` only yields a category
+when the path under the root has three parts — a flat `skills/<name>/SKILL.md` scans with
+no group and can never be filtered by `dd list --category`.
+
+Two bugs surfaced while verifying, both real, neither installer-specific:
+
+- `dd_agent` **aborted** on a transport failure. `HttpLLMClient::chat` throws
+  `std::runtime_error`, nothing caught it, so a refused endpoint died with `SIGABRT` and
+  the caller read `134` — indistinguishable from "the binary is broken". It now reports
+  `agent: curl: Could not connect to server` and exits `1`.
+- The OpenMP probe printed nothing: its own `%d` and `\n` were being eaten by the
+  *outer* shell `printf`. `%%d` survives, and a doubled backslash keeps `\n` literal
+  inside the generated source instead of turning it into a real newline that would not
+  compile. It prints `OpenMP 16 threads` now.
+
 ## The bug that was worth its own header
 
 libcurl 8.16+ calls the write callback with **four** args —
@@ -173,7 +216,8 @@ the learn loop and a `run_terminal` that is a guard, not a sandbox.
 src/            port TUs (agent · core · tools · ui · ui_simd)
 include/dd/     headers
 tests/          92 test binaries — `make test`; 4 tsan binaries — `make tsan`
-build/          dd · dd_agent · dd_tui · dd_ui_tests · dd_slot_ring_tsan
+installer/      dd_install.cpp + the dogfood skills it seeds into a home
+build/          dd · dd_agent · dd_tui · dd_install · dd_ui_tests · dd_slot_ring_tsan
 ```
 
 ```sh
