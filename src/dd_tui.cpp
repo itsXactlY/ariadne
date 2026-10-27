@@ -30,6 +30,7 @@
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
+#include "dd/core/slot_ring.hpp"
 #include "dd/know/prompt.hpp"
 #include "dd/know/resolver.hpp"
 #include "dd/know/router.hpp"
@@ -69,8 +70,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <deque>
-#include <mutex>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1092,12 +1091,16 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> running{false};
     std::thread worker;
-    // Typed while a turn or a command runs. Two consumers, so it is locked: the
-    // agent thread pulls it at each round boundary (steering, folded into the turn
-    // that is already running), the idle loop sends what is left as a turn once
-    // nothing runs. Both drain, neither drops.
-    std::mutex qmu;
-    std::deque<std::string> queued;
+    // Typed while a turn or a command runs. No lock, no queue: a ring of slots whose
+    // ownership moves by compare-exchange. The agent thread claims everything published
+    // at a round boundary (steering, folded into the turn that is already running); the
+    // idle loop claims one per turn once nothing runs. A claim that loses is not a claim,
+    // so both drain and neither reads a prompt the other is holding. Overflow is held
+    // here rather than published — the key handler is the ring's only writer, so holding
+    // costs no ownership — and a held prompt waits for the turn instead of entering it
+    // behind prompts typed after it.
+    dd::core::SlotRing<16> typed;
+    std::vector<std::string> waiting;   // the key handler's alone: overflow, oldest first
     bool quit = false;
     int cols = 80, rows = 24;
     Editor ed;
@@ -1157,17 +1160,17 @@ int main(int argc, char** argv) {
     // turn received, at the boundary it entered — not as if it had been typed before
     // the turn began.
     agent.steer_hook = [&] {
-        std::vector<std::string> typed;
-        {
-            std::lock_guard<std::mutex> lk(qmu);
-            typed.assign(queued.begin(), queued.end());   // a deque is not a vector: copy out, then clear
-            queued.clear();
+        std::vector<std::string> folded;
+        // claim_all hands back the payloads it pinned, oldest stamp first: a prompt typed
+        // mid-turn enters the turn ahead of one typed after it, however the slots wrapped.
+        for (auto&& text : typed.claim_all()) {   // a prompt the idle loop claimed first is not ours to read
+            scene.user(text);
+            folded.push_back(std::move(text));
         }
-        for (const auto& t : typed) scene.user(t);
-        if (!typed.empty())
-            scene.note("◈ steered · " + std::to_string(typed.size()) +
-                       (typed.size() == 1 ? " prompt entered this turn" : " prompts entered this turn"));
-        return typed;
+        if (!folded.empty())
+            scene.note("◈ steered · " + std::to_string(folded.size()) +
+                       (folded.size() == 1 ? " prompt entered this turn" : " prompts entered this turn"));
+        return folded;
     };
 
     std::function<void()> learn_pin;   // /learn: null while learning is off
@@ -1436,18 +1439,18 @@ int main(int argc, char** argv) {
             return;
         }
         if (running.load() || cmd_busy.load()) {
-            size_t n;
-            {
-                std::lock_guard<std::mutex> lk(qmu);
-                queued.push_back(p);
-                n = queued.size();
-            }
-            // A turn pulls at its next round boundary, so this redirect lands mid-turn; a command
-            // cannot, so it waits. If the turn ends before a boundary, the idle loop sends it as its
+            // A turn claims at its next round boundary, so this redirect lands mid-turn; a command
+            // has no boundary, so it waits. Once anything is held, everything typed after it is held
+            // too: a published prompt would otherwise enter the turn behind an older one it cannot
+            // overtake. If the turn ends before a boundary, the idle loop sends what is left as its
             // own turn — never silently.
+            const bool folded = running.load() && waiting.empty() && typed.publish(p);
+            if (!folded) waiting.push_back(std::move(p));
+            const size_t n = typed.published() + waiting.size();
             scene.note("queued (" + std::to_string(n) + ") — " +
-                       (running.load() ? "enters this turn at its next round boundary, or becomes a turn if the turn ends first"
-                                       : "sends when the " + cmd_label + " ends"));
+                       (folded ? "enters this turn at its next round boundary, or becomes a turn if the turn ends first"
+                               : running.load() ? "all slots hold — it waits for the turn to end"
+                                                : "sends when the " + cmd_label + " ends"));
             return;
         }
         start_turn(p);
@@ -1546,11 +1549,15 @@ int main(int argc, char** argv) {
         if (!cmd_busy.load() && cmd_thread.joinable()) cmd_thread.join();
         std::string q;
         if (!running.load() && !cmd_busy.load() && !quit) {
-            std::lock_guard<std::mutex> lk(qmu);
-            if (!queued.empty()) {
-                q = std::move(queued.front());
-                queued.pop_front();
-                if (!queued.empty()) scene.note("still queued (" + std::to_string(queued.size()) + ") — the rest follow this turn");
+            // The ring first: whatever it holds was typed before anything held back does.
+            q = typed.claim_one();
+            if (q.empty() && !waiting.empty()) {
+                q = std::move(waiting.front());
+                waiting.erase(waiting.begin());
+            }
+            if (!q.empty()) {
+                const size_t left = typed.published() + waiting.size();
+                if (left) scene.note("still queued (" + std::to_string(left) + ") — the rest follow this turn");
             }
         }
         if (!q.empty()) start_turn(q);
@@ -1579,9 +1586,8 @@ int main(int argc, char** argv) {
     term::leave();
     term::show_stderr(saved_err);
     {   // what was typed and never reached the model: say it, do not drop it quietly
-        std::lock_guard<std::mutex> lk(qmu);
-        if (!queued.empty())
-            std::cout << std::to_string(queued.size()) + " prompt(s) typed were never sent\n";
+        const size_t left = typed.published() + waiting.size();
+        if (left) std::cout << std::to_string(left) + " prompt(s) typed were never sent\n";
     }
     {
         const auto& th = scene.theme();

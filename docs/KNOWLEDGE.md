@@ -442,7 +442,8 @@ mutex, but six `std::atomic<std::shared_ptr<...>>` cells (the router's `reattach
 bit into the pointer and spins. They sat on the per-turn search path. What replaced them, and what else changed:
 
 **The rule.** `dd::know` holds no mutex and no condition variable. A hand-off between threads is single-owner state plus
-`core::MpscQueue`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls.
+`core::MpscQueue`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls. The UI's steering hand-off keeps the same rule with a fourth shape,
+`core::SlotRing` (below).
 
 **`core::SnapCell<T>`** (`include/dd/core/snap_cell.hpp`). A reader pins the current epoch (one store into its thread's
 record), loads one pointer and unpins when its `Read` ends (one store): wait-free. The publisher swaps with one exchange,
@@ -461,6 +462,23 @@ still takes 20 ms slices, only to look for a user cancel; the recall landing wak
 2 ms sleeps. `Catalogue::cancel(bool)` is checked inside the memory sync's page and batch loops and the maze's skill listing,
 and `Refresher::stop()` calls it: quitting no longer waits out a sync (a cold-cache first launch used to keep the process
 alive about 15 s after the answer; what was fetched is kept and saved).
+
+**`core::SlotRing<N>`** (`include/dd/core/slot_ring.hpp`). A hand-off with no mutex, no condition variable and no queue:
+`N` fixed slots, each carrying one atomic word that holds the payload's stamp *and* its ownership together — 0 is held by
+nobody, `s` is payload `s` published, `UINT64_MAX` is claimed. A claim is a CAS on the exact stamp the claimer read, so
+exactly one thread takes each payload and a claim that loses hands back nothing rather than a payload somebody else is
+holding. The writer owns the slots at 0 and is the only thread that ever leaves that state, so it writes the text before
+the stamp appears and the release store makes the text arrive with the stamp; the claimer resets the slot after moving
+the payload out, which orders the writer's next fill after that move. A scan walks slots, not publish order, so a drain
+sorts the stamps it pinned (`claim_all`) and a single claim re-scans until its pick stops moving (`claim_one`). A payload
+published into a slot the scan already walked belongs to the *next* claim, at a stamp older than that claim's newest, so
+order across two racing claimers is measured rather than promised: 2 inversions over 4,905 one-at-a-time claims against
+a writer publishing 20,000, and none inside any single drain. The turn boundary drains once per round, so it never reads
+that limit. A full ring refuses the payload instead of evicting one, and the caller's backpressure decides what that
+means: `dd_tui` holds overflow in a list the key handler owns alone and, once anything is held, holds everything typed
+after it too — a held prompt waits for the turn rather than entering it behind prompts typed later. Rejected: the mutex
+plus `std::deque` this replaced (a lock on the key handler and on the boundary), and a Vyukov MPSC queue (the boundary
+needs oldest-first, not FIFO, and the idle loop sends one prompt per turn).
 
 **SIMD** (`include/dd/know/scan.hpp`, `src/know/scan.cpp`). `classify` turns 64 bytes into bit masks (alnum, upper, lower,
 space, non-ASCII) and `classify32` does one word; each exists as scalar, AVX2 and AVX-512 kernels behind `target`
@@ -531,6 +549,13 @@ beats a vector loop that wins nothing. The directory walk is syscalls in a gener
 - `park` and the `Refresher`: `tests/core_park_test.cpp` (timeout, immediate return, wake latency, 60,000 hand-offs without a lost
   wakeup) and `test_refresher_parks` in `tests/know_router_test.cpp` (idle: no refresh, a poke is heard in under 30 ms, `stop()`
   returns in under 30 ms from a ten-minute park).
+- `SlotRing`: `tests/core_slot_ring_test.cpp` (order across a wrap, `claim_one` taking the oldest stamp and naming it, a
+  full ring refusing rather than overwriting, 20,000 publishes against a draining bulk claimer and a racing one-at-a-time
+  claimer with nothing lost and nothing claimed twice, two claimers taking each payload exactly once at 8,000, and what a
+  race leaves behind draining in publish order) reports nothing under ThreadSanitizer, which `make tsan` builds.
+  Steering end to end: `test_steering_in_loop` (two prompts typed mid-turn enter the engine at the round boundary and the
+  model sees them) and `build/dd` in a tmux pane, where a prompt typed while an answer streams prints
+  `◈ steered · 1 prompt entered this turn` and the answer repeats it.
 
 **Not run.** The AVX-512 kernels (`classify_avx512`, `classify32_avx512`, and the ones in `ui_simd`) are written and compile, and
 have never executed: this box has AVX2 and no AVX-512, QEMU TCG hides AVX-512 even with `-cpu max`, and Intel SDE is not installed.

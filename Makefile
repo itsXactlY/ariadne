@@ -98,6 +98,15 @@ $(BUILD)/dd_snap_cell_tests: include/dd/core/snap_cell.hpp tests/core_snap_cell_
 $(BUILD)/dd_park_tests: include/dd/core/park.hpp tests/core_park_test.cpp
 	$(CXX) $(CXXFLAGS) tests/core_park_test.cpp -pthread -o $(BUILD)/dd_park_tests
 
+# The ring's whole claim is that racing threads hand a payload over once each. That is a
+# data race to prove, so the target the suite runs is not the only one: the TSan build
+# below is what falsifies it. `make tsan` builds and runs it.
+$(BUILD)/dd_slot_ring_tests: include/dd/core/slot_ring.hpp tests/core_slot_ring_test.cpp
+	$(CXX) $(CXXFLAGS) tests/core_slot_ring_test.cpp -pthread -o $(BUILD)/dd_slot_ring_tests
+
+$(BUILD)/dd_slot_ring_tsan: include/dd/core/slot_ring.hpp tests/core_slot_ring_test.cpp
+	$(CXX) $(CXXFLAGS) -pipe -g -fsanitize=thread tests/core_slot_ring_test.cpp -pthread -o $(BUILD)/dd_slot_ring_tsan
+
 $(BUILD)/dd_know_scan_tests: src/know/scan.cpp include/dd/know/scan.hpp tests/know_scan_test.cpp
 	$(CXX) $(CXXFLAGS) src/know/scan.cpp tests/know_scan_test.cpp -o $(BUILD)/dd_know_scan_tests
 
@@ -416,6 +425,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_home_tests \
   $(BUILD)/dd_snap_cell_tests \
   $(BUILD)/dd_park_tests \
+  $(BUILD)/dd_slot_ring_tests \
   $(BUILD)/dd_know_scan_tests \
   $(BUILD)/dd_know_tokenizer_tests \
   $(BUILD)/dd_know_bm25_tests \
@@ -443,6 +453,12 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_usage_pricing_tests
 
 -include $(wildcard mk/*.mk)
+
+# The race the ring claims to settle is only falsifiable under a race detector, so it is
+# a target of its own: built with -fsanitize=thread and run, not folded into `make test`
+# (TSan costs the suite more than the claim is worth on every run).
+tsan: $(BUILD)/dd_slot_ring_tsan
+	./$(BUILD)/dd_slot_ring_tsan
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp ./$$t || { echo "FAILED: $$t"; fail=$$((fail+1)); }; done; \
