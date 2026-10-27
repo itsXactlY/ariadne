@@ -1,6 +1,6 @@
 BUILD ?= build
 .DEFAULT_GOAL := $(BUILD)/dd_tui
-.PHONY: all test clean install install-minimal doc-audit tsan
+.PHONY: all test clean install install-all doc-audit tsan
 all: $(BUILD)/dd_tui
 # The install is the folder the operator runs dd from, the one that owns
 # config.yaml; build/ is make's output and never a home (dd refuses it).
@@ -131,22 +131,22 @@ $(BUILD)/dd: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard inc
 $(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
 
-# The installer is built first, and built alone: one translation unit, bare $(CXX),
-# no other target in the tree. It then compiles the products, gates them with the
-# suites, installs them into INSTALL_DIR, seeds that folder with dd's own --init, and
-# smoke-tests the binary that landed there. `make install` therefore proves the
-# toolchain by exercising it, not by asserting it.
+# The sidegag: built first and built alone — one translation unit, bare $(CXX), no other
+# target in the tree — then it compiles the harness and installs it. `make install`
+# proves the toolchain by exercising it, not by asserting it. No suite gate and no probes:
+# a missing libcurl or OpenMP is `make`'s own failure, in the language that matters.
 $(BUILD)/dd_install: installer/dd_install.cpp
 	@$(CXX) $(CXXFLAGS) -Wshadow -o $@ $<
 
+# The harness only: dd_tui, plus the config its home owns. dd_tui is always the target
+# because it is the only binary that can write dd's reference config, and --init seeds
+# from dd's own copy rather than one an installer invented.
 install: $(BUILD)/dd_install
 	@$< --booted --root . --home $(INSTALL_DIR)
 
-# The minimal agent: dd_agent, config.yaml and the dogfood skills in the home. dd_tui is
-# still built — it is the only binary that can write the reference config — but it is
-# not installed.
-install-minimal: $(BUILD)/dd_install
-	@$< --booted --root . --home $(INSTALL_DIR) --minimal
+# The same sidegag, wider: also dd_agent (the running agent) and dd (the skill catalogue).
+install-all: $(BUILD)/dd_install
+	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
 $(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui

@@ -38,30 +38,27 @@ echo "list files in /tmp/ using list_dir" | build/dd_agent
 
 **Everything lives beside the binary.** `build/dd_tui --init` writes `config.yaml` (the embedded copy of `examples/daedalus/config.yaml`: model, turns, skin, MCP, denylist, knowledge) and `state/ cache/ logs/` next to it; `--init --from FILE` starts from an existing config, `--init --rules` also installs a starter set of tripwires. `skills/`, `rules/`, `skins/` and an optional `brief.md` sit there too. Nothing is read from `~/.daedalus` (the Python Daedalus's home): `dd import-daedalus` copies skills and skins over once, on request. Resolution, first match wins: `--home DIR` → the folder of `--config FILE` (or a bare path argument) → `$DD_HOME` (or `$DAEDALUS_HOME`) → the binary's folder when it holds a `config.yaml` → the folder dd was started from when it holds a `config.yaml` → a folder that already has `state/ cache/ logs/ learn/`. `~/.daedalus` is refused as a home, and so is a `build/` folder picked implicitly (`make install` refuses both, rather than discovering them after the build). The message is stdin, or the words after `--`.
 
-## Install it — the installer compiles itself first
+## Install it — a sidegag that compiles itself
 
 ```
-make install              # INSTALL_DIR=$(HOME)/projects/daedalus
-make install-minimal      # the minimal agent: dd_agent, config.yaml, the dogfood skills
+make install              # dd_tui + the config its home owns; INSTALL_DIR=$(HOME)/projects/daedalus
+make install-all          # same sidegag, wider: also dd_agent and dd
 ```
 
-`installer/dd_install.cpp` is one translation unit compiled by a bare `g++` with nothing
-else in the tree built; it then re-execs itself and does the rest. Preflight probes the
-toolchain by **compiling** — `-std=c++20`, libcurl compiled *and linked*, `-fopenmp` with a
-thread count — because `command -v libcurl` passes on a distro that ships the library
-without its headers and then fails a build. Then: build the products, run `make test`,
-install `0755`, seed the home with `dd_tui --init` (dd owns the reference config; an
-installer carrying its own copy would drift the moment dd changes one key), seed
-`installer/skills/<group>/<name>/SKILL.md` **only where absent**, and smoke-test the
-binary that landed. Exit codes: `0` installed, `2` bad arguments, `3` a step ran and
-failed — a step that is not optional failing fails the install, so a broken install is
-never reported as installed.
+`installer/dd_install.cpp` is one TU compiled by a bare `g++` with nothing else in the tree
+built; it re-execs itself, then builds `dd_tui`, installs it `0755`, seeds the home with
+`dd_tui --init` (dd owns the reference config — an installer holding a second copy would
+drift the moment dd changes one key), and proves the binary that landed runs. Exit codes:
+`0` installed, `2` bad arguments, `3` build or install failed.
 
-`--minimal` still builds `dd_tui`, because it is the only binary that can write the
-reference config, and deliberately does not install it. The minimal smoke needs no
-network: `dd_agent` is pointed at a closed loopback port, and passing means the home
-resolved, `config.yaml` parsed, `model.*` read, and libcurl reached — with no
-`terminate called` in the output.
+It brings nothing else: no toolchain probes, no suite gate, no doc audit, no skill seeding,
+no import. A missing libcurl or OpenMP is `make`'s own failure, stated in the language that
+matters — a probe that paraphrases that in advance is a line the installer would only
+repeat. Two things it does check, because `make` never does: a folder named `build/` `out/`
+`obj/` is make's output and is refused as a home, and `~/.daedalus` belongs to the Python
+Daedalus and is refused. `skills/`, `rules/` and `skins/` are not pre-created — dd creates the directory it
+writes into itself (`src/learn/skill_sink.cpp:112` — `create_directories(target.parent_path())`
+for a learned skill), so an installer that guesses ahead only duplicates a decision dd owns.
 
 | Env | Overrides |
 |---|---|

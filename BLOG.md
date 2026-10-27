@@ -140,48 +140,57 @@ and the MPSC header is deleted. The proof is a grep, not a memory.
 - `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker`: **no race reported**.
   `make test`: **1025 checks, 0 test binaries failed**.
 
-## Prompt 6 — "before i shut u down now … update/build an install script. compile ur own installer first. use that installer, to compile the rest."
+## Prompt 6 — "compile ur own installer first. use that installer, to compile the rest." … then: "i do NOT want the fat installer, who brings all and everything. just: for this harness. as sidegag."
 
 The old `make install` was two lines: `install -m 0755 build/dd_tui $(INSTALL_DIR)/dd_tui`,
-then an `echo` asserting the folder owns the config. That is a claim, not a proof — it
-copies one binary into a folder it never checked and prints a sentence about the result.
+then an `echo` asserting the folder owns the config. A claim, not a proof.
 
-`installer/dd_install.cpp` borrows mazemaker's `unicum` installer for the machinery —
-fork/exec with a real exit code, detection by probing, write-only-if-absent, a step list
-where a non-optional step failing **fails the install**, exit codes that separate bad
-arguments (`2`) from a step that ran and failed (`3`) — and drops its TUI, worker thread
-and log mutex. An installer that needs a screen and a thread is bigger than the thing it
-installs; dd's tree carries no mutex and no queue, and this one doesn't either.
-
-The order is the point: the TU is compiled by a bare `g++` before anything else exists,
-re-execs itself with `--booted`, and every step is reported by a binary that had to build
-itself to exist.
+The first version of `installer/dd_install.cpp` proved too much: it probed g++ and the
+standard by compiling, linked libcurl, counted OpenMP threads, ran `make test`, audited the
+docs, seeded three dogfood skills and smoke-tested three binaries. 446 lines of preflight
+for a harness whose build already reports every one of those facts in the language of the
+failure that matters. A probe that paraphrases `make` in advance is not evidence, it is
+noise with an exit code. So it is now 130 lines, and the order is the only thing kept:
 
 ```
-make install          → preflight · build · make test · install · seed · skills · smoke   exit 0
-make install-minimal  → dd_agent only                                                   exit 0
---home ~/.daedalus    → refused in preflight                                            exit 3
---home build/         → refused in preflight                                            exit 3
-second run            → dogfood skills: seeded 0, left untouched 3                      exit 0
+g++ -std=c++20 -O2 -Wall -Wextra -Werror -Wshadow -pipe -Iinclude -o build/dd_install installer/dd_install.cpp
+build/dd_install --self-check      # the binary that just compiled itself answers
+build/dd_install --booted …        # the same binary builds dd_tui, installs, seeds, verifies
 ```
 
-Full run into a scratch home: suites green, `doc-audit` clean, `config.yaml` 7412 bytes
-written by `dd_tui --init`, 3 dogfood skills seeded, smoke reports 70 catalogue entries
-from the installed home, census `catalogue healthy` with `no gist: 0`. The seeded cards
-land in `fact/`, `invariant/`, `ops/` because `category_from_path` only yields a category
-when the path under the root has three parts — a flat `skills/<name>/SKILL.md` scans with
-no group and can never be filtered by `dd list --category`.
+What survives is the bootstrap plus two checks `make` does not make: `build/` `out/` `obj/`
+are make's output and are refused as a home, and `~/.daedalus` belongs to the Python
+harness. Both exit 3 before anything compiles. Nothing else is pre-created — `skills/`
+appears when dd's learn loop writes a learned card, which calls
+`create_directories(target.parent_path())` itself (`src/learn/skill_sink.cpp:112`); an
+installer that pre-creates it is guessing about a decision dd owns.
 
-Two bugs surfaced while verifying, both real, neither installer-specific:
+```
+fresh home            → dd_tui + the embedded reference config.yaml (7412 bytes), exit 0
+live home             → the operator's config.yaml kept, not clobbered (10292 bytes), exit 0
+make install-all      → same sidegag, plus dd_agent + dd, exit 0
+--home build/         → refused before anything compiles, exit 3
+HOME=$(mktemp -d)     → nothing created under HOME, exit 0
+```
+
+`dd_tui --init` reports which of the two happened — `wrote …` or `kept …` — so the installer
+never has to know. `ensure_home` (`src/core/home.cpp:152`) fills `state/`, `cache/`, `logs/`;
+the installer creates only the folder the binary is copied into.
+
+Three bugs surfaced while verifying, all real:
 
 - `dd_agent` **aborted** on a transport failure. `HttpLLMClient::chat` throws
-  `std::runtime_error`, nothing caught it, so a refused endpoint died with `SIGABRT` and
-  the caller read `134` — indistinguishable from "the binary is broken". It now reports
+  `std::runtime_error`, nothing caught it, so a refused endpoint died with `SIGABRT` and the
+  caller read `134` — indistinguishable from "the binary is broken". It now prints
   `agent: curl: Could not connect to server` and exits `1`.
-- The OpenMP probe printed nothing: its own `%d` and `\n` were being eaten by the
-  *outer* shell `printf`. `%%d` survives, and a doubled backslash keeps `\n` literal
-  inside the generated source instead of turning it into a real newline that would not
-  compile. It prints `OpenMP 16 threads` now.
+- The lean rewrite dropped the home creation and failed the copy: `install: reguläre Datei
+  '/tmp/dd_lean/dd_tui' kann nicht angelegt werden` — a message about a file, when the real
+  cause was a folder. `--init` can create a home, but it runs *after* the copy, so the
+  folder has to exist first. 130 lines is not a license to lose a line that matters.
+- `bench/doc_audit.py`'s citable tree globbed `src/`, `include/dd/`, `tests/` only, so a
+  citation to the installer TU read as `NO SUCH FILE`. The installer is a first-class TU,
+  not make's output: the gate now covers `installer/*.cpp` rather than the docs being
+  reworded to dodge it.
 
 ## The bug that was worth its own header
 
@@ -216,7 +225,7 @@ the learn loop and a `run_terminal` that is a guard, not a sandbox.
 src/            port TUs (agent · core · tools · ui · ui_simd)
 include/dd/     headers
 tests/          92 test binaries — `make test`; 4 tsan binaries — `make tsan`
-installer/      dd_install.cpp + the dogfood skills it seeds into a home
+installer/      dd_install.cpp — the sidegag: compiles itself, then compiles the harness
 build/          dd · dd_agent · dd_tui · dd_install · dd_ui_tests · dd_slot_ring_tsan
 ```
 
