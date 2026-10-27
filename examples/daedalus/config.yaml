@@ -70,8 +70,8 @@ knowledge:
     max_turn_tokens: 1500  # everything retrieval adds to one turn
   confidence:              # calibrated with `dd replay` on real prompts against the real catalogue
     offer_score: 0.15      # a skill is offered when it holds this share of the question's evidence ...
-    offer_mass: 6.5        # ... and that is this much evidence in absolute terms (two terms, or one rare one and more)
-    open_score: 0.25       # at this share the head of the skill is opened for the model
+    offer_mass: 9.5        # ... and that is this much evidence in absolute terms, fitted at 502 skills
+    open_score: 0.40       # at this share the head of the skill is opened for the model
   rank:                    # BM25F field weights
     name: 8
     tags: 3

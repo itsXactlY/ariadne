@@ -32,9 +32,16 @@ enum class Placement {
 };
 
 struct Confidence {
+    // Measured, not guessed: `dd replay` over 1333 real operator asks (bench/replay_corpus.py)
+    // against the live catalogue of 502 skills. The term-count lever moved precision almost not at
+    // all — matched>=2, >=3 and >=4 all sit between .32 and .41 at rank 1 — while the absolute
+    // evidence bar did: at mass 6.4 the rule makes 296 offers, 23 right at 1 and 228 on asks that
+    // opened no skill at all; at mass 9.5 it makes 217, 19 right at 1, precision .41, and keeps the
+    // same top-3 recall (22 of the 169 asks that did open a skill). So min_matched stays 2 and the
+    // bar moves. Full curve: docs/PARITY.md, "Calibration".
     int min_matched = 2;
-    double offer_mass = 6.5, offer_score = 0.15, open_score = 0.25;
-    size_t calibrated_at = 568;   // the catalogue size offer_mass was fitted at; 0: offer_mass is absolute
+    double offer_mass = 9.5, offer_score = 0.15, open_score = 0.40;
+    size_t calibrated_at = 502;   // the catalogue size offer_mass was fitted at; 0: offer_mass is absolute
     // Evidence is idf, and idf grows with ln(catalogue size): the same two terms are worth less in a
     // catalogue of twenty than of five hundred, so the bar scales with it (never under 1).
     double needed(size_t catalogue) const {

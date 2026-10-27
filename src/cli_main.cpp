@@ -5,7 +5,7 @@
 //   dd resolve skill://NAME[/FILE][#PAGE]               the same, by uri
 //   dd find QUERY... [--k N]                            what the harness would offer for this text
 //   dd skills check [--strict]                          the census: bodyless, duplicate, note-like, no-gist cards
-//   dd replay FILE [--k N] [--show]                     prompts (jsonl {"text","want":[...]}, or one per line)
+//   dd replay FILE [--k N] [--home DIR] [--show]          prompts (jsonl {"text","want":[...]}, or one per line); the catalogue is the home's, so calibration runs against the real one
 //                                                       through the catalogue: offers, hits and misses per threshold
 //   dd learn status|why SKILL|report|forget SKILL|export   what the router has learned (read-only, except forget)
 //   dd import-daedalus [--from DIR] [--skills] [--skins] [--with-config]   copy from the Python Daedalus's home, once
@@ -254,7 +254,7 @@ std::vector<Prompt> read_corpus(const std::string& path) {
 }
 
 int cmd_replay(const Args& a) {
-    if (a.pos.empty()) { std::cerr << "usage: dd replay FILE [--k N] [--show]\n"; return 1; }
+    if (a.pos.empty()) { std::cerr << "usage: dd replay FILE [--k N] [--home DIR] [--show]\n"; return 1; }
     int k = 3;
     if (!a.k.empty() && !parse_int(a.k, 1, 1000, k)) return bad_number("--k", a.k);
     Env e = open_env(a);
@@ -268,7 +268,8 @@ int cmd_replay(const Args& a) {
     int fit = 0, none = 0;
     for (const auto& r : rows) (r.p->want.empty() ? none : fit) += r.p->labeled ? 1 : 0;
     std::printf("%zu prompts: %d with a skill, %d with none (labeled)\n", rows.size(), fit, none);
-    std::printf("%6s %7s %9s %7s %8s %8s\n", "offer", "offers", "right@1", "wrong", "hit@k", "false");
+    // score alone: matched and mass are not applied here, so this row is sensitivity, not the rule.
+    std::printf("%6s %7s %9s %7s %8s %8s %8s\n", "offer", "offers", "right@1", "wrong", "hit@k", "false", "prec@1");
     for (double t = 0.20; t <= 0.80001; t += 0.05) {
         int offers = 0, right1 = 0, wrong = 0, hitk = 0, falsep = 0;
         for (const auto& r : rows) {
@@ -284,8 +285,43 @@ int cmd_replay(const Args& a) {
             for (const auto& h : r.hits)
                 if (h.score >= t && in_want(h)) { ++hitk; break; }
         }
-        std::printf("%6.2f %7d %9d %7d %8d %8d\n", t, offers, right1, wrong, hitk, falsep);
+        const int judged = right1 + wrong;
+        std::printf("%6.2f %7d %9d %7d %8d %8d %7.2f\n", t, offers, right1, wrong, hitk, falsep,
+                    judged ? static_cast<double>(right1) / judged : 0.0);
     }
+    {   // the rule's own levers at the live catalogue size, score held where the config puts it
+        const size_t n = e.cat->size();
+        const Confidence& c = e.policy.skills;
+        const double base = c.needed(n);
+        std::printf("\nthe rule's own levers at %zu skills (score>=%.2f held, mass shown as the absolute bar):\n", n, c.offer_score);
+        std::printf("%7s %6s %7s %9s %7s %8s %8s %8s %8s\n", "matched", "mass", "offers", "right@1", "wrong", "hit@k", "false", "prec@1", "open-right");
+        for (int m = 1; m <= 4; ++m) {
+            for (double mf = 0.75; mf <= 2.0001; mf += 0.25) {
+                int offers = 0, right1 = 0, wrong = 0, hitk = 0, falsep = 0, opened_right = 0;
+                for (const auto& r : rows) {
+                    const bool offered = !r.hits.empty() && r.hits[0].matched >= m && r.hits[0].mass >= base * mf && r.hits[0].score >= c.offer_score;
+                    if (offered) ++offers;
+                    if (!r.p->labeled) continue;
+                    auto in_want = [&](const Hit& h) { return std::find(r.p->want.begin(), r.p->want.end(), h.card.uri.id) != r.p->want.end(); };
+                    if (r.p->want.empty()) {
+                        if (offered) ++falsep;
+                        continue;
+                    }
+                    if (offered) {
+                        const bool right = in_want(r.hits[0]);
+                        (right ? right1 : wrong)++;
+                        if (right && c.opens(r.hits[0], n)) ++opened_right;
+                    }
+                    for (const auto& h : r.hits)
+                        if (h.score >= c.offer_score && h.matched >= m && h.mass >= base * mf && in_want(h)) { ++hitk; break; }
+                }
+                const int judged = right1 + wrong;
+                std::printf("%7d %6.2f %7d %9d %7d %8d %8d %7.2f %8d\n", m, base * mf, offers, right1, wrong, hitk, falsep,
+                            judged ? static_cast<double>(right1) / judged : 0.0, opened_right);
+            }
+        }
+    }
+
     {   // the shipped rule: what the harness would really do with these prompts
         const size_t n = e.cat->size();
         const Confidence& c = e.policy.skills;
@@ -310,6 +346,26 @@ int cmd_replay(const Args& a) {
                     "false offers: %d of %d without one; opened for the model: %d (%d right)\n",
                     offers, rows.size(), k, hit3, with_skill, right1, wrong, falsep, without, opened, opened_right);
     }
+    {   // the open bar under the live offer rule: an offer the model reads is a slot the model pays for
+        const size_t n = e.cat->size();
+        const Confidence& c = e.policy.skills;
+        std::printf("\nthe open bar at %zu skills (the live offer rule):\n", n);
+        std::printf("%7s %7s %9s %8s %8s\n", "open", "opened", "open-right", "right@1", "prec-open");
+        for (double t = 0.20; t <= 0.80001; t += 0.05) {
+            int opened = 0, opened_right = 0, right1 = 0;
+            for (const auto& r : rows) {
+                if (r.hits.empty() || !c.offers(r.hits[0], n)) continue;
+                if (r.hits[0].score < t) continue;
+                ++opened;
+                if (!r.p->labeled) continue;
+                auto in_want = [&](const Hit& h) { return std::find(r.p->want.begin(), r.p->want.end(), h.card.uri.id) != r.p->want.end(); };
+                if (in_want(r.hits[0])) { ++opened_right; ++right1; }
+            }
+            std::printf("%7.2f %7d %9d %8d %8.2f\n", t, opened, opened_right, right1,
+                        opened ? static_cast<double>(opened_right) / opened : 0.0);
+        }
+    }
+
     if (!a.show.empty())
         for (const auto& r : rows) {
             std::string head = utf8_head(r.p->text, 100);

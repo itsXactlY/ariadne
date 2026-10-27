@@ -180,11 +180,25 @@ meaning and stays the only mid-call action.
 
 ## W8 — calibration from measurement, not guesses
 
-`knowledge.confidence` and the offer thresholds are guesses. `dd replay FILE`
-(`src/cli_main.cpp:256`) measures offers and misses per threshold and has never been
-run against the live catalogue. Run it against the real catalogue, derive thresholds
-from the observed offer/miss curve, and record the curve in `PARITY.md`. No operator
-decision: the thresholds become data, and the data is reported rather than asserted.
+**Closed.** `dd replay` now measures the offer rule against the catalogue a home actually
+holds, and the thresholds it shipped are the numbers the measurement produced. Ground truth is
+behavioural: the corpus is 1333 real operator asks harvested from Daedalus's own session log,
+each labelled with the skill ids the harness *actually opened* after that ask — 169 opened a
+skill, 1164 opened none. The shipped rule offered 296 times over those 1333 asks, 228 of them
+on asks that opened nothing at all, and was right at rank 1 only 23 of 70 times it was judged
+(prec 0.34). The fitted rule offers 217, false 171, prec 0.41.
+
+| step | change | proof |
+|---|---|---|
+| the corpus is harvested, not written | `bench/replay_corpus.py` | injected harness text dropped by marker not by length (1312 injected, 496 short of 4275 user turns), asks deduplicated, labels read out of the assistant's own `skill_view` calls and filtered to ids the live catalogue holds — 502 of 502 entry lines parsed, so no stale name becomes a phantom "right" |
+| replay measures the rule's own levers, not just a score sweep | `cmd_replay` (`src/cli_main.cpp`) | `--home DIR` opens the real catalogue (502 skills); the run prints score sweep, matched × mass grid, precision at rank 1, false offers over the unlabeled half, and the open-bar sweep |
+| the term-count lever is not the lever | the grid | `min_matched` 1→4 at every mass keeps precision between .32 and .44; `matched>=4` is strictly worse (104 offers, 8 right, prec .32, top-3 recall 28 → 10). So `min_matched` stays 2 |
+| the absolute evidence bar is | the grid | mass 6.4 → prec .34, 7.12 → .37, **9.5 → .41**, 11.9 → .36 at the same recall. `offer_mass` 6.5 → 9.5, `calibrated_at` 568 → 502 (measured, not guessed) |
+| opening a head costs the model a head | the open-bar sweep | at 0.25 the rule opens 73 heads for 9 right ones; at 0.40 it opens 17 for 4. `open_score` 0.25 → 0.40 |
+| the numbers reach the running harness | `Router::offers` passes `cat->size()` | `examples/daedalus/config.yaml` carries the same three numbers and the generated `default_config.cpp` shows them; `build/dd_know_router_tests` re-derives `needed()` from the defaults (9.5 at 502, 4.65 at 20, 12.6 at 3700, never under 1) |
+| the curve is reported, not asserted | `docs/PARITY.md` "Calibration" | the two-row before/after table, the lever finding, and what the numbers are *not*: precision is a floor because labels are what the model did rather than what it should have done, and the corpus cannot measure the `find()` call a good offer saves |
+
+`make test`: 0 test binaries failed.
 
 ## W9 — keep the docs honest as each wave lands
 

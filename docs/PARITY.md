@@ -90,10 +90,38 @@ records the second call on the same epoch with its prefix cached
 None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:101`, applied at `:352`) caps
 delegated calls the harness cannot execute: they are recorded, never run.
 
-### Calibration
-`knowledge.confidence` and the offer thresholds are guesses. `dd replay FILE`
-(`src/cli_main.cpp:256`) exists and measures offers and misses per threshold;
-it has never been run against the live catalogue.
+### Calibration — closed: the thresholds are measured, and they moved
+`dd replay FILE [--home DIR]` (`src/cli_main.cpp`) now sweeps the offer rule's own levers
+against the catalogue a home actually holds, and reports precision at rank 1 alongside
+offers and misses. Run it against the live catalogue of **502 skills** with a corpus of
+**1333 real operator asks** harvested from Daedalus's own session log (`bench/replay_corpus.py`):
+injected harness text dropped by marker, deduplicated, and labelled *behaviourally* — the
+skill ids the harness really opened after that ask. 169 asks opened a skill, 1164 opened none.
+
+| rule | offers / 1333 | right@1 | wrong@1 | right in top-3 / 169 | false offers / 1164 | prec@1 | heads opened |
+|---|---|---|---|---|---|---|---|
+| shipped: matched>=2, mass>=6.5 (fitted at 568 → 6.37 here), score>=0.15, open>=0.25 | 296 | 23 | 45 | 28 | 228 | **0.34** | 101, of which 10 right |
+| fitted: matched>=2, mass>=9.5 (fitted at 502), score>=0.15, open>=0.40 | 217 | 19 | 27 | 25 | 171 | **0.41** | 17, of which 4 right |
+
+The lever table is the reason the bar moved and the term count did not. Holding score at
+0.15 and sweeping `min_matched` 1→4 at every mass, precision at rank 1 stays between .32 and
+.44 whatever the term count is — `matched>=4` is strictly worse (104 offers, 8 right, prec .32,
+top-3 recall down from 28 to 10). Sweeping the absolute mass bar is what moves it: 6.4 → .34,
+7.12 → .37, 9.5 → **.41**, 11.9 → .36. So `min_matched` stays 2, `offer_mass` goes 6.5 → 9.5,
+`calibrated_at` 568 → 502 (the size it was fitted at, measured rather than guessed), and
+`open_score` 0.25 → 0.40 — opening the head of a skill costs the model a whole head, and at
+0.25 that bought 73 heads for 9 right ones against 17 for 4 at 0.40. `examples/daedalus/config.yaml`
+carries the same three numbers, and `tests/know_router_test.cpp` re-derives `needed()` from them.
+
+**What the numbers are not:** ground truth is behavioural, so precision is a floor, not a
+fact. An ask whose right answer is `design-md` scored wrong at rank 1 when the top hit was
+`daedalus-identity-update` — a plausibly adjacent card, counted against the rule. Labels also
+come from the Python harness's own catalogue, which is not this one. The corpus is a snapshot
+of one operator's asks, not a distribution; the curve is reproducible with the two commands in
+`bench/replay_corpus.py`'s docstring, and re-running it after the catalogue changes is the
+only way these numbers stay true. What the rule costs per offer is a line in the prompt; what
+it saves is the `find()` call the operator would otherwise make, and the corpus cannot measure
+that second half — a saved call leaves no trace in the log.
 
 ## Plan
 
@@ -115,7 +143,8 @@ each step built, tested, then looked at:
    `/plan`, and a count on the status row in verbose.
 4. **This ledger**, plus the README line that drifted.
 
-Next, in priority order, not promised: sub-agents, then calibration. The tool
+Next, in priority order, not promised: sub-agents. Calibration closed on this branch —
+the thresholds are now measured numbers, not guesses (see above). The tool
 output budget and mid-turn steering shipped on this branch — the first because
 it is what makes verbose honest about a result, the second because a turn that
 cannot be redirected is a turn the operator cannot steer.
