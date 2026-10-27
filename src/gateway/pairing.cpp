@@ -1,5 +1,6 @@
 // gateway/pairing.py -> dd::gateway::PairingStore
 #include "dd/gateway/pairing.hpp"
+#include "dd/core/fslock.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 
@@ -30,6 +31,13 @@ static const double RATE_LIMIT_SECONDS = 600.0;
 static const double LOCKOUT_SECONDS = 3600.0;
 static const int MAX_PENDING_PER_PLATFORM = 3;
 static const int MAX_FAILED_ATTEMPTS = 5;
+
+// One kernel lock for the whole store: the entries under pairing_dir() are read and rewritten as
+// whole files, and the lock's inode never moves (the guarded file is rename-replaced, so a lock
+// taken on the file itself would guard nothing after the first write).
+static std::filesystem::path store_lock_path(const std::filesystem::path& dir) {
+    return dir / ".store.lock";
+}
 
 static double now_seconds() {
     return std::chrono::duration<double>(
@@ -174,7 +182,7 @@ void PairingStore::approve_user(const std::string& platform,
 }
 
 bool PairingStore::revoke(const std::string& platform, const std::string& user_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const core::FileLock lock(store_lock_path(pairing_dir()));   // the whole read-modify-write, one step
     std::filesystem::path p = approved_path(platform);
     Json approved = load_json(p);
     const Json* hit = json_get(approved, user_id);
@@ -323,7 +331,7 @@ std::string pairing_random_code(const std::string& alphabet, int length) {
 std::optional<std::string> PairingStore::generate_code(const std::string& platform,
                                                        const std::string& user_id,
                                                        const std::string& user_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const core::FileLock lock(store_lock_path(pairing_dir()));   // the helpers below run under it
     cleanup_expired(platform);
     if (is_locked_out(platform)) return std::nullopt;
     if (is_rate_limited(platform, user_id)) return std::nullopt;
@@ -349,7 +357,7 @@ std::optional<std::string> PairingStore::generate_code(const std::string& platfo
 
 std::optional<Json> PairingStore::approve_code(const std::string& platform,
                                                const std::string& code) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const core::FileLock lock(store_lock_path(pairing_dir()));   // the helpers below run under it
     cleanup_expired(platform);
     std::string key = trim_upper(code);
 
@@ -414,7 +422,7 @@ std::vector<Json> PairingStore::list_pending(const std::string& platform) {
 }
 
 int PairingStore::clear_pending(const std::string& platform) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const core::FileLock lock(store_lock_path(pairing_dir()));   // the whole read-modify-write, one step
     int count = 0;
     std::vector<std::string> platforms;
     if (!platform.empty()) platforms.push_back(platform);

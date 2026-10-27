@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <limits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -761,9 +762,41 @@ Theme Theme::load(const std::string& path) {
 
 Scene::Scene(Theme th) : th_(std::move(th)) {}
 
+// A lifecycle event, published into a fixed slot: one release store, claimed by whoever renders.
+// The stamp is taken here, not inside the ring, so it shares the counter with the stream buffers.
 void Scene::post(Event e) {
     e.at = clock::now();
-    q_.push(std::move(e));
+    e.stamp = order_.fetch_add(1, std::memory_order_relaxed) + 1;
+    q_.publish_any(std::move(e));   // the refusal is counted on the ring; dropped_events() reads it
+}
+
+// The streaming thread's side. The buffer has one writer, so appending is a plain copy — no CAS,
+// no node, no allocation. The one rule is ownership of bytes: a byte may be written where the
+// reader cannot yet reach it, or where the reader has already passed it, never in between. Past
+// that the delta is refused and counted, because silently rewriting a byte the render thread is
+// reading is the bug this whole wave exists to remove.
+void Scene::stream(LiveBuf& b, const std::string& delta) {
+    if (delta.empty()) return;
+    const uint64_t stamp = order_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t len = b.len.load(std::memory_order_relaxed);   // ours: this thread is len's only writer
+    const uint64_t read = b.read.load(std::memory_order_acquire);
+    if (len - read + delta.size() > b.kCap) {
+        dropped_live_.fetch_add(delta.size(), std::memory_order_relaxed);
+        return;
+    }
+    if (len == read) {   // nothing pending: this delta starts a run, so its clock and count start here
+        b.run_start.store(stamp, std::memory_order_relaxed);
+        b.first_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch()).count(),
+                         std::memory_order_relaxed);
+        b.deltas.store(0, std::memory_order_relaxed);   // tokens are per run, which is per call
+    }
+    const size_t head = static_cast<size_t>(len % b.kCap);
+    const size_t first = std::min(delta.size(), b.kCap - head);
+    std::memcpy(b.bytes.data() + head, delta.data(), first);
+    if (first < delta.size()) std::memcpy(b.bytes.data(), delta.data() + first, delta.size() - first);
+    b.deltas.fetch_add(1, std::memory_order_relaxed);
+    b.run_end.store(stamp, std::memory_order_relaxed);
+    b.len.store(len + delta.size(), std::memory_order_release);   // publishes the bytes, the stamps, the clock, the count
 }
 
 void Scene::set_info(const Info& info) {
@@ -791,12 +824,20 @@ void Scene::recalled(const RecallView& v) {
 }
 void Scene::error(const std::string& text) { Event e; e.ev = Ev::Error; e.a = text; post(std::move(e)); }
 void Scene::clear() { Event e; e.ev = Ev::Clear; post(std::move(e)); }
-void Scene::llm_begin() { Event e; e.ev = Ev::LlmBegin; post(std::move(e)); }
+
+// A new call is an event like any other. The stream buffers need no reset: a run begins when the
+// buffer has been drained, and llm_begin's stamp orders itself against the runs around it. Touching
+// the buffer's words from here would put a second writer on words the streaming thread owns.
+void Scene::llm_begin() {
+    Event e;
+    e.ev = Ev::LlmBegin;
+    post(std::move(e));
+}
 void Scene::turn_begin() { Event e; e.ev = Ev::TurnBegin; post(std::move(e)); }
 void Scene::turn_end() { Event e; e.ev = Ev::TurnEnd; post(std::move(e)); }
 
-void Scene::llm_reasoning(const std::string& delta) { Event e; e.ev = Ev::Reason; e.a = delta; post(std::move(e)); }
-void Scene::llm_content(const std::string& delta) { Event e; e.ev = Ev::Content; e.a = delta; post(std::move(e)); }
+void Scene::llm_reasoning(const std::string& delta) { stream(reason_, delta); }
+void Scene::llm_content(const std::string& delta) { stream(say_, delta); }
 void Scene::set_effort(const std::string& label) { Event e; e.ev = Ev::Effort; e.a = label; post(std::move(e)); }
 void Scene::recall(bool active) { Event e; e.ev = Ev::Recall; e.ok = active; post(std::move(e)); }
 
@@ -875,8 +916,77 @@ Entry& Scene::push(Kind k, const std::string& text) {
 }
 
 void Scene::apply() {
-    Event e;
-    while (q_.pop(e)) apply(e);
+    // The two channels are merged by feed order, not drained one after the other. Draining the
+    // streams last would put every streamed byte after llm_end, so a call that streamed and then
+    // ended would render its reasoning as still live — exactly what the suite caught. Draining
+    // first would put it before llm_begin, which closes the previous call's cards.
+    for (Event& e : q_.claim_all()) {
+        flush_before(e.stamp);   // every run the producer stamped before this event
+        apply(e);
+    }
+    flush_before(std::numeric_limits<uint64_t>::max());   // whatever arrived after the last event
+}
+
+// Flush whole runs, oldest first, up to (not including) `stamp`. A run is a stretch of bytes the
+// streaming thread published between two events; the render thread cannot take half of it, because
+// the card's clock, token count and feed order were published with the run's last byte.
+void Scene::flush_before(uint64_t stamp) {
+    for (;;) {
+        const uint64_t len_r = reason_.len.load(std::memory_order_acquire);
+        const uint64_t len_s = say_.len.load(std::memory_order_acquire);
+        const bool r = len_r > reason_.read.load(std::memory_order_relaxed);
+        const bool s = len_s > say_.read.load(std::memory_order_relaxed);
+        if (r && reason_.run_end.load(std::memory_order_relaxed) < stamp && (!s || reason_.run_start.load(std::memory_order_relaxed) < say_.run_start.load(std::memory_order_relaxed)))
+            flush_run(reason_, Kind::Reason, live_reason_);
+        else if (s && say_.run_end.load(std::memory_order_relaxed) < stamp)
+            flush_run(say_, Kind::Say, live_say_);
+        else return;   // nothing pending is older than the event we are about to apply
+    }
+}
+
+// The render thread's side of a stream buffer: take the published bytes, append them to the card,
+// then move the read cursor so the writer may reuse them. The cursor is ours to write and the
+// length is ours to read, so the two threads never touch the same byte at the same time — the
+// writer's guard is exactly `len - read`, and we can only grow that gap by not running.
+void Scene::flush_run(LiveBuf& b, Kind kind, Entry*& live) {
+    const uint64_t len = b.len.load(std::memory_order_acquire);
+    const uint64_t read = b.read.load(std::memory_order_relaxed);   // ours: read's only writer
+    if (len == read) return;
+
+    const uint64_t first_ns = b.first_ns.load(std::memory_order_relaxed);
+    const clock::time_point first = first_ns ? clock::time_point(std::chrono::nanoseconds(first_ns)) : clock::now();
+
+    std::string text;
+    const size_t n = static_cast<size_t>(len - read);
+    const size_t head = static_cast<size_t>(read % b.kCap);
+    const size_t first_run = std::min(n, b.kCap - head);
+    text.assign(b.bytes.data() + head, first_run);
+    if (first_run < n) text.append(b.bytes.data(), n - first_run);
+
+    if (kind == Kind::Reason) {
+        if (!live) {
+            live = &push(Kind::Reason, "");
+            reason_t0_ = first;
+        }
+        live->text += text;
+        cap_live(live->text);
+        live->n = static_cast<int>(b.deltas.load(std::memory_order_relaxed));
+        ++live->ver;
+        phase_ = Phase::Reasoning;
+    } else {
+        if (live_reason_ && !live_reason_->resolved) {   // thinking is over once the answer starts
+            live_reason_->ms = std::chrono::duration<double, std::milli>(first - reason_t0_).count();
+            live_reason_->resolved = true;
+            ++live_reason_->ver;
+        }
+        if (!live) live = &push(Kind::Say, "");
+        live->text += text;
+        cap_live(live->text);
+        live->n = static_cast<int>(b.deltas.load(std::memory_order_relaxed));
+        ++live->ver;
+        phase_ = Phase::Writing;
+    }
+    b.read.store(len, std::memory_order_release);
 }
 
 void Scene::apply(Event& e) {
@@ -901,30 +1011,6 @@ void Scene::apply(Event& e) {
         t.resolved = true;
         break;
     }
-    case Ev::Reason:
-        if (!live_reason_) {
-            live_reason_ = &push(Kind::Reason, "");
-            reason_t0_ = e.at;
-        }
-        live_reason_->text += e.a;
-        cap_live(live_reason_->text);
-        ++live_reason_->n;
-        ++live_reason_->ver;
-        phase_ = Phase::Reasoning;
-        break;
-    case Ev::Content:
-        if (live_reason_ && !live_reason_->resolved) {   // thinking is over once the answer starts
-            live_reason_->ms = std::chrono::duration<double, std::milli>(e.at - reason_t0_).count();
-            live_reason_->resolved = true;
-            ++live_reason_->ver;
-        }
-        if (!live_say_) live_say_ = &push(Kind::Say, "");
-        live_say_->text += e.a;
-        cap_live(live_say_->text);
-        ++live_say_->n;
-        ++live_say_->ver;
-        phase_ = Phase::Writing;
-        break;
     case Ev::Effort:
         info_.effort = e.a;
         break;
@@ -1589,6 +1675,9 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         mz += std::to_string(tape_.ledger) + " nodes · " + std::to_string(tape_.edges) + " edges";
         if (tape_.soak_queue) mz += " · " + std::to_string(tape_.soak_queue) + " writing";
         if (tape_.spooled) mz += " · " + std::to_string(tape_.spooled) + " spooled";
+        // A refused out publish is the engine not draining the ring: the row is durable in the
+        // graph, only this session's ledger view missed it, so the number is shown, never hidden.
+        if (tape_.unledgered) mz += " · " + std::to_string(tape_.unledgered) + " unledgered";
         row(py + 5, "maze", mz, tape_.maze ? Style{th_.ok} : Style{th_.error});
     }
 
@@ -1799,6 +1888,11 @@ std::string Scene::drain_inline(int width, bool color, bool truecolor) {
 size_t Scene::live_text_bytes() const {
     return (live_reason_ ? live_reason_->text.size() : 0) + (live_say_ ? live_say_->text.size() : 0);
 }
+
+// What the rings refused. Both are numbers the reply names, so an over-full ring is a fact the
+// operator sees rather than text that vanished.
+uint64_t Scene::dropped_events() const { return q_.refused(); }
+uint64_t Scene::dropped_live_bytes() const { return dropped_live_.load(std::memory_order_relaxed); }
 
 std::string Scene::row_text(int y) const {
     return frame_ ? frame_->row_text(y) : std::string();

@@ -1,6 +1,6 @@
 BUILD ?= build
 .DEFAULT_GOAL := $(BUILD)/dd_tui
-.PHONY: all test clean install doc-audit
+.PHONY: all test clean install doc-audit tsan
 all: $(BUILD)/dd_tui
 # The install is the folder the operator runs dd from, the one that owns
 # config.yaml; build/ is make's output and never a home (dd refuses it).
@@ -145,11 +145,25 @@ $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTT
 $(BUILD)/dd_context_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/context_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/context_test.cpp -pthread -lcurl -o $(BUILD)/dd_context_tests
 
+# The Soaker under a race detector: the turn thread publishes into its ring, the spool worker
+# claims from it, and the ledger counters are read while the worker is still writing them.
+$(BUILD)/dd_context_tsan: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/context_test.cpp
+	$(CXX) $(CXXFLAGS) -pipe -g -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-but-set-variable -Wno-maybe-uninitialized -fsanitize=thread $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/context_test.cpp -pthread -lcurl -o $(BUILD)/dd_context_tsan
+
 $(BUILD)/dd_chat_stream_tests: $(CORE) src/agent/chat_stream.cpp include/dd/agent/chat_stream.hpp tests/chat_stream_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) src/agent/chat_stream.cpp tests/chat_stream_test.cpp -o $(BUILD)/dd_chat_stream_tests
 
 $(BUILD)/dd_ui_tests: $(CORE) $(ANSI) $(CONFIG) $(UI) include/dd/ui.hpp include/dd/ui_simd.hpp tests/ui_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(CORE) $(ANSI) $(CONFIG) $(UI) tests/ui_test.cpp -pthread -o $(BUILD)/dd_ui_tests
+
+# Scene under a race detector: the agent thread publishes into q_, the render thread claims from
+# it, and the scene's own deques are touched by exactly one of the two. Without TSan the claim is
+# an argument; with it the claim is a result. -fopenmp is off here because TSan cannot model
+# libgomp, so the pragmas compile to sequential loops: the parallel reduction's accumulator and
+# the thread-count helper then look unused, which is an artifact of this build, not a defect in
+# the shipped -fopenmp one, so those two warnings are silenced here and nowhere else.
+$(BUILD)/dd_ui_tsan: $(CORE) $(ANSI) $(CONFIG) $(UI) include/dd/ui.hpp include/dd/ui_simd.hpp tests/ui_test.cpp
+	$(CXX) $(CXXFLAGS) -pipe -g -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-but-set-variable -fsanitize=thread $(CORE) $(ANSI) $(CONFIG) $(UI) tests/ui_test.cpp -pthread -o $(BUILD)/dd_ui_tsan
 
 $(BUILD)/dd_tests: $(CORE) $(SKILLS) tests/skills_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(SKILLS) tests/skills_test.cpp -o $(BUILD)/dd_tests
@@ -473,11 +487,16 @@ TEST_BINS := $(BUILD)/dd_tests \
 
 -include $(wildcard mk/*.mk)
 
-# The race the ring claims to settle is only falsifiable under a race detector, so it is
-# a target of its own: built with -fsanitize=thread and run, not folded into `make test`
-# (TSan costs the suite more than the claim is worth on every run).
-tsan: $(BUILD)/dd_slot_ring_tsan
-	./$(BUILD)/dd_slot_ring_tsan
+# Every hand-off in the tree is a claim about racing threads, and the tree has no lock left to
+# hide a race behind — so a race detector is the only thing that can falsify it. These four are
+# the owners the audit names: the ring itself, the Scene, the sink, the Soaker. Built with
+# -fsanitize=thread and run, not folded into `make test` (TSan costs the suite more than the
+# claim is worth on every run). halt_on_error=1 makes a race a failed target rather than a
+# warning that scrolls past.
+tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan
+	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan; do \
+		echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp TSAN_OPTIONS=halt_on_error=1 ./$$t || { echo "TSAN FAILED: $$t"; fail=$$((fail+1)); }; done; \
+		echo "$$fail tsan binary(ies) failed"; [ $$fail -eq 0 ]
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp ./$$t || { echo "FAILED: $$t"; fail=$$((fail+1)); }; done; \

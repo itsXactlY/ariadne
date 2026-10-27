@@ -89,10 +89,11 @@ lists every skill. That part is ours.
 4. **The harness decides, the model confirms.** Offer ladder by confidence: silent, pointer,
    head-open, open. Measured by opened/offered.
 5. **Triggers are pure.** `plan(signal, working_set) -> Plan` does no I/O: unit-testable.
-6. **No lock in `dd::know`.** Every cross-thread hand-off is one of three things: single-owner state fed by a Vyukov
-   MPSC queue (the working set stays on the router thread; tool threads report opens through the queue), an immutable
-   snapshot in a `core::SnapCell<T>` (wait-free reads, epoch reclamation), or one atomic flag or word (`done`,
-   `cancel`, `wake`) that a thread parks on with a futex and never polls. No mutex, no condition variable, and no
+6. **No lock, no queue.** Every cross-thread hand-off is one of three things: a `core::SlotRing` of fixed slots — the
+   working set stays on the router thread and tool threads report opens into `opened_q_`, which refuses when full and
+   counts the refusal (`opened_lost`) instead of growing — an immutable snapshot in a `core::SnapCell<T>` (wait-free
+   reads, epoch reclamation), or one atomic flag or word (`done`, `cancel`, `wake`) that a thread parks on with a futex
+   and never polls. `src` and `include` carry no mutex, no `lock_guard`, no `condition_variable`, and no
    `std::atomic<std::shared_ptr>`: libstdc++ spin-locks it (`is_lock_free()` is false). See 15.1.
 
 ## 5. Architecture
@@ -441,9 +442,15 @@ mutex, but six `std::atomic<std::shared_ptr<...>>` cells (the router's `reattach
 `snap_`, the memory and tool catalogues' `snap_`): `is_lock_free()` is 0 for it on GCC 16.2.1, because libstdc++ packs a lock
 bit into the pointer and spins. They sat on the per-turn search path. What replaced them, and what else changed:
 
-**The rule.** `dd::know` holds no mutex and no condition variable. A hand-off between threads is single-owner state plus
-`core::MpscQueue`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls. The UI's steering hand-off keeps the same rule with a fourth shape,
-`core::SlotRing` (below).
+**The rule.** `src` and `include` hold no mutex, no `lock_guard`, no `condition_variable`, and no queue. A hand-off
+between threads is a `core::SlotRing`, a `core::SnapCell<T>`, or one atomic flag or word. Nothing polls. The three locks
+that survived the first audit are gone, each for a different reason: the retry jitter counter is one `fetch_add`
+(`src/agent/retry.cpp:17`) because the tick was the only value the counter ever held, so there was no invariant a lock
+could protect; the prompt-cache registry is `thread_local` (`src/agent/prompt_cache_boundary.cpp:14`) because a prefix is
+registered and matched on the same thread, so the state never crosses a thread; and pairing takes the kernel's file lock
+for its whole read-modify-write (`include/dd/gateway/pairing.hpp:55`) because a userspace mutex cannot cover a second dd
+on the same home. Every `std::deque` left in a header names the one thread that owns it; the rest are hand-offs and
+arrived through a ring.
 
 **`core::SnapCell<T>`** (`include/dd/core/snap_cell.hpp`). A reader pins the current epoch (one store into its thread's
 record), loads one pointer and unpins when its `Read` ends (one store): wait-free. The publisher swaps with one exchange,
@@ -467,8 +474,12 @@ alive about 15 s after the answer; what was fetched is kept and saved).
 `N` fixed slots, each carrying one atomic word that holds the payload's stamp *and* its ownership together — 0 is held by
 nobody, `s` is payload `s` published, `UINT64_MAX` is claimed. A claim is a CAS on the exact stamp the claimer read, so
 exactly one thread takes each payload and a claim that loses hands back nothing rather than a payload somebody else is
-holding. The writer owns the slots at 0 and is the only thread that ever leaves that state, so it writes the text before
-the stamp appears and the release store makes the text arrive with the stamp; the claimer resets the slot after moving
+holding. Two producer shapes, differing exactly where ownership is taken: `publish()` is the sole writer's path, where a
+slot at 0 means that thread owns it, so it writes the payload before
+the stamp appears and the release store makes the text arrive with the stamp. `publish_any()` is the several-producer
+path: one `fetch_add` on a shared counter makes publish order global rather than per-thread, then a CAS takes
+`free -> writing(seq)` on the slot it picked and the payload is written only once it holds it, so a half-written payload
+is never readable. The claimer resets the slot after moving
 the payload out, which orders the writer's next fill after that move. A scan walks slots, not publish order, so a drain
 sorts the stamps it pinned (`claim_all`) and a single claim re-scans until its pick stops moving (`claim_one`). A payload
 published into a slot the scan already walked belongs to the *next* claim, at a stamp older than that claim's newest, so
@@ -476,9 +487,13 @@ order across two racing claimers is measured rather than promised: 2 inversions 
 a writer publishing 20,000, and none inside any single drain. The turn boundary drains once per round, so it never reads
 that limit. A full ring refuses the payload instead of evicting one, and the caller's backpressure decides what that
 means: `dd_tui` holds overflow in a list the key handler owns alone and, once anything is held, holds everything typed
-after it too — a held prompt waits for the turn rather than entering it behind prompts typed later. Rejected: the mutex
-plus `std::deque` this replaced (a lock on the key handler and on the boundary), and a Vyukov MPSC queue (the boundary
-needs oldest-first, not FIFO, and the idle loop sends one prompt per turn).
+after it too — a held prompt waits for the turn rather than entering it behind prompts typed later. A refusal is
+counted on the ring (`refused()`) and every site reads it: `dropped_events()` and `dropped_live_bytes()` on the scene,
+`opened_lost` on the router (a refused open still goes to the sink), `unledgered` on the soak, `dropped()` on the learn
+sink. Rejected, measured rather than argued: the mutex plus `std::deque` this replaced (a lock on the key handler and on
+the boundary), and a Vyukov MPSC queue — it allocates one node per push and grows without bound, and across a 200-delta
+streamed turn the hand-off through it cost **214 allocations** against **0** on the shipped shape (`tests/ui_test.cpp`).
+The boundary also needs oldest-first, not FIFO, and the idle loop sends one prompt per turn.
 
 **SIMD** (`include/dd/know/scan.hpp`, `src/know/scan.cpp`). `classify` turns 64 bytes into bit masks (alnum, upper, lower,
 space, non-ASCII) and `classify32` does one word; each exists as scalar, AVX2 and AVX-512 kernels behind `target`

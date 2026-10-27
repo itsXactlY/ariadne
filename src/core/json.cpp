@@ -195,6 +195,9 @@ static std::string repair_truncated(const std::string& s) {
         return cl;
     };
     constexpr size_t kTries = 512;   // only the newest cut points are ever tried
+    // The caller's thread, and this call's own: a parse is not shared, so there is no hand-off
+    // here to make atomic. It is a queue-shaped scratch (newest cut tried first), and the owner is
+    // the thread that called parse — which is why it needs neither a lock nor a ring.
     std::deque<std::pair<size_t, std::string>> cuts;
     auto cut_at = [&](size_t at, const std::string& stack) {
         cuts.emplace_back(at, closers(stack));

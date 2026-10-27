@@ -4,7 +4,6 @@
 // pairing code the bot owner approves via the CLI.
 #include "dd/core/json.hpp"
 #include <filesystem>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -51,8 +50,13 @@ public:
     void approve_user(const std::string& platform, const std::string& user_id,
                       const std::string& user_name = "");
 
-private:
-    mutable std::mutex mutex_;
+    // Every mutating call below is a read-modify-write of a JSON file that a second dd on the
+    // same home can also write. A mutex cannot cover that process, so the store carries no
+    // userspace lock at all: the four mutating entry points take the kernel lock on
+    // <pairing dir>/.store.lock for the whole read-modify-write, and the helpers they call
+    // (`approve_user`, `cleanup_expired`, `record_*`) are documented as running under it, exactly
+    // as they did under the mutex. Reads take nothing — `secure_write` renames the whole file, so
+    // a reader sees the old store or the new one, never a half of either.
 };
 
 }  // gateway

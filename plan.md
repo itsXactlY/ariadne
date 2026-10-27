@@ -252,6 +252,19 @@ ownership is taken, which is the whole difference between one producer and sever
 | 10e | every remaining `std::deque` names its owning thread in the header comment | a fresh `grep -n "std::deque" include` shows an owner line above each one |
 | 10f | `make tsan` grows past the ring to every site this wave touches | `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker` under ThreadSanitizer and reports no race |
 
+**Landed** on `fix/audit-20261024`, each step built, run, and looked at. What the proofs read:
+
+| step | the number the proof produced |
+|---|---|
+| 10a | 8 producers against one consumer: every payload claimed once **or** refused, per-producer order kept, stamps monotonic across the drain; clean under `make tsan` |
+| 10b | `Scene` holds no queue. A counting allocator in `tests/ui_test.cpp`: **0 allocations** across a 200-delta streamed turn against **214** for the queue shape rebuilt in the same binary as the baseline, and **0** over 200 `SlotRing` publish/claim cycles |
+| 10c | every refusal named: scene event ring **44 refused of 300** posted (`dropped_events()`), a stream buffer at its cap counts the bytes it refused (`dropped_live_bytes()`), router `opened_lost` **6 of 70** with each refused open still emitted to the sink, soak `unledgered` **44 of 300** with the 256 held slots still claimable through `take()`, learn `dropped()` asserted — and all three read **0** on a live turn with tools firing and a live drained soak |
+| 10d | `src` and `include` carry no mutex, no `lock_guard`, no `condition_variable`: jitter is one `fetch_add`, the boundary registry is `thread_local`, pairing takes the kernel's file lock across its whole read-modify-write |
+| 10e | every `std::deque` left in a header names the one thread that owns it |
+| 10f | `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker`: no race reported |
+
+No site needed the `SnapCell` fallback: the live-turn counters read 0, so every hand-off this wave touched is a ring, and the spool stayed the only durable overflow.
+
 **Falsified, not asserted:** a ring is right only where the payload is owned by exactly one thread
 on each side of the hand-off and the volume is bounded. If a live turn shows *any* refused publish
 at a site, that site is not a ring: payload flow there becomes a `SnapCell` snapshot plus a park

@@ -3,23 +3,21 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <atomic>
 #include <cstdint>
-#include <mutex>
 #include <random>
 
 namespace dd {
 namespace agent {
 
-// Python: _jitter_counter = 0; _jitter_lock = threading.Lock().
-static std::uint64_t jitter_counter = 0;
-static std::mutex jitter_lock;
+// Python: _jitter_counter = 0; _jitter_lock = threading.Lock(). The lock bought one thing: a
+// tick that differs per retry so two retries in the same nanosecond do not draw the same jitter.
+// fetch_add gives that and nothing else — the tick is the only value the counter ever held, so
+// there is no invariant a lock could protect. Any thread may retry at the same time.
+static std::atomic<std::uint64_t> jitter_counter{0};
 
 double jittered_backoff(int attempt, double base_delay, double max_delay, double jitter_ratio) {
-    std::uint64_t tick;
-    {
-        std::lock_guard<std::mutex> g(jitter_lock);
-        tick = ++jitter_counter;
-    }
+    const std::uint64_t tick = jitter_counter.fetch_add(1, std::memory_order_relaxed);
 
     int exponent = attempt - 1;
     if (exponent < 0) exponent = 0;

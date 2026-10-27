@@ -3,16 +3,19 @@
 // has_cached_entry, write_cache_entry, clear_cache_entry).
 //
 // The file is a whole cache read and rewritten as one object, so every write is
-// read-modify-write: the lock is what makes two threads writing two servers not
-// lose one of them. It is a boot-path and operator-command lock, not a hot one.
+// read-modify-write. A userspace mutex cannot make that safe: a second dd on the same home is
+// outside it. So the write takes the kernel lock on a sidecar (core::FileLock), which covers
+// threads and processes with one primitive. It is a boot-path and operator-command lock, not a
+// hot one. Reads take nothing: save_all renames the whole file into place, so a reader sees the
+// old cache or the new one, never a half of either.
 #include "dd/tools/mcp_schema_cache.hpp"
+#include "dd/core/fslock.hpp"
 #include "dd/core/sha256.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <memory>
 #include <stdlib.h>    // mkstemp
-#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,7 +27,11 @@ namespace tools {
 using namespace core;
 
 namespace {
-std::mutex g_cache_mu;   // Python's _cache_lock: the read-modify-write is one step
+// Python guarded the read-modify-write with a threading.Lock, which only ever covered one
+// process. The kernel lock covers the same step and the second process that shares the file.
+std::filesystem::path cache_lock(const std::filesystem::path& file) {
+    return core::lock_path_for(file);
+}
 
 // Python truthiness for a JSON value (used by the `x or default` idiom).
 bool json_truthy(const Json& v) {
@@ -211,7 +218,7 @@ bool save_all(const std::filesystem::path& file, const Json& data) {
 
 Json get_cached_entry(const std::filesystem::path& file, const std::string& server_name,
                       const std::string& fingerprint) {
-    std::lock_guard<std::mutex> lk(g_cache_mu);
+    // No lock: the read is whole-file, and a rename cannot be seen half-done.
     Json data = load_all(file);
     const Json* entry = json_get(data, server_name);
     if (!entry || entry->type != Json::Obj) return Json{};
@@ -234,7 +241,7 @@ bool write_cache_entry(const std::filesystem::path& file, const std::string& ser
     obj_set(entry, "utility_tools",
             utility_tools.type == Json::Arr ? json_deep_copy(utility_tools) : json_arr());
 
-    std::lock_guard<std::mutex> lk(g_cache_mu);
+    const core::FileLock lock(cache_lock(file));   // the whole read-modify-write, one step
     Json data = load_all(file);
     const Json* old = json_get(data, server_name);
     if (old && json_dump(*old) == json_dump(entry)) return true;   // unchanged: no rewrite, mtime stays
@@ -243,7 +250,7 @@ bool write_cache_entry(const std::filesystem::path& file, const std::string& ser
 }
 
 bool clear_cache_entry(const std::filesystem::path& file, const std::string& server_name) {
-    std::lock_guard<std::mutex> lk(g_cache_mu);
+    const core::FileLock lock(cache_lock(file));   // the whole read-modify-write, one step
     Json data = load_all(file);
     if (!json_get(data, server_name)) return true;   // nothing to drop
     data.obj.erase(std::remove_if(data.obj.begin(), data.obj.end(),

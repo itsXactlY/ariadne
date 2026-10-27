@@ -887,6 +887,32 @@ struct RecSink : EventSink {
     }
 };
 
+// ---- opened_q_ overflow: a refusal is counted AND forwarded, never a silent miss ----
+// opened_q_ is SlotRing<64, Opened>. Seven tens of opens arrive with nobody draining: the ring
+// holds 64 and the rest cannot reach the agent thread's demand channel. Two things must be true —
+// the count names them, and each one still reaches the sink, so the working set's silence is a
+// number in the log line rather than a read the demand guard never saw.
+static void test_router_opened_overflow(const fs::path& tmp) {
+    auto s = make_stack(tmp, "opened_overflow");
+    auto rec = std::make_shared<RecSink>();
+    s->router->set_sink(rec);
+    const int n = 70, slots = 64;
+    for (int i = 0; i < n; ++i) {
+        Uri u; u.kind = Kind::Memory; u.id = "overflow-" + std::to_string(i);
+        s->router->note_opened(u, "row " + std::to_string(i), 400);
+    }
+    const uint64_t lost = s->router->stats().opened_lost.load();
+    chk(lost == static_cast<uint64_t>(n - slots),
+        "overflow: a full opened ring counts every refusal (" + std::to_string(lost) + " of " + std::to_string(n) + ")");
+    chk(rec->count(Event::Type::OpenedByModel) == n - slots,
+        "overflow: a refused open goes straight to the sink instead of being lost");
+    // The 64 slots the ring accepted drain at the turn boundary, oldest first.
+    s->router->on(CallsFinished{});
+    chk(rec->count(Event::Type::OpenedByModel) == n,
+        "overflow: the accepted opens reach the sink at the boundary too, so nothing is missed");
+    chk(s->router->stats().opened_lost.load() == lost, "overflow: draining the ring does not change the count");
+}
+
 static void test_router_events(const fs::path& tmp) {
     auto s = make_stack(tmp, "events");
     auto rec = std::make_shared<RecSink>();
@@ -911,7 +937,9 @@ static void test_router_events(const fs::path& tmp) {
     s->router->on(cf);
     chk(rec->count(Event::Type::OpenedByModel) == 1, "events: a model open is emitted on the agent thread");
     chk(rec->count(Event::Type::Calls) == 1, "events: one Calls event per call");
+
     s->router->end_turn();
+    chk(s->router->stats().opened_lost.load() == 0, "live turn: the opened ring refused nothing, so a ring is the right shape here");
     s->router->note_tripwire("podman-not-docker");
     s->router->on(Rebased{});
     chk(rec->count(Event::Type::TurnEnd) == 1 && rec->count(Event::Type::Tripwire) == 1 && rec->count(Event::Type::Rebase) == 1, "events: turn end, tripwire and rebase");
@@ -1176,6 +1204,7 @@ int main() {
     test_demand_guard(tmp);
     test_router_midturn(tmp);
     test_router_events(tmp);
+    test_router_opened_overflow(tmp);
     test_router_tools(tmp);
     test_prompt();
     test_policy();

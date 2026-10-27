@@ -77,7 +77,8 @@ private:
     std::string question_;
     std::vector<Entry> entries_;
     std::set<std::string> covered_, warned_;
-    std::deque<CallRecord> calls_;
+    std::deque<CallRecord> calls_;   // the turn thread's alone: Router owns the WorkingSet and record()
+                                   // is called from the tool fold, so nothing hands these over
     std::map<std::string, int> fail_sig_, fail_tool_;
     size_t turn_tokens_ = 0;
     bool stalled_ = false;

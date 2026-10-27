@@ -6,28 +6,23 @@ namespace dd {
 namespace learn {
 
 void QueueSink::emit(know::Event&& e) noexcept {
-    const int64_t before = depth_.fetch_add(1, std::memory_order_acq_rel);
-    if (before >= cap_) {
-        depth_.fetch_sub(1, std::memory_order_acq_rel);
-        dropped_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    try {
-        q_.push(std::move(e));
-    } catch (...) {   // out of memory: drop, never throw into the agent loop
-        depth_.fetch_sub(1, std::memory_order_acq_rel);
+    // The bound is the storage: a full ring refuses and the caller keeps the event, so the count
+    // is the whole overflow policy and nothing is dropped by a throw.
+    if (!q_.publish_any(std::move(e))) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     pushed_.fetch_add(1, std::memory_order_relaxed);
-    if (before == 0) {
+    if (depth_.fetch_add(1, std::memory_order_acq_rel) == 0) {
         seq_.fetch_add(1, std::memory_order_release);
-        core::unpark(seq_);
+        core::unpark(seq_);   // empty -> non-empty: wake the parked consumer, never a poll
     }
 }
 
 bool QueueSink::pop(know::Event& out) {
-    if (!q_.pop(out)) return false;
+    // The CAS on the published word is the claim: this thread owns the event now, and the slot is
+    // free for the next emit the moment the payload moves out.
+    if (!q_.claim_one(out)) return false;
     depth_.fetch_sub(1, std::memory_order_acq_rel);
     return true;
 }

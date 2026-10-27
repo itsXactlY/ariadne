@@ -9,14 +9,22 @@
 //            over a prompt box and a status row. The same cards print inline
 //            when there is no tty.
 //
-// Threads: no locks. Feed calls (user/say/tool_*/note/llm_*/turn_*) only post
-// an event to a wait-free MPSC queue and may come from any thread, the tool
-// workers included. The render thread owns every piece of scene state and
-// applies the queue at the top of present()/drain_inline().
+// Threads: no locks, and no queue — not even a lock-free one. A queue allocates
+// a node per push, so an event queue made every streamed token an allocation.
+// Feed calls (user/say/tool_*/note/llm_*/turn_*) publish a payload into a fixed
+// slot and may come from any thread, the tool workers included; a streamed
+// card's text is not an event at all, it lands in a fixed slot of bytes that
+// only the streaming thread fills. Either way a hand-off is one atomic word:
+// published by a release store, claimed by a CAS on the exact word the claimer
+// read. The render thread owns every piece of scene state and drains both
+// rings at the top of present()/drain_inline(). A publish the ring refuses is
+// counted, never dropped quietly: dropped_events()/dropped_live_bytes().
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <string>
@@ -24,7 +32,7 @@
 #include <utility>
 #include <vector>
 
-#include "dd/core/mpsc.hpp"
+#include "dd/core/slot_ring.hpp"
 
 namespace dd {
 namespace ui {
@@ -100,7 +108,7 @@ private:
     bool full_ = true;
 };
 
-using core::MpscQueue;
+using core::SlotRing;
 
 struct Theme {
     uint32_t border = rgb(0xB026FF), title = rgb(0xF000FF), accent = rgb(0xDA70D6),
@@ -172,7 +180,7 @@ struct TapeView {
     long history = 0, tape = 0, tokens = 0, rebase_at = 0, prompt = 0, reused = 0;
     std::string level = "ok", prep, server;
     bool maze = false;
-    unsigned long long soaked = 0, soak_queue = 0, spooled = 0;
+    unsigned long long soaked = 0, soak_queue = 0, spooled = 0, unledgered = 0;
     int steered = 0;   // prompts folded into the running turn at round boundaries
     long ledger = 0, edges = 0;   // this session's nodes and edges in the graph
 };
@@ -209,8 +217,11 @@ public:
     void error(const std::string& text);
     void clear();
     void llm_begin();
-    void llm_reasoning(const std::string& delta);   // streamed thinking
-    void llm_content(const std::string& delta);     // streamed answer
+    // Streamed thinking / streamed answer. A delta is not an event: its bytes go into a fixed
+    // slot the streaming thread owns alone, and the render thread claims it. Nothing is
+    // allocated per token; a delta the ring refuses is counted, not dropped quietly.
+    void llm_reasoning(const std::string& delta);
+    void llm_content(const std::string& delta);
     void llm_end(const LlmStats& s);
     void set_effort(const std::string& label);
     void set_tape(const TapeView& t);
@@ -242,17 +253,24 @@ public:
     std::string drain_inline(int width, bool color, bool truecolor);
     std::string row_text(int y) const;  // last presented frame, plain text
     size_t live_text_bytes() const;     // bytes held by the streaming reasoning/answer cards (render thread, after present())
+    // Publishes the rings turned away: lifecycle events that found the event ring full, and
+    // streamed bytes that found a stream ring full. Both are named in the reply, never lost
+    // without a number attached.
+    uint64_t dropped_events() const;
+    uint64_t dropped_live_bytes() const;
     const Theme& theme() const { return th_; }
 
     static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14, kReasonRows = 6;
 
 private:
     using clock = std::chrono::steady_clock;
+    // Everything but the streamed text: a delta is bytes in a stream slot, not an event.
     enum class Ev : uint8_t { Info, MaxTurns, User, Say, ToolCall, ToolBegin, ToolEnd, ToolResult,
-                              Note, Error, Clear, LlmBegin, Reason, Content, LlmEnd, Effort,
+                              Note, Error, Clear, LlmBegin, LlmEnd, Effort,
                               Tape, Recall, Memory, TurnBegin, TurnEnd, Plan };
     struct Event {
         Ev ev = Ev::Note;
+        uint64_t stamp = 0;      // order_ stamp: where this event sits against the streamed runs
         std::string a, b, c;
         uint64_t token = 0;
         double ms = 0;
@@ -266,20 +284,55 @@ private:
     };
     enum class Phase { Idle, Recalling, Thinking, Reasoning, Writing, Tools };
 
+    // ---- feed side: any thread ----
     const Theme th_;
-    MpscQueue<Event> q_;
-    std::atomic<uint64_t> next_token_{1};
 
-    // everything below: render thread only
-    std::deque<Entry> entries_;
+    // A lifecycle event, in a fixed slot. kEventSlots is sized for a turn's worth of tool
+    // cards and notes with room to spare; a full ring refuses and counts.
+    static constexpr size_t kEventSlots = 256;
+    SlotRing<kEventSlots, Event> q_;
+    std::atomic<uint64_t> next_token_{1};   // the tool cards' tokens; a fetch_add, no counter lock
+
+    // The feed order, stamped once per hand-off whether it is an event or a run of streamed bytes.
+    // Two channels would otherwise lose the causal order between them — the answer's first byte
+    // has to land after the last reasoning byte and before llm_end, and only a shared counter can
+    // say which came first. A fetch_add; no lock, no queue.
+    std::atomic<uint64_t> order_{1};
+
+    // A streamed card's text: one fixed-capacity byte buffer per stream, filled by the thread
+    // that streams it. The buffer has exactly one writer — the streaming thread — so appending a
+    // delta is a plain copy, no CAS, no node, no allocation. Two words are shared and each has
+    // one writer: `len`, how many bytes have been written (release, so the bytes arrive with the
+    // length), and `read`, how many the render thread has taken. A byte is written only where the
+    // reader has already passed or where it cannot yet reach, so the writer never touches a byte
+    // the reader is reading; a delta that would land between those is refused and counted.
+    // Positions are absolute and monotonic across calls, so a card's text never restarts.
+    struct LiveBuf {
+        static constexpr size_t kCap = 512u << 10;  // fixed, and equal to the cap the live cards already had
+        std::array<char, kCap> bytes{};             // the streaming thread writes, the render thread reads published bytes
+        std::atomic<uint64_t> len{0};               // bytes written; release after the bytes land
+        std::atomic<uint64_t> read{0};              // bytes the render thread has taken
+        // Everything below is stamped by the writer and published by the store on `len`, so the
+        // render thread sees a run's bytes, its feed order, its clock and its token count together.
+        std::atomic<uint64_t> run_start{0};         // order_ stamp of this run's first byte
+        std::atomic<uint64_t> run_end{0};           // order_ stamp of this run's last byte
+        std::atomic<uint64_t> deltas{0};            // deltas in this run — what the card counts as tokens
+        std::atomic<uint64_t> first_ns{0};          // when this run's first byte landed, ns from the steady epoch
+    };
+    LiveBuf reason_, say_;
+    std::atomic<uint64_t> dropped_live_{0};   // bytes a full stream buffer refused because the reader was behind
+
+    // everything below: render thread only — the agent thread never touches any of it; what it
+    // hands over arrives through q_ (a SlotRing) and is claimed here.
+    std::deque<Entry> entries_;   // render thread: the scene's own log, drained by drain_inline
     struct Cache { int w = -1, tw = -1; unsigned ver = 0; int spin = -1, view = -1, verb = -1; Canvas block; };
-    std::deque<Cache> cache_;
+    std::deque<Cache> cache_;    // render thread: one canvas per Entry, positionally paired with entries_
     size_t printed_ = 0;     // drain_inline cursor (index into entries_)
     Info info_;
     TapeView tape_;
     PlanView plan_;
     LlmStats last_{};
-    std::deque<double> tps_hist_;
+    std::deque<double> tps_hist_;   // render thread: the last 24 measured rates, oldest first
     long calls_total_ = 0;
     int turn_calls_ = 0, turns_ = 0, tools_turn_ = 0;
     Phase phase_ = Phase::Idle;
@@ -300,6 +353,10 @@ private:
     std::string last_tail_;
 
     void post(Event e);
+    void stream(LiveBuf& b, const std::string& delta);   // the streaming thread's side
+    // The render thread's side: flush whole runs, oldest feed-order first, never past `stamp`.
+    void flush_before(uint64_t stamp);
+    void flush_run(LiveBuf& b, Kind kind, Entry*& live);
     void apply();
     void apply(Event& e);
     Entry& push(Kind k, const std::string& text);

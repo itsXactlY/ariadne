@@ -1,12 +1,15 @@
-// dd::ui — kernels vs scalar on every SIMD level the CPU has, the lock-free
-// queue under contention, text metrics, frame diffing, layout geometry.
+// dd::ui — kernels vs scalar on every SIMD level the CPU has, the slot ring under
+// contention, text metrics, frame diffing, layout geometry.
 #include "dd/ui.hpp"
 #include "dd/ui_simd.hpp"
 
-#include <omp.h>
+#ifdef _OPENMP
+#include <omp.h>   // the parallel-vs-serial check needs the runtime; the TSan build has none
+#endif
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <random>
@@ -23,6 +26,25 @@ struct Early {
     Early() : width(dd::ui::text_width("early ascii text")) {}
 };
 static Early g_early __attribute__((init_priority(101)));
+
+// ---- allocation counter ----
+// Replaceable allocation functions, so a hand-off's cost is measured rather than asserted. Both
+// shapes below go through the same counter, and only the window between a snapshot pair is read, so
+// the Scene's own construction and the payload strings the caller owns are never in the number.
+static std::atomic<uint64_t> g_alloc{0};
+static void* counted_new(size_t n) {
+    if (n == 0) n = 1;                       // operator new must never return null for size 0
+    g_alloc.fetch_add(1, std::memory_order_relaxed);
+    void* p = std::malloc(n);
+    if (!p) throw std::bad_alloc();
+    return p;
+}
+void* operator new(size_t n) { return counted_new(n); }
+void* operator new[](size_t n) { return counted_new(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
 
 static int g_fail = 0;
 static void chk(bool ok, const std::string& label) {
@@ -84,32 +106,126 @@ int main() {
     for (const char* l : {"scalar", "avx2", "avx512"}) kernels(l, rng);
     simd::force(best.c_str());
 
-    // ---- MPSC queue: 8 producers, consumer racing them; FIFO per producer ----
+    // ---- the slot ring: 8 producers, a consumer racing them ----
+    // The ring is fixed, so a producer that arrives when every slot is held is refused; that is
+    // the contract, and it is the whole reason the hand-off costs no allocation. What must hold
+    // regardless: nothing lands twice, nothing lands out of its producer's order, and every item
+    // is accounted for as either claimed or refused.
     {
-        MpscQueue<std::pair<int, int>> q;
-        constexpr int P = 8, N = 100000;
-        std::atomic<int> done{0};
+        // The workload stays near the ring's capacity: a refused publish walks every slot looking
+        // for a free one, so a workload far larger than the ring measures the refusal path, not
+        // the hand-off. 8 producers x 2000 items against 1024 slots does both.
+        SlotRing<1024, std::pair<int, int>> q;
+        constexpr int P = 8, N = 2000;
         std::vector<std::thread> ts;
-        for (int p = 0; p < P; ++p)
+        std::vector<std::atomic<uint64_t>> refused(P);
+        for (int p = 0; p < P; ++p) {
+            refused[p].store(0);
             ts.emplace_back([&, p] {
-                for (int i = 0; i < N; ++i) q.push({p, i});
-                ++done;
+                for (int i = 0; i < N; ++i)
+                    if (!q.publish_any(std::pair<int, int>{p, i})) refused[p].fetch_add(1, std::memory_order_relaxed);
             });
-        std::vector<int> next(P, 0);
+        }
+        std::vector<int> last(P, -1);
+        uint64_t stamp = 0;
+        bool order = true, monotonic = true;
         long got = 0;
-        bool order = true;
         std::pair<int, int> v;
-        while (got < static_cast<long>(P) * N) {
-            if (q.pop(v)) {
-                order = order && v.second == next[static_cast<size_t>(v.first)];
-                ++next[static_cast<size_t>(v.first)];
+        uint64_t seq = 0;
+        // The ring is smaller than the workload, so publishes are refused; the loop ends when every
+        // item is accounted for as claimed or refused, not when it has claimed them all.
+        while (got + static_cast<long>(q.refused()) < static_cast<long>(P) * N) {
+            if (q.claim_one(v, &seq)) {
+                order = order && static_cast<int>(v.second) > last[static_cast<size_t>(v.first)];
+                last[static_cast<size_t>(v.first)] = static_cast<int>(v.second);
+                monotonic = monotonic && seq > stamp;   // oldest first, always
+                stamp = seq;
                 ++got;
             }
         }
         for (auto& t : ts) t.join();
-        chk(order && got == static_cast<long>(P) * N && !q.pop(v), "mpsc fifo + count");
+        uint64_t lost = 0;
+        for (int p = 0; p < P; ++p) lost += refused[p].load();
+        chk(order && monotonic && got + static_cast<long>(lost) == static_cast<long>(P) * N,
+            "ring: every item claimed once or refused, per-producer order, oldest-first");
+        chk(q.published() == 0 && q.refused() == lost, "ring: drained, refusals counted on the ring");
     }
 
+    // ---- Scene: an over-fed event ring is a number, not a silent loss ----
+    // kEventSlots is 256. Feeding past it without rendering is the real overload shape: the agent
+    // thread keeps posting while nobody claims. Every event past the 256th slot must be counted by
+    // dropped_events(), and the slots already held must still drain intact.
+    {
+        Scene s{Theme{}};
+        const int posts = 300, slots = 256;
+        for (int i = 0; i < posts; ++i) s.note("note " + std::to_string(i));
+        chk(s.dropped_events() == static_cast<uint64_t>(posts - slots),
+            "scene: an over-fed event ring counts every refusal (" + std::to_string(s.dropped_events()) + " of " + std::to_string(posts) + ")");
+        const long lines = static_cast<long>(lines_of(s.drain_inline(200, false, false)).size());
+        chk(lines <= slots && s.dropped_events() == static_cast<uint64_t>(posts - slots),
+            "scene: the accepted events drain intact and the count stays (" + std::to_string(lines) + " lines)");
+        chk(s.dropped_live_bytes() == 0, "scene: a stream that never overflowed reports no lost bytes");
+    }
+
+    // ---- Scene: a stream buffer the reader fell behind on counts the bytes it refused ----
+    // kCap is 512 KiB and the render thread never claims, so the writer runs past the cap. The
+    // refused bytes are counted instead of rewritten under a byte the reader is holding.
+    {
+        Scene s{Theme{}};
+        s.llm_begin();
+        const std::string chunk(1024, 'x');
+        const int fed = 600;
+        for (int i = 0; i < fed; ++i) s.llm_content(chunk);
+        chk(s.dropped_live_bytes() > 0,
+            "scene: a stream buffer at the cap counts the refused bytes (" + std::to_string(s.dropped_live_bytes()) + ")");
+        chk(s.dropped_live_bytes() <= static_cast<uint64_t>(fed * 1024), "scene: the refused-byte count cannot exceed what was fed");
+    }
+
+
+    // ---- what a hand-off costs: allocations counted, both shapes ----
+    // The shipping shape is the stream buffer and the ring's fixed slots; the shape W10b replaced is
+    // a queue node per push plus a copy of the payload. Measured single-threaded, so the number is
+    // the hand-off alone and not thread-startup noise.
+    {
+        Scene s{Theme{}};
+        s.llm_begin();
+        std::vector<std::string> deltas;
+        deltas.reserve(200);
+        for (int i = 0; i < 200; ++i) deltas.push_back("delta " + std::to_string(i) + " " + std::string(28, 'x'));
+        // Warm the buffers first: the first write touches memory the Scene owns already.
+        s.llm_content(deltas.front());
+        s.drain_inline(200, false, false);
+        const uint64_t before = g_alloc.load();
+        for (const auto& d : deltas) s.llm_content(d);
+        const uint64_t stream_alloc = g_alloc.load() - before;
+
+        // The queue this wave deleted, rebuilt here only to be measured against: one node per push
+        // and a copy of the payload into it. Never shipped.
+        std::deque<std::string> q;
+        const uint64_t before_q = g_alloc.load();
+        for (const auto& d : deltas) q.push_back(d);
+        const uint64_t queue_alloc = g_alloc.load() - before_q;
+        q.clear();
+
+        chk(stream_alloc == 0,
+            "hand-off: a 200-delta streamed turn allocates nothing (" + std::to_string(stream_alloc) + ")");
+        chk(queue_alloc > stream_alloc,
+            "hand-off: the queue shape allocated per delta (" + std::to_string(queue_alloc) + " vs " + std::to_string(stream_alloc) + ")");
+
+        // The ring's slots too: fixed words, no node, over a publish/claim cycle with a POD payload.
+        SlotRing<64, uint64_t> r;
+        r.publish(uint64_t{1});
+        uint64_t v = 0, seq = 0;
+        r.claim_one(v, &seq);
+        const uint64_t before_r = g_alloc.load();
+        for (int i = 0; i < 200; ++i) { r.publish_any(static_cast<uint64_t>(i)); r.claim_one(v, &seq); }
+        const uint64_t ring_alloc = g_alloc.load() - before_r;
+        chk(ring_alloc == 0, "ring: publish and claim allocate nothing in the steady state (" + std::to_string(ring_alloc) + ")");
+
+        std::printf("hand-off allocations: stream %llu, queue %llu, ring %llu\n",
+                    static_cast<unsigned long long>(stream_alloc), static_cast<unsigned long long>(queue_alloc),
+                    static_cast<unsigned long long>(ring_alloc));
+    }
     // ---- text ----
     chk(cp_width(U'a') == 1 && cp_width(U'日') == 2 && cp_width(0x301) == 0 && cp_width(U'⟁') == 1, "cp_width");
     chk(text_width("héllo") == 5 && text_width("日本") == 4 && text_width("a\tb") == 2, "text_width");
@@ -609,9 +725,16 @@ int main() {
         s.llm_reasoning("HEADMARK ");
         std::string chunk;
         for (int i = 0; i < 30; ++i) chunk += "\xE2\x82\xAC";   // 3-byte characters: the cut lands inside one
-        for (int i = 0; i < 7000; ++i) s.llm_reasoning(chunk);
+        // Rendering as dd_tui does: a frame every hundred deltas. The stream buffer is fixed, so a
+        // renderer that keeps up is the only way a long stream survives whole — and keeping up means
+        // draining, not buffering.
+        for (int i = 0; i < 7000; ++i) {
+            s.llm_reasoning(chunk);
+            if (i % 100 == 99) s.present(120, 40, true);
+        }
         s.llm_reasoning(" TAILMARK");
         s.present(120, 40, true);
+        chk(s.dropped_live_bytes() == 0, "a renderer that keeps up loses nothing");
         const size_t held = s.live_text_bytes();
         chk(held <= (512u << 10) && held > (400u << 10), "live reasoning bounded (" + std::to_string(held) + " bytes)");
         s.scroll(10000000);
@@ -635,9 +758,27 @@ int main() {
         s.turn_begin();
         s.llm_begin();
         const std::string chunk(4096, 'w');
-        for (int i = 0; i < 200; ++i) s.llm_content(chunk);   // 800 KiB
+        for (int i = 0; i < 200; ++i) {
+            s.llm_content(chunk);
+            if (i % 20 == 19) s.present(120, 40, true);   // the renderer keeps up
+        }
         s.present(120, 40, true);
         chk(s.live_text_bytes() <= (512u << 10) && s.live_text_bytes() > (400u << 10), "live answer bounded");
+        chk(s.dropped_live_bytes() == 0, "an answer streamed to a live renderer loses no bytes");
+
+        // The renderer stalled: the buffer fills and the rest of the stream is refused, which is a
+        // number the reply names. Nothing is overwritten out from under the render thread.
+        Scene stalled{Theme{}};
+        stalled.turn_begin();
+        stalled.llm_begin();
+        for (int i = 0; i < 200; ++i) stalled.llm_content(chunk);   // 800 KiB, nobody draining
+        chk(stalled.dropped_live_bytes() > 0, "a stalled renderer's refusals are counted");
+        // The buffer holds exactly its capacity and the rest is refused: nothing is overwritten out
+        // from under the render thread, and the shortfall is a number, not a vanishing.
+        chk(stalled.dropped_live_bytes() == (800u << 10) - (512u << 10),
+            "the buffer fills at its capacity and the rest is counted (" + std::to_string(stalled.dropped_live_bytes()) + " refused)");
+        stalled.present(120, 40, true);
+        chk(stalled.live_text_bytes() <= (512u << 10), "the held text stays bounded");
     }
 
     // ---- 1 thread vs 8: same frames, byte for byte ----
@@ -651,13 +792,22 @@ int main() {
             return s;
         };
         auto s1 = build(), s8 = build();
+#ifdef _OPENMP
         omp_set_num_threads(1);
         const std::string a = s1->present(240, 80, true);
         omp_set_num_threads(8);
         const std::string b = s8->present(240, 80, true);
+#else
+        // No libgomp in this build (TSan cannot model it), so both scenes render sequentially:
+        // the byte-for-byte comparison below is then serial-vs-serial, which still catches a
+        // frame that depends on a thread's arrival order but not a thread-count bug. The shipped
+        // -fopenmp run is where the parallel claim is actually falsified.
+        const std::string a = s1->present(240, 80, true);
+        const std::string b = s8->present(240, 80, true);
+#endif
         bool rows = a == b;
         for (int y = 0; y < 80; ++y) rows = rows && s1->row_text(y) == s8->row_text(y);
-        chk(rows, "parallel present matches serial");
+        chk(rows, "present matches across thread counts");
     }
 
     if (g_fail) std::printf("%d FAILED\n", g_fail);

@@ -27,7 +27,7 @@
 #include <vector>
 
 #include "dd/context/memory.hpp"
-#include "dd/core/mpsc.hpp"
+#include "dd/core/slot_ring.hpp"
 
 namespace dd {
 namespace context {
@@ -75,16 +75,18 @@ public:
     Soaker(const Soaker&) = delete;
     Soaker& operator=(const Soaker&) = delete;
 
-    // producer side: one thread (the agent loop's)
+    // producer side: the agent loop's thread alone, which is why the hand-off below uses the
+    // ring's single-writer path and never a CAS per job.
     void turn(const std::string& session, const std::string& user, const std::string& assistant, int epoch = 0);
     void reasoning(const std::string& session, const std::string& text, int epoch = 0);
     // A resumed session continues its chain from its last turn.
     void continue_chain(const std::string& last_turn_label) { prev_turn_ = last_turn_label; }
-    // consumer side: what was written since (single consumer)
+    // consumer side: what was written since (the engine's thread claims the published entries)
     bool take(LedgerEntry& e);
 
     struct Stats {
         uint64_t queued = 0, written = 0, spooled = 0, skipped = 0, edges = 0;
+        uint64_t unledgered = 0;   // ledger entries the ring refused because the engine was not draining
     };
     Stats stats() const;
 

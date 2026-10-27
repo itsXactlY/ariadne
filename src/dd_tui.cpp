@@ -974,6 +974,7 @@ int main(int argc, char** argv) {
         v.soaked = t.soaked;
         v.soak_queue = t.soak_queue;
         v.spooled = t.spooled;
+        v.unledgered = t.unledgered;
         v.ledger = static_cast<long>(t.ledger);
         v.edges = static_cast<long>(t.edges);
         scene.set_tape(v);
@@ -1378,7 +1379,7 @@ int main(int argc, char** argv) {
                                " · tools " + std::to_string(t.visible) + " in window, " + std::to_string(t.deferred) +
                                " deferred · server " + t.server + ", main slot " + std::to_string(t.main_slot) +
                                "\nmaze " + (t.maze ? "up" : "down") + " · " + std::to_string(t.soaked) + " soaked, " +
-                               std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled · ledger " +
+                               std::to_string(t.soak_queue) + " queued, " + std::to_string(t.spooled) + " spooled" + (t.unledgered ? ", " + std::to_string(t.unledgered) + " unledgered" : "") + " · ledger " +
                                std::to_string(t.ledger) + " nodes, " + std::to_string(t.edges) + " edges · " +
                                std::to_string(t.skills) + " skills indexed" + (t.recall.empty() ? "" : "\nlast recall: " + t.recall));
                 };
@@ -1479,7 +1480,7 @@ int main(int argc, char** argv) {
             // too: a published prompt would otherwise enter the turn behind an older one it cannot
             // overtake. If the turn ends before a boundary, the idle loop sends what is left as its
             // own turn — never silently.
-            const bool folded = running.load() && waiting.empty() && typed.publish(p);
+            const bool folded = running.load() && waiting.empty() && typed.publish(std::move(p));
             if (!folded) waiting.push_back(std::move(p));
             const size_t n = typed.published() + waiting.size();
             scene.note("queued (" + std::to_string(n) + ") — " +
@@ -1585,7 +1586,7 @@ int main(int argc, char** argv) {
         std::string q;
         if (!running.load() && !cmd_busy.load() && !quit) {
             // The ring first: whatever it holds was typed before anything held back does.
-            q = typed.claim_one();
+            typed.claim_one(q);   // the CAS that claims is the ownership: this thread reads it now
             if (q.empty() && !waiting.empty()) {
                 q = std::move(waiting.front());
                 waiting.erase(waiting.begin());

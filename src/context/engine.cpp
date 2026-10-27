@@ -257,6 +257,7 @@ TapeStats TapeEngine::compute_stats() const {
         s.soak_queue = st.queued - st.written - st.spooled;
         s.spooled = st.spooled;
         s.edges = st.edges;
+        s.unledgered = st.unledgered;
     }
     s.session = session_->id();
     return s;

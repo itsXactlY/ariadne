@@ -236,11 +236,19 @@ std::string context_block(const std::string& body) {
 struct Soaker::State {
     std::shared_ptr<Memory> mem;
     std::string spool;
-    core::MpscQueue<Job> q;
-    core::MpscQueue<LedgerEntry> out;
+    // The two hand-offs of the soak, both rings: slots allocated once, reused forever, no node per
+    // job. Each side owns a payload by CASing its word, so neither thread waits on the other.
+    //   q   written by the agent thread alone (the single-writer path), claimed by the soak worker
+    //   out written by the soak worker alone, claimed by the engine thread
+    // A refused q publish is not a loss: the spool is the durable overflow, counted in spooled. A
+    // refused out publish is a real loss of the ledger view only — the row is already in the graph,
+    // and unledgered names how many the engine's ledger never saw.
+    core::SlotRing<256, Job> q;
+    core::SlotRing<256, LedgerEntry> out;
     std::atomic<uint32_t> bell{0};
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> queued{0}, written{0}, spooled{0}, skipped{0}, edges{0};
+    std::atomic<uint64_t> unledgered{0};   // out-ring refusals: the row is in the graph, the ledger view missed it
 
     std::string lock_path() const { return spool + ".lock"; }
 
@@ -324,14 +332,15 @@ struct Soaker::State {
         for (;;) {
             const uint32_t seen = bell.load(std::memory_order_acquire);
             Job j;
-            if (q.pop(j)) {
+            if (q.claim_one(j)) {   // oldest published job first; the CAS is the ownership
                 if (stop.load(std::memory_order_relaxed)) {   // quitting: no network, the spool keeps it
                     spool_job(j);
                     continue;
                 }
                 if (const long id = mem->remember(j.label, j.content); id > 0) {
                     written.fetch_add(1, std::memory_order_relaxed);
-                    out.push(LedgerEntry{j.kind, j.label, j.session, id, j.epoch});
+                    if (!out.publish(LedgerEntry{j.kind, j.label, j.session, id, j.epoch}))
+                        unledgered.fetch_add(1, std::memory_order_relaxed);
                     edges_n(mem->connect(j.edges));
                     replay_one();
                 } else {
@@ -365,15 +374,24 @@ Soaker::~Soaker() {
 
 void Soaker::push(Job j) {
     st_->queued.fetch_add(1, std::memory_order_relaxed);
-    st_->q.push(std::move(j));
+    // The ring is full, so nothing can be handed to the worker. The job is not dropped: the spool
+    // takes it, which is the durable overflow the replay already drains, and spooled counts it —
+    // a soak that is behind shows up as a number in the status line rather than a lost turn.
+    if (!st_->q.publish(std::move(j))) {
+        st_->spool_job(j);
+        return;
+    }
+    // empty -> non-empty: wake the parked worker. The counter is the futex word, so a wake lands
+    // exactly on the transition and never on a job the worker already took.
     st_->bell.fetch_add(1, std::memory_order_release);
     st_->bell.notify_one();
 }
 
-bool Soaker::take(LedgerEntry& e) { return st_->out.pop(e); }
+bool Soaker::take(LedgerEntry& e) { return st_->out.claim_one(e); }
 
 Soaker::Stats Soaker::stats() const {
-    return Stats{st_->queued.load(), st_->written.load(), st_->spooled.load(), st_->skipped.load(), st_->edges.load()};
+    return Stats{st_->queued.load(), st_->written.load(), st_->spooled.load(), st_->skipped.load(), st_->edges.load(),
+                 st_->unledgered.load()};
 }
 
 // Labels stay unique per session and kind (edges resolve by label): two

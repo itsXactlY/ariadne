@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -13,9 +12,13 @@ namespace agent {
 static const std::size_t MAX_ENTRIES = 32;
 static const std::size_t MAX_CHARS = 4 * 1024 * 1024;
 
-static std::mutex lock_;
-// front = oldest (LRU), back = newest. Python OrderedDict + move_to_end.
-static std::vector<std::string> prefixes_;
+// front = oldest (LRU), back = newest. Python OrderedDict + move_to_end, guarded by a
+// threading.Lock; here the registry is thread-local instead, which is the same guarantee with no
+// lock at all. A stable prefix is registered while a prompt is being built and matched while the
+// next prompt on that same thread is built, so the registry never crosses a thread and there is
+// no shared mutable state for a mutex to guard. The caps are per thread, and the threads that
+// build prompts are few and bounded, so the 4 MiB ceiling stays a ceiling.
+static thread_local std::vector<std::string> prefixes_;
 
 static std::size_t total_chars() {
     std::size_t s = 0;
@@ -25,7 +28,6 @@ static std::size_t total_chars() {
 
 void register_stable_prefix(const std::string& prefix) {
     if (prefix.empty()) return;
-    std::lock_guard<std::mutex> g(lock_);
     auto it = std::find(prefixes_.begin(), prefixes_.end(), prefix);
     if (it != prefixes_.end()) prefixes_.erase(it);  // move_to_end
     prefixes_.push_back(prefix);
@@ -34,7 +36,6 @@ void register_stable_prefix(const std::string& prefix) {
 }
 
 std::optional<std::string> find_stable_prefix(const std::string& content) {
-    std::lock_guard<std::mutex> g(lock_);
     std::string best;
     bool found = false;
     for (const auto& p : prefixes_) {
@@ -57,7 +58,6 @@ std::optional<std::string> find_stable_prefix(const std::string& content) {
 }
 
 void clear_stable_prefixes() {
-    std::lock_guard<std::mutex> g(lock_);
     prefixes_.clear();
 }
 

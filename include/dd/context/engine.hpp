@@ -63,6 +63,7 @@ struct TapeStats {
     int visible = 0, deferred = 0, main_slot = 0;
     bool maze = false;
     uint64_t soaked = 0, soak_queue = 0, spooled = 0, edges = 0;
+    uint64_t unledgered = 0;   // ledger entries the soak ring refused: the row exists, the ledger did not see it
     size_t ledger = 0, skills = 0;   // this session's nodes in the graph, skills indexed
     int steered = 0;                 // prompts folded in mid-turn since the turn began
     std::string session, recall;     // the last turn recall, summarised

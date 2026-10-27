@@ -10,7 +10,7 @@
 #include "dd/context/maze.hpp"
 #include "dd/context/recall.hpp"
 #include "dd/core/json.hpp"
-#include "dd/core/mpsc.hpp"
+#include "dd/core/slot_ring.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/registry.hpp"
 
@@ -48,8 +48,10 @@ struct FakeGraph : Memory {
     std::map<long, std::vector<Hit>> extracted;     // facts()
     std::string intent_of = "general";
     std::atomic<long> next_id{9000};
-    core::MpscQueue<Hit> remembered;
-    core::MpscQueue<Edge> edges;
+    // The hand-offs a real Soaker makes: rings, slots reused, no node per call. Sizes bound the
+    // test's own traffic; a refusal would be a test bug, so the checks assert refused() == 0.
+    core::SlotRing<1024, Hit> remembered;
+    core::SlotRing<1024, Edge> edges;
     std::atomic<int> recalls{0};
 
     bool configured() const override { return true; }
@@ -61,7 +63,7 @@ struct FakeGraph : Memory {
     }
     long remember(const std::string& label, const std::string& content) override {
         const long id = next_id.fetch_add(1);
-        remembered.push(Hit{id, label, content, 0});
+        remembered.publish_any(Hit{id, label, content, 0});   // any pod thread may answer
         return id;
     }
     std::vector<Hit> think(long id, int) override {
@@ -87,7 +89,7 @@ struct FakeGraph : Memory {
         return out;
     }
     int connect(const std::vector<Edge>& e) override {
-        for (const auto& x : e) edges.push(x);
+        for (const auto& x : e) edges.publish_any(x);
         return static_cast<int>(e.size());
     }
 };
@@ -268,7 +270,7 @@ int main() {
                 led[1].id > 0 && led[1].label != led[2].label, "ledger: ids back in order, labels unique");
         std::vector<Edge> ed;
         Edge x;
-        while (g->edges.pop(x)) ed.push_back(x);
+        ed = g->edges.claim_all();
         chk(ed.size() == 2, "two edges");
         bool reasoned = false, next = false;
         for (const auto& d : ed) {
@@ -280,7 +282,8 @@ int main() {
         s.turn("dd-x", "q3", "a3", 1);
         for (int i = 0; i < 100 && s.stats().edges < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         bool chained = false;
-        while (g->edges.pop(x)) chained = chained || (x.a == "auto:turn:dd-x:abc" && x.type == "session_next");
+        for (const Edge& x : g->edges.claim_all())
+            chained = chained || (x.a == "auto:turn:dd-x:abc" && x.type == "session_next");
         chk(chained, "a resumed chain continues from its last turn");
     }
 
@@ -395,12 +398,40 @@ int main() {
         chk(mode_of(spool) == 0600, "spool: the rewrite is 0600 (" + std::to_string(mode_of(spool)) + ")");
         Hit first;
         bool saw = false;
-        while (g->remembered.pop(first)) saw = saw || first.content.find("q1") != std::string::npos;
+        // oldest published first, which is the order the spool was written in
+        for (const Hit& h : g->remembered.claim_all())
+            saw = saw || h.content.find("q1") != std::string::npos;
         chk(saw, "spool: the oldest turn went first");
+        chk(s.stats().unledgered == 0, "live soak: the ledger ring refused nothing while the engine drained it");
         s.turn("s", "q5", "a5", 0);
         s.turn("s", "q6", "a6", 0);
         for (int i = 0; i < 300 && fs::exists(spool); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         chk(!fs::exists(spool), "spool: an emptied spool is removed");
+    }
+
+    // ---- the ledger view: an engine that stops draining counts what the out ring refused ----
+    // out is SlotRing<256, LedgerEntry>, claimed by the engine thread alone through take(). A
+    // healthy pod with nobody draining is the real overload shape: the row lands in the graph, and
+    // only the ledger view misses it. unledgered must name exactly that number — the rows are not
+    // lost, the slots they would have used are still claimable.
+    {
+        auto g = std::make_shared<FlakyGraph>();
+        g->healthy = true;
+        Soaker s(g, "");   // no spool: the ring is the only path, so a refusal has nowhere else to go
+        const int n = 300, slots = 256;
+        for (int i = 0; i < n; ++i) s.turn("outflow", "q" + std::to_string(i), "answer " + std::to_string(i), 0);
+        for (int i = 0; i < 400 && s.stats().written < n; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        chk(s.stats().written == n,
+            "out ring: every turn reached the graph even though nobody drained (" + std::to_string(s.stats().written) + ")");
+        chk(s.stats().spooled == 0, "out ring: a healthy pod spooled nothing");
+        chk(s.stats().unledgered == static_cast<uint64_t>(n - slots),
+            "out ring: an engine behind on take() counts the refusals (" + std::to_string(s.stats().unledgered) + " of " + std::to_string(n) + ")");
+        long got = 0;
+        LedgerEntry e;
+        while (s.take(e)) ++got;
+        chk(got == static_cast<long>(slots), "out ring: the slots the engine never took are still claimable (" + std::to_string(got) + ")");
+        chk(s.stats().unledgered == static_cast<uint64_t>(n - slots), "out ring: draining does not change the count");
+        chk(g->edges.refused() == 0, "out ring: the edge hand-off never refused on this traffic");
     }
 
     // ---- the destructor waits for a write in flight, by join, and no longer ----

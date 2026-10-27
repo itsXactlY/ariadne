@@ -22,7 +22,7 @@
 
 #include "dd/context/memory.hpp"
 #include "dd/context/recall.hpp"
-#include "dd/core/mpsc.hpp"
+#include "dd/core/slot_ring.hpp"
 #include "dd/core/snap_cell.hpp"
 #include "dd/know/deliver.hpp"
 #include "dd/know/event.hpp"
@@ -86,6 +86,7 @@ public:
     struct Stats {
         std::atomic<uint64_t> signals{0}, notes{0}, offered{0}, opened_for{0}, opened_by_model{0}, deep_in{0}, deep_late{0}, tokens{0};
         std::atomic<uint64_t> refused{0};   // candidate slots the demand guard declined, over the process
+        std::atomic<uint64_t> opened_lost{0};   // opens the ring refused: counted, named, never a silent drop
     };
     const Stats& stats() const { return stats_; }
     std::function<void(const std::string&)> on_log;   // one JSON line per signal that said something
@@ -112,7 +113,11 @@ private:
     Deliverer deliver_;
     WorkingSet ws_;
     std::vector<std::unique_ptr<Trigger>> triggers_;
-    core::MpscQueue<Opened> opened_q_;
+    // Opens arrive from any tool thread and are claimed by the agent thread at a turn boundary. A
+    // ring, not a queue: no node per open, slots reused. It refuses when full rather than growing,
+    // and a refusal is counted (`stats_.opened_lost`) — an open that never reached the demand
+    // channel is a number the log line names, not a read the guard silently missed.
+    core::SlotRing<64, Opened> opened_q_;
     std::shared_ptr<DeepJob> inflight_;
     std::set<long> last_in_window_;
     std::vector<long> last_earlier_;

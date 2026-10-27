@@ -112,9 +112,11 @@ void Router::note_tripwire(const std::string& rule) {
 }
 
 void Router::drain_opened() {
-    Opened o;
+    // Oldest first, everything published: the opens of a turn are folded in the order the model
+    // read them, because the working set's recency is the order the guard scores next.
+    const std::vector<Opened> all = opened_q_.claim_all();
     bool any = false;
-    while (opened_q_.pop(o)) {
+    for (const Opened& o : all) {
         note_demand_open(o.uri);   // it was read: demand is satisfied, whatever the decayed counts still say
         ws_.opened(o.uri, o.title, o.bytes / 4);
         sink_->emit(ev(Event::Type::OpenedByModel, o.uri));
@@ -133,8 +135,14 @@ std::string Router::reattach() const {
 }
 
 void Router::note_opened(const Uri& u, const std::string& title, size_t bytes) {
-    opened_q_.push(Opened{u, title, bytes});
     ++stats_.opened_by_model;
+    Opened o{u, title, bytes};
+    if (opened_q_.publish_any(std::move(o))) return;
+    // The ring is full, so the open cannot reach the agent thread's demand channel. It is not
+    // dropped: the open is still worth recording where a tool thread may write, so the event goes
+    // straight to the sink and the count says how much the working set did not see.
+    ++stats_.opened_lost;
+    sink_->emit(ev(Event::Type::OpenedByModel, o.uri));
 }
 
 std::optional<Body> Router::open(const Uri& u) {
@@ -430,6 +438,7 @@ void Router::log(const char* signal, const Delivery& d, const std::string& reaso
                                            {"offered", sp(std::move(offered))},
                                            {"opened", sp(std::move(opened))},
                                            {"declined", sp(core::json_num(static_cast<double>(declined_)))},
+                                           {"open_lost", sp(core::json_num(static_cast<double>(stats_.opened_lost.load(std::memory_order_relaxed))))},
                                            {"tokens", sp(core::json_num(static_cast<double>(deliver_.tokens(d.note))))},
                                            {"deep", sp(core::json_str(deep))},
                                            {"ms", sp(core::json_num(d.ms))}})));

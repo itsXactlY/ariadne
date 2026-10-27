@@ -50,7 +50,8 @@ public:
 
 private:
     Options opt_;
-    std::deque<Step> steps_;
+    std::deque<Step> steps_;   // the learn worker thread's alone: EpisodeRecorder is Service's own,
+                               // fed by drain_once, so the fold reads the same deque the sink wrote
     uint32_t last_turn_ = 0;
     uint64_t evicted_ = 0;
     void trim();

@@ -15,11 +15,11 @@ to the router" does not work:
    will trust and the router will promote, so a bad one poisons every later session.
 
 The hot path stays as it is: lock-free, no allocation it does not already do, no learning code on the agent thread beyond
-one enqueue. Learning is a second system beside the router that observes it and edits what the catalogues publish.
+one ring publish. Learning is a second system beside the router that observes it and edits what the catalogues publish.
 
 ```
                 agent thread                          learn thread (one, parked on a futex)
- Router ──events──► EventSink ──MpscQueue──► Observer ─► CreditAssigner ─► Ledger (journal, durable)
+ Router ──events──► EventSink ──SlotRing──► Observer ─► CreditAssigner ─► Ledger (journal, durable)
    ▲                                              │                            │
    │                                              ▼                            ▼
    │                                       EpisodeRecorder ─► Detector ─► Author ─► Reviewer ─► Lifecycle
@@ -30,8 +30,9 @@ one enqueue. Learning is a second system beside the router that observes it and 
 
 ## 2. Principles
 
-- **The hot path only enqueues.** `EventSink::emit(Event)` is one `MpscQueue::push`. A full queue drops the event and
-  bumps a counter. It never blocks the agent loop and never grows.
+- **The hot path only publishes.** `EventSink::emit(Event)` is one `SlotRing::publish_any`: a stamp from one
+  `fetch_add`, ownership from one CAS on the slot it picked. A full ring refuses the event and bumps `dropped()` — the
+  event is never lost without a number attached. It blocks nothing and cannot grow: the slots are fixed and reused.
 - **The journal is the truth; every aggregate is a fold over it.** Replaying the journal from empty gives bit-identical
   state. This is the test oracle and the crash recovery in one.
 - **Bounded everything.** Every container has a cap and an eviction rule. A month-long session and a fresh one use the
@@ -101,7 +102,7 @@ read, never in place. An unknown *newer* version is skipped and counted (a downg
 
 ### 4.3 Credit: deciding what an offer was worth
 
-`Observer` consumes the queue on the learn thread and groups events into **Exposures**: one offer plus what happened in
+`Observer` drains the ring on the learn thread (`claim_all`, oldest stamp first) and groups events into **Exposures**: one offer plus what happened in
 its window (until the next `TurnEnd`, or 6 rounds). `CreditAssigner` is a Strategy over a window and returns an
 `Outcome`; the rules are pure and unit-testable:
 
@@ -201,7 +202,7 @@ replay.
 
 | Failure over weeks | Defence |
 |---|---|
-| Unbounded growth | Journal rotates at 8 MiB and compacts; every map has a cap; episode ring is fixed; queue is bounded and drops with a counter. |
+| Unbounded growth | Journal rotates at 8 MiB and compacts; every map has a cap; episode ring is fixed; the hand-off is fixed-slot and refuses with a counter. |
 | Crash or `kill -9` mid-append | CRC per record, torn tail truncated, compaction atomic by rename. Worst loss: the last 2 s of events. |
 | Stale evidence | Every count is `Decayed`; a skill nobody opens fades to neutral by itself, no sweep. |
 | Rich-get-richer / hub collapse | Prior clamped, 5% step limit, lower credible bound, shadow events, position-weighted credit. |
@@ -215,7 +216,7 @@ replay.
 
 ## 6. Concurrency and SIMD
 
-No mutex or condition variable. `MpscQueue` in, `SnapCell` out, the learn thread parks on a futex (`core::park`) woken by
+No mutex or condition variable. `SlotRing` in, `SnapCell` out, the learn thread parks on a futex (`core::park`) woken by
 the producer on empty->non-empty, and `Curator` uses a monotonic deadline for its next pass (park with timeout, not poll).
 The two loops that scale with data and are worth `OpenMP`: the Curator's fold over thousands of cards, and the Reviewer's
 dedupe scan, both behind `par_threads()` and a size `if()`. The CRC32C is hardware (`SSE4.2` / `_mm_crc32_u64`, with the

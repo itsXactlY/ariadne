@@ -65,8 +65,11 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 `DD_VERBOSE=verbose dd_tui` on the same 1,009,800-byte grep.
 
 ### Mid-turn steering — closed
-Input typed while a turn runs is folded into that turn instead of waiting for it to end. The
-TUI hands the running worker's queue to `Agent::steer_hook` (`src/dd_tui.cpp:1192`), which the
+Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1133`) and `Agent::steer_hook`
+(`src/dd_tui.cpp:1193`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+prompt typed earlier enters earlier however the slots wrapped. Overflow is held in a list the key handler
+owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:375`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
 `TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps each one with `steered`, so the
@@ -132,7 +135,7 @@ each step built, tested, then looked at:
    off|on|full`, `display.verbose`, env `DD_VERBOSE`. Caps lift, arguments
    unclip, per-call token accounting and the epoch/plan segments join the status
    row, the reasoning card opens every line. Verbosity is one more cache key, so
-   cards re-block only when it changes; render kernels and the MPSC feed stayed
+   cards re-block only when it changes; render kernels and the scene feed stayed
    untouched.
 2. **Workflow contract.** `PromptComposer::workflow_contract()`, toggled by
    `agent.contract`. `README.md:108` now names it; its old "built-in tool
