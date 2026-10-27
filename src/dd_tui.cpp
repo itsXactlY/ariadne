@@ -44,6 +44,7 @@
 #include "dd/tools/skill_provenance.hpp"
 #include "dd/tools/todo_tool.hpp"
 #include "dd/tools/mcp.hpp"
+#include "dd/tools/mcp_schema_cache.hpp"
 #include "dd/tools/shell.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
@@ -605,6 +606,8 @@ int main(int argc, char** argv) {
         std::string cmd, url;          // "/pulse", its endpoint
         std::vector<std::string> tools;  // the names it answers with: every wire name + bare alias
         std::set<std::string> wire;      // the wire names alone: a bare alias maps back to "<server>_<alias>"
+        std::string srvname, fp;         // the config key and its fingerprint: what a live list writes back under
+        bool from_cache = false;         // this boot's manifest came from disk, not from tools/list
     };
     std::vector<CmdServ> cmd_servs;
     auto find_cmd_serv = [&](const std::string& c) -> CmdServ* {
@@ -617,6 +620,8 @@ int main(int argc, char** argv) {
     };
     std::vector<ServerNote> server_notes;
     std::string maze_url;                           // the server that answers mazemaker_recall
+    // One file for every server, mode 0600, rewritten whole (dd/tools/mcp_schema_cache.cpp).
+    const std::filesystem::path schema_cache_file = dd::tools::cache_path(home.cache());
     if (const Json* srvs = cfg.get_map("mcp_servers"); srvs && srvs->type == Json::Obj) {
         for (const auto& [srvname, sroot] : srvs->obj) {
             if (!sroot || sroot->type != Json::Obj) continue;
@@ -638,7 +643,18 @@ int main(int argc, char** argv) {
                     const Json* ic = json_get(sv, "instructions");
                     server_notes.push_back({u->str, instr, ic && ic->type == Json::Str ? ic->str : std::string()});
                 }
-                Json tl = mcp->list_tools();
+                // The manifest is read from disk while the config still hashes to what was cached; a
+                // changed url, transport or tool filter misses and lists live. The handshake above
+                // still runs: what the cache saves is the tools/list round trips, not initialize.
+                const std::string fp = dd::tools::server_fingerprint(sv);
+                const Json cached_entry = dd::tools::get_cached_entry(schema_cache_file, srvname, fp);
+                const bool served = cached_entry.type == Json::Obj &&
+                                    json_get(cached_entry, "tools") &&
+                                    json_get(cached_entry, "tools")->type == Json::Arr;
+                Json tl = served ? json_arr(dd::tools::tools_from_cache_entry(cached_entry))
+                                 : mcp->list_tools();
+                if (!served && tl.type == Json::Arr)   // a live list is worth remembering; a failed one is not
+                    dd::tools::write_cache_entry(schema_cache_file, srvname, fp, tl, json_arr());
                 std::size_t registered = 0;
                 std::vector<std::string> registered_tools;   // feeds the server's own slash command
                 std::set<std::string> wire_names;
@@ -689,12 +705,13 @@ int main(int argc, char** argv) {
                         ++registered;
                     }
                 }
-                sources.push_back(srvname + "  " + std::to_string(registered));
+                sources.push_back(srvname + "  " + std::to_string(registered) +
+                              (served ? " (cache)" : ""));   // cache: no tools/list was paid for
                 {   // the server drives itself from the input line, unless the name is a built-in command
                     const std::string cmdname = "/" + srvname;
                     const bool taken = std::any_of(std::begin(kCommands), std::end(kCommands), [&](const char* c) { return cmdname == c; });
                     if (!taken) {
-                        cmd_servs.push_back({cmdname, u->str, registered_tools, wire_names});
+                        cmd_servs.push_back({cmdname, u->str, registered_tools, wire_names, srvname, fp, served});
                         g_dynamic_commands.push_back(cmdname);
                     }
                 }
@@ -1233,7 +1250,11 @@ int main(int argc, char** argv) {
                             names += (names.empty() ? "" : ", ") + nm->str;
                             ++n;
                         }
-            scene.note(sv.cmd + " · " + std::to_string(n) + " tools:\n  " + names);
+            if (tl.type == Json::Arr)   // the freshest manifest there is, keyed by the config that produced it
+                dd::tools::write_cache_entry(schema_cache_file, sv.srvname, sv.fp, tl, json_arr());
+            scene.note(sv.cmd + " · " + std::to_string(n) + " tools" +
+                       (sv.from_cache ? " · boot read them from cache, this list refreshed it" : "") +
+                       ":\n  " + names);
             return;
         }
         const std::string wire = sv.wire.count(tool) ? tool : sv.cmd.substr(1) + "_" + tool;   // a bare alias -> its wire name
@@ -1443,7 +1464,8 @@ int main(int argc, char** argv) {
                 for (const auto& sv : cmd_servs) {
                     l += " " + sv.cmd;
                     for (const auto& m : mcps)
-                        if (m->url == sv.url) { l += " (" + m->url + ", " + std::to_string(sv.wire.size()) + " tools)"; break; }
+                        if (m->url == sv.url) { l += " (" + m->url + ", " + std::to_string(sv.wire.size()) + " tools" +
+                            (sv.from_cache ? ", schema cached" : "") + ")"; break; }
                 }
                 scene.note(l);
             } else {

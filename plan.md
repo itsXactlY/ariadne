@@ -130,20 +130,39 @@ is added or removed; long key-like tokens from a server stop riding every subseq
 prompt. Proof: a server whose description carries a key-shaped token renders masked
 in the composed prompt while tool names and enum values stay byte-identical.
 
-## W6 — MCP schema cache at boot (the unported IO half)
+## W6 — MCP schema cache at boot (the IO half, now ported)
 
-`mcp_schema_cache` exposes only pure helpers; `_cache_path`, `_load_all`, `_save_all`,
-`get_cached_entry`, `write_cache_entry`, `clear_cache_entry` are explicitly **not**
-ported. `config_fingerprint()` (sha256 of the connection-defining config, 16 hex) is
-ported and is the staleness key. Implement the disk half against the existing atomic
-write (`fs_tools.cpp:211-231` — temp file + `rename`).
+**Closed.** One rule, one file: a cached manifest may be served only while the config
+still hashes to what was cached. `dd/tools/mcp_schema_cache.cpp` now holds the whole
+half — `cache_path`, `load_all`, `save_all`, `get_cached_entry`, `has_cached_entry`,
+`write_cache_entry`, `clear_cache_entry`, plus `server_fingerprint`, which folds dd's
+per-name `tools: {name: {enabled}}` gate into the payload Python spells as an exclude
+list, so disabling a tool changes the key. `config_fingerprint` is unchanged and keeps
+its Python ground-truth cases.
 
-Invariant: a cache entry is served only when the fingerprint matches the current
-config; a changed `tools_include`/`tools_exclude`/command/URL must miss, never serve a
-stale tool list. Proof: boot a slow server twice — first boot lists, second boot is
-served from cache and is measurably faster; then edit the config and assert a miss.
-Priority is low because `list_tools()` runs at boot (`dd_tui.cpp:626`) and on a bare
-`/server` (`:1172`), **not per turn**, so this is boot latency, not token cost.
+The file is one object read and rewritten whole, so a write is a read-modify-write: a
+`std::mutex` makes two threads writing two servers not lose one of them. It is a boot
+and operator-command lock, not a hot one. Writes go through a temp file in the same
+directory + `fsync` + `rename`, mode 0600, then a directory `fsync` — a rename that is
+not durable would silently cost the next boot a live list it already paid for.
+
+What the cache saves is the `tools/list` round trips, **not** the connect: boot still
+handshakes, so an unreachable server still shows as unreachable rather than as a stale
+tool list. Headers are not part of the key, as in Python — they do not change the
+manifest. Priority was low for the same reason it is now closed cheaply: `list_tools()`
+runs at boot and on a bare `/server`, **not per turn**, so this is boot latency, not
+token cost.
+
+| rule | where | proof |
+|---|---|---|
+| an entry is served only on a matching fingerprint | `get_cached_entry` | `build/dd_mcp_schema_cache_tests`: match served, changed key missed, absent server missed; a served entry is a copy, so mutating it cannot poison the file |
+| dd's `tools: {name: {enabled}}` gate is part of the key | `server_fingerprint` | same suite: `enabled: true` equals absent, disabling a tool changes the key, moving the url changes it, rotating a header does not |
+| the write is atomic and 0600 | `save_all` | same suite: byte-equal round trip, mode 0600, no `.dd-tmp-*` left behind, parent dir created on a fresh home |
+| an unchanged manifest is not rewritten | `write_cache_entry` | same suite asserts the mtime is identical; the boot test asserts the served boot leaves the file byte-identical |
+| a corrupt or partial cache costs a live list, not a boot failure | `load_all` | same suite: empty, garbage, a truncated document, a list and a scalar all read as empty |
+| two writers do not lose a server | the lock | same suite: 8 threads write 8 servers, all 8 present and all keyed |
+| boot reads disk on a match and lists live on a miss | `dd_tui.cpp` boot loop | `build/dd_mcp_cache_boot_tests`: a server whose `tools/list` costs 400 ms — boot 1 asks and writes, boot 2 asks nothing but handshakes and is served, a url edit asks again and re-keys, the moved config is served on its next boot |
+| a cached manifest registers the same tools, masked the same way | the same registration path | boot test asserts the chat body carries the cached name, enum and `required` byte-identical, the raw key absent, the masked form present, and `schema cached`/`(cache)` in the readouts |
 
 ## W7 — mid-turn steering
 

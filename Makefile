@@ -59,7 +59,7 @@ UI := src/ui.cpp src/ui_simd.cpp
 NET := src/net/http.cpp $(URLSAFE)
 HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
 CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
-MCPSCHEMA := src/tools/mcp_schema_cache.cpp
+MCPSCHEMA := src/tools/mcp_schema_cache.cpp $(SHA256)   # the staleness key is a sha256 of the config
 MCP := src/tools/mcp_client.cpp $(URLSAFE)
 DELEG := src/tools/delegation_output_schema.cpp
 PATCH := src/tools/patch_parser.cpp
@@ -136,8 +136,8 @@ install: | $(BUILD)/dd_tui
 	@echo "dd is at $(INSTALL_DIR)/dd_tui; that folder owns config.yaml and is the home"
 	@echo "dd's home is $(INSTALL_DIR) — not build/, which holds only what this Makefile built"
 
-$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
+$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
@@ -244,8 +244,8 @@ $(BUILD)/dd_osv_parse_tests: $(CORE) $(OSVPARSE) tests/tools_osv_parse_test.cpp
 $(BUILD)/dd_ansi_strip_tests: $(CORE) $(ANSI) tests/tools_ansi_strip_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(ANSI) tests/tools_ansi_strip_test.cpp -o $(BUILD)/dd_ansi_strip_tests
 
-$(BUILD)/dd_mcp_schema_cache_tests: $(CORE) $(SHA256) $(MCPSCHEMA) tests/tools_mcp_schema_cache_test.cpp
-	$(CXX) $(CXXFLAGS) $(CORE) $(SHA256) $(MCPSCHEMA) tests/tools_mcp_schema_cache_test.cpp -o $(BUILD)/dd_mcp_schema_cache_tests
+$(BUILD)/dd_mcp_schema_cache_tests: $(CORE) $(MCPSCHEMA) tests/tools_mcp_schema_cache_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(MCPSCHEMA) tests/tools_mcp_schema_cache_test.cpp -o $(BUILD)/dd_mcp_schema_cache_tests
 
 $(BUILD)/dd_delegation_schema_tests: $(CORE) $(DELEG) tests/tools_delegation_schema_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(DELEG) tests/tools_delegation_schema_test.cpp -o $(BUILD)/dd_delegation_schema_tests
@@ -307,8 +307,13 @@ $(BUILD)/dd_wire_retry_tests: $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) 
 
 # W5's proof is the bytes dd_tui sends, so it boots dd_tui against a fake MCP server
 # and a fake endpoint on one loopback box. The binary itself is the thing under test.
-$(BUILD)/dd_mcp_prose_mask_tests: include/dd/agent/redact.hpp tests/mcp_prose_mask_test.cpp $(BUILD)/dd_tui
+$(BUILD)/dd_mcp_prose_mask_tests: include/dd/agent/redact.hpp tests/mcp_prose_mask_test.cpp tests/fake_mcp_box.hpp $(BUILD)/dd_tui
 	$(CXX) $(CXXFLAGS) tests/mcp_prose_mask_test.cpp -pthread -o $(BUILD)/dd_mcp_prose_mask_tests
+
+# W6's boot proof: three boots of the same home against a server whose tools/list costs
+# real milliseconds. It runs the shipped binary, so it depends on it.
+$(BUILD)/dd_mcp_cache_boot_tests: tests/mcp_cache_boot_test.cpp tests/fake_mcp_box.hpp $(BUILD)/dd_tui
+	$(CXX) $(CXXFLAGS) tests/mcp_cache_boot_test.cpp -pthread -o $(BUILD)/dd_mcp_cache_boot_tests
 
 
 $(BUILD)/dd_kv_watermarks_tests: $(KVW) src/core/json.cpp tests/agent_kv_watermarks_test.cpp
@@ -422,6 +427,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_retry_tests \
   $(BUILD)/dd_wire_retry_tests \
   $(BUILD)/dd_mcp_prose_mask_tests \
+  $(BUILD)/dd_mcp_cache_boot_tests \
   $(BUILD)/dd_kv_watermarks_tests \
   $(BUILD)/dd_state_errors_tests \
   $(BUILD)/dd_constants_tests \
