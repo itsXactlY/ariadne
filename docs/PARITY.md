@@ -89,6 +89,20 @@ model was composing from the truncated dump — 12 lines, no further call — an
 records the second call on the same epoch with its prefix cached
 (`{"epoch":0,"tape":5,"history":5,"prompt":9187,"cached":4249}`).
 
+### Hand-off without a queue — closed
+The cross-thread hand-off carries no node and no lock. A lifecycle event publishes into the scene's
+fixed-slot `core::SlotRing` (one `fetch_add` for the order stamp, one CAS for ownership), and a streamed
+delta is not an event at all: its bytes go into a buffer its producing thread owns alone and only the
+**length** word is shared, so bytes land before the length moves. Measured in the same binary as the
+baseline (`tests/ui_test.cpp`, a counting allocator): across a **200-delta** streamed turn the hand-off
+allocates **0** where the MPSC queue it replaced allocated **214** — one heap node per delta plus a copy —
+and `SlotRing` publish/claim over 200 cycles allocates **0** too. A full ring refuses rather than growing
+and every refusal is a number a test reads: **44 refused of 300** events posted (`dropped_events()`), the
+router's **6 of 70** opens (`opened_lost`, each refused open still emitted to the sink), the soak's
+**44 of 300** (`unledgered`, the 256 held slots still claimable), and **0** at all three on a live turn
+with tools firing and a drained soak. `src` and `include` now hold no mutex, no `lock_guard`, no
+`condition_variable`, and no queue (`make tsan`: no race reported).
+
 ### Sub-agents
 None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:101`, applied at `:352`) caps
 delegated calls the harness cannot execute: they are recorded, never run.
@@ -128,7 +142,7 @@ that second half — a saved call leaves no trace in the log.
 
 ## Plan
 
-P0 shipped on this branch (`fix/audit-20261024`, uncommitted), in this order —
+P0 shipped on this branch (`fix/audit-20261024`, committed), in this order —
 each step built, tested, then looked at:
 
 1. **Verbose mode.** `dd::ui::Verbosity {Minimal, Normal, Verbose}`, `/verbose
@@ -146,11 +160,19 @@ each step built, tested, then looked at:
    `/plan`, and a count on the status row in verbose.
 4. **This ledger**, plus the README line that drifted.
 
-Next, in priority order, not promised: sub-agents. Calibration closed on this branch —
-the thresholds are now measured numbers, not guesses (see above). The tool
-output budget and mid-turn steering shipped on this branch — the first because
-it is what makes verbose honest about a result, the second because a turn that
-cannot be redirected is a turn the operator cannot steer.
+Also shipped here, each with its number: the wire's transient retry (proved
+against a loopback endpoint that answers 500 then 200 and never answers twice),
+redaction of untrusted server text at the point it enters the prompt, the MCP
+schema cache at boot, the duplicated inline logic folded into the ported
+modules, and the doc audit that re-measures this file's citations instead of
+trusting them (`make doc-audit`: 29 citations, 0 drifting). Calibration closed
+on this branch — the thresholds are now measured numbers, not guesses (see
+above). The tool output budget and mid-turn steering shipped here — the first
+because it is what makes verbose honest about a result, the second because a
+turn that cannot be redirected is a turn the operator cannot steer. The last
+wave closed the hand-off: no lock, no queue, no node per delta (see above).
+
+Next, in priority order, not promised: sub-agents.
 
 ## Verification
 
