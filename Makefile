@@ -305,6 +305,12 @@ $(BUILD)/dd_retry_tests: $(RU) tests/agent_retry_utils_test.cpp
 $(BUILD)/dd_wire_retry_tests: $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM) include/dd/agent/retry.hpp include/dd/agent/http_llm.hpp tests/agent_wire_retry_test.cpp
 	$(CXX) $(CXXFLAGS) $(sort $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM)) tests/agent_wire_retry_test.cpp -pthread -lcurl -o $(BUILD)/dd_wire_retry_tests
 
+# W5's proof is the bytes dd_tui sends, so it boots dd_tui against a fake MCP server
+# and a fake endpoint on one loopback box. The binary itself is the thing under test.
+$(BUILD)/dd_mcp_prose_mask_tests: include/dd/agent/redact.hpp tests/mcp_prose_mask_test.cpp $(BUILD)/dd_tui
+	$(CXX) $(CXXFLAGS) tests/mcp_prose_mask_test.cpp -pthread -o $(BUILD)/dd_mcp_prose_mask_tests
+
+
 $(BUILD)/dd_kv_watermarks_tests: $(KVW) src/core/json.cpp tests/agent_kv_watermarks_test.cpp
 	$(CXX) $(CXXFLAGS) $(KVW) src/core/json.cpp tests/agent_kv_watermarks_test.cpp -o $(BUILD)/dd_kv_watermarks_tests
 
@@ -415,6 +421,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_ssl_guard_tests \
   $(BUILD)/dd_retry_tests \
   $(BUILD)/dd_wire_retry_tests \
+  $(BUILD)/dd_mcp_prose_mask_tests \
   $(BUILD)/dd_kv_watermarks_tests \
   $(BUILD)/dd_state_errors_tests \
   $(BUILD)/dd_constants_tests \

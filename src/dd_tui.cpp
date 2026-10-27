@@ -21,6 +21,7 @@
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
+#include "dd/agent/redact.hpp"
 #include "dd/context/deck.hpp"
 #include "dd/context/endpoint.hpp"
 #include "dd/context/engine.hpp"
@@ -658,7 +659,14 @@ int main(int argc, char** argv) {
                         const Json* desc = json_get(*tsp, "description");
                         const Json* ischema = json_get(*tsp, "inputSchema");
                         Json entry_schema = json_obj();
-                        if (desc && desc->type == Json::Str) obj_set(entry_schema, "description", json_str(desc->str));
+                        // Untrusted prose: the server wrote this, we did not. Masked at the
+                        // point it enters the prompt, so a key-shaped token in a description
+                        // stops riding every subsequent call. The schema node itself is deep-
+                        // copied untouched — names and enum values must stay byte-identical,
+                        // or the model would call things the server never offered.
+                        if (desc && desc->type == Json::Str)
+                            obj_set(entry_schema, "description",
+                                    json_str(dd::agent::mask_secret_tokens(desc->str, dd::agent::SecretPolicy::ServerProse)));
                         if (ischema && ischema->type == Json::Obj)
                             obj_set(entry_schema, "parameters", dd::core::json_deep_copy(*ischema));
                         else
@@ -701,7 +709,8 @@ int main(int argc, char** argv) {
     for (const auto& n : server_notes) {   // verbatim only when asked: the maze's protocol is the harness's contract below
         const auto mode = dd::know::PromptComposer::instructions_mode(n.mode, n.url == maze_url);
         if (const std::string text = dd::know::PromptComposer::server_instructions(mode, n.text); !text.empty())
-            system_prompt += (system_prompt.empty() ? "" : "\n\n") + text;
+            system_prompt += (system_prompt.empty() ? "" : "\n\n")
+                            + dd::agent::mask_secret_tokens(text, dd::agent::SecretPolicy::ServerProse);
     }
 
     // ---- the server, and what each request tells it ----

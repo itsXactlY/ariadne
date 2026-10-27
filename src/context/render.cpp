@@ -24,29 +24,11 @@ namespace {
 const char* const kIdArgKeys[] = {"file_path", "path", "command", "cmd", "pattern",
                                   "query", "url", "name", "target", "expression"};
 
-// Tool content re-entering the prompt loses key-shaped tokens: 16+ chars with letters and digits (hashes, api keys)
-// or 16+ chars carrying a '/'. Short prose and plain paths stay; excerpt markers are added after this pass.
-std::string mask_secrets(const std::string& s) {
-    std::string out;
-    const size_t n = s.size();
-    for (size_t i = 0; i < n;) {
-        if (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') { out.push_back(s[i++]); continue; }
-        size_t j = i;
-        while (j < n && s[j] != ' ' && s[j] != '\t' && s[j] != '\n' && s[j] != '\r') ++j;
-        const std::string tok = s.substr(i, j - i);
-        bool digit = false, letter = false, slash = false;
-        for (char c : tok) {
-            const unsigned char u = static_cast<unsigned char>(c);
-            if (std::isdigit(u)) digit = true;
-            else if (std::isalpha(u)) letter = true;
-            else if (c == '/') slash = true;
-        }
-        const bool redact = tok.size() >= 16 && ((digit && letter) || slash);
-        out += redact ? dd::agent::mask_token(tok) : tok;
-        i = j;
-    }
-    return out;
-}
+// Tool content re-entering the prompt loses key-shaped tokens; the rule is
+// the module's (`agent::mask_secret_tokens`), not a copy of it. Byte-identical output
+// for everything that is not a credential-shaped token, so tool results, excerpt
+// markers and plain paths are untouched.
+std::string mask_secrets(const std::string& s) { return dd::agent::mask_secret_tokens(s); }
 
 std::string squash(const std::string& s) {   // runs of whitespace -> one space
     std::string o;
