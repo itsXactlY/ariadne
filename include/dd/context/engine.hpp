@@ -64,6 +64,7 @@ struct TapeStats {
     bool maze = false;
     uint64_t soaked = 0, soak_queue = 0, spooled = 0, edges = 0;
     size_t ledger = 0, skills = 0;   // this session's nodes in the graph, skills indexed
+    int steered = 0;                 // prompts folded in mid-turn since the turn began
     std::string session, recall;     // the last turn recall, summarised
 };
 
@@ -81,6 +82,7 @@ public:
     void on_assistant(const core::Message& m) override;
     void on_tool_results(const std::vector<core::Message>& results) override;
     void after_tools() override;
+    void on_steering(const std::vector<core::Message>& notes) override;   // mid-turn input, folded here
     void end_turn(const std::string& final_response, bool interrupted) override;
     bool on_overflow(const std::string& error) override;   // the server refused the window: rebase, send again
 
@@ -138,6 +140,7 @@ private:
     std::string injection_, question_;
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
+    int steered_ = 0;         // prompts folded in at round boundaries since begin_turn
     bool turn_open_ = false;  // begin_turn ran and end_turn has not: end_turn is idempotent
     mutable core::SnapCell<TapeStats> snap_;
     bool drop_pending_ = false;   // a rebase left the old epoch parked: drop it after the next answer

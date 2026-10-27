@@ -249,6 +249,7 @@ TapeStats TapeEngine::compute_stats() const {
     s.maze = mem_ && mem_->up();
     s.ledger = ledger_.size();
     s.skills = router_ ? router_->skills() : 0;
+    s.steered = steered_;
     s.recall = last_recall_;
     if (soaker_) {
         const auto st = soaker_->stats();
@@ -313,6 +314,7 @@ void TapeEngine::begin_turn(const std::string& user_message) {
     drain_ledger();
     turn_open_ = true;
     question_ = user_message;
+    steered_ = 0;   // the count is this turn's, not the session's
     Message um;
     um.role = "user";
     um.content = user_message;
@@ -627,6 +629,17 @@ void TapeEngine::on_tool_results(const std::vector<Message>& results) {
                     records_.push_back(know::make_record(c, r.content));
                     break;
                 }
+    }
+}
+
+// Mid-turn input. A real user item, not a hidden note: the model asked it, the
+// operator wrote it during the turn. `steered` is what separates it from the turn's
+// question in the soak and the rebase anchor, and Session::current_user() moves to
+// it — the newest question is the one the next call answers.
+void TapeEngine::on_steering(const std::vector<Message>& notes) {
+    for (const auto& m : notes) {
+        session_->append(m)->steered = true;
+        steered_ += 1;
     }
 }
 

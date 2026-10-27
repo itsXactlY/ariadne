@@ -178,6 +178,71 @@ int main() {
         chk(s.row_text(5).find("needs") != std::string::npos, "too small");
     }
 
+    // ---- the tape panel names a mid-turn fold, and stays silent without one ----
+    {
+        Scene s{Theme{}};
+        Info info;
+        info.model = "test-model";
+        info.endpoint = "http://127.0.0.1:9/v1";
+        info.tools = 4;
+        info.max_turns = 10;
+        s.set_info(info);
+        TapeView tv;
+        tv.on = true;
+        tv.epoch = 1;
+        tv.history = 6;
+        tv.tape = 6;
+        tv.tokens = 9000;
+        tv.prompt = 9000;
+        tv.reused = 4500;
+        tv.visible = 40;
+        tv.deferred = 4;
+        tv.maze = true;
+        tv.steered = 2;   // two prompts folded into the turn that is still running
+        s.set_tape(tv);
+        // The tape panel is a vertical budget, not a fixture: verbose opens it at 8
+        // leftover rows, normal only at 21. The sidebar's value column is 22 cells, so
+        // the fold rides a form that fits rather than being clipped to "2 s…".
+        s.set_verbosity(Verbosity::Verbose);
+        s.present(120, 30, true);
+        std::string all;
+        for (int y = 0; y < 30; ++y) all += s.row_text(y);
+        chk(all.find("6 msgs · 2 steered") != std::string::npos,
+            "the tape panel counts the prompts folded in mid-turn");
+        chk(all.find("6 msgs · 2 steered…") == std::string::npos, "and says it whole, not clipped");
+        s.set_verbosity(Verbosity::Normal);
+        s.present(120, 46, true);
+        std::string tall;
+        for (int y = 0; y < 46; ++y) tall += s.row_text(y);
+        chk(tall.find("6 msgs · 2 steered") != std::string::npos,
+            "a tall terminal names the fold at normal verbosity too");
+        TapeView clean = tv;
+        clean.steered = 0;
+        s.set_tape(clean);
+        s.present(120, 30, true);
+        std::string none;
+        for (int y = 0; y < 30; ++y) none += s.row_text(y);
+        chk(none.find("steered") == std::string::npos, "a turn with no fold claims no fold");
+    }
+
+    // ---- the composer's busy hint names the boundary steering lands at ----
+    {
+        Scene s{Theme{}};
+        s.turn_begin();
+        s.present(120, 30, true);
+        std::string busy;
+        for (int y = 24; y < 30; ++y) busy += s.row_text(y);
+        chk(busy.find("type ahead — it lands at the next tool round") != std::string::npos,
+            "a prompt typed mid-turn is told where it lands");
+        chk(busy.find("it sends when the turn ends") == std::string::npos,
+            "and not the stale promise that it waits for the turn");
+        s.turn_end();
+        s.present(120, 30, true);
+        std::string idle;
+        for (int y = 24; y < 30; ++y) idle += s.row_text(y);
+        chk(idle.find("ask the maze…") != std::string::npos, "idle asks normally");
+    }
+
     // ---- cards: tool card height is fixed; a skipped call still resolves ----
     {
         Scene s{Theme{}};

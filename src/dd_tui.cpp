@@ -70,6 +70,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <mutex>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1091,7 +1092,12 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> running{false};
     std::thread worker;
-    std::deque<std::string> queued;   // typed while a turn or a command runs; sent in order
+    // Typed while a turn or a command runs. Two consumers, so it is locked: the
+    // agent thread pulls it at each round boundary (steering, folded into the turn
+    // that is already running), the idle loop sends what is left as a turn once
+    // nothing runs. Both drain, neither drops.
+    std::mutex qmu;
+    std::deque<std::string> queued;
     bool quit = false;
     int cols = 80, rows = 24;
     Editor ed;
@@ -1144,6 +1150,24 @@ int main(int argc, char** argv) {
             scene.turn_end();
             running = false;
         });
+    };
+
+    // Mid-turn steering: the agent thread pulls what was typed since the last round
+    // and the loop puts it in the next call. The transcript shows it as input the
+    // turn received, at the boundary it entered — not as if it had been typed before
+    // the turn began.
+    agent.steer_hook = [&] {
+        std::vector<std::string> typed;
+        {
+            std::lock_guard<std::mutex> lk(qmu);
+            typed.assign(queued.begin(), queued.end());   // a deque is not a vector: copy out, then clear
+            queued.clear();
+        }
+        for (const auto& t : typed) scene.user(t);
+        if (!typed.empty())
+            scene.note("◈ steered · " + std::to_string(typed.size()) +
+                       (typed.size() == 1 ? " prompt entered this turn" : " prompts entered this turn"));
+        return typed;
     };
 
     std::function<void()> learn_pin;   // /learn: null while learning is off
@@ -1412,8 +1436,18 @@ int main(int argc, char** argv) {
             return;
         }
         if (running.load() || cmd_busy.load()) {
-            queued.push_back(p);
-            scene.note("queued (" + std::to_string(queued.size()) + ") — sends when the " + (running.load() ? "turn" : "command") + " ends");
+            size_t n;
+            {
+                std::lock_guard<std::mutex> lk(qmu);
+                queued.push_back(p);
+                n = queued.size();
+            }
+            // A turn pulls at its next round boundary, so this redirect lands mid-turn; a command
+            // cannot, so it waits. If the turn ends before a boundary, the idle loop sends it as its
+            // own turn — never silently.
+            scene.note("queued (" + std::to_string(n) + ") — " +
+                       (running.load() ? "enters this turn at its next round boundary, or becomes a turn if the turn ends first"
+                                       : "sends when the " + cmd_label + " ends"));
             return;
         }
         start_turn(p);
@@ -1510,12 +1544,16 @@ int main(int argc, char** argv) {
         }
         if (!running.load() && worker.joinable()) worker.join();
         if (!cmd_busy.load() && cmd_thread.joinable()) cmd_thread.join();
-        if (!running.load() && !cmd_busy.load() && !queued.empty() && !quit) {
-            const std::string q = std::move(queued.front());
-            queued.pop_front();
-            if (!queued.empty()) scene.note("still queued (" + std::to_string(queued.size()) + ") — the rest follow this turn");
-            start_turn(q);
+        std::string q;
+        if (!running.load() && !cmd_busy.load() && !quit) {
+            std::lock_guard<std::mutex> lk(qmu);
+            if (!queued.empty()) {
+                q = std::move(queued.front());
+                queued.pop_front();
+                if (!queued.empty()) scene.note("still queued (" + std::to_string(queued.size()) + ") — the rest follow this turn");
+            }
         }
+        if (!q.empty()) start_turn(q);
         term::size(cols, rows);
         std::string hint;
         if (const std::string typed = dd::ui::to_utf8(ed.buf); is_command(typed) && typed.find(' ') == std::string::npos) {
@@ -1540,6 +1578,11 @@ int main(int argc, char** argv) {
     }
     term::leave();
     term::show_stderr(saved_err);
+    {   // what was typed and never reached the model: say it, do not drop it quietly
+        std::lock_guard<std::mutex> lk(qmu);
+        if (!queued.empty())
+            std::cout << std::to_string(queued.size()) + " prompt(s) typed were never sent\n";
+    }
     {
         const auto& th = scene.theme();
         dd::ui::Canvas c(std::max(1, dd::ui::text_width(th.goodbye) + 1), 1);

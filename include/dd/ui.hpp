@@ -172,6 +172,7 @@ struct TapeView {
     std::string level = "ok", prep, server;
     bool maze = false;
     unsigned long long soaked = 0, soak_queue = 0, spooled = 0;
+    int steered = 0;   // prompts folded into the running turn at round boundaries
     long ledger = 0, edges = 0;   // this session's nodes and edges in the graph
 };
 

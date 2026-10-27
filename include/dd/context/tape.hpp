@@ -27,6 +27,7 @@ struct Item {
     core::Message msg;
     bool hidden = false;   // harness-built (a rebase anchor), not a user turn
     bool note = false;     // a retrieval note after a batch of tool results: it ages out with that batch
+    bool steered = false;  // typed while the turn was running: folded in at a round boundary
     bool soaked = false;   // its reasoning went to the maze (render thread only)
 };
 using ItemPtr = std::shared_ptr<Item>;

@@ -61,7 +61,7 @@ struct Script : agent::LLMClient {
 };
 
 struct Spy : agent::ContextEngine {
-    int begun = 0, ended = 0, ended_interrupted = 0;
+    int begun = 0, ended = 0, ended_interrupted = 0, steered = 0;
     std::string last_final = "(unset)";
     bool throw_on_end = false;
     std::vector<size_t> assistant_calls, result_counts;
@@ -76,6 +76,7 @@ struct Spy : agent::ContextEngine {
     void on_assistant(const core::Message& m) override { assistant_calls.push_back(m.tool_calls.size()); }
     void on_tool_results(const std::vector<core::Message>& r) override { result_counts.push_back(r.size()); }
     void after_tools() override {}
+    void on_steering(const std::vector<core::Message>& notes) override { steered += static_cast<int>(notes.size()); }
     void end_turn(const std::string& f, bool interrupted) override {
         ++ended;
         ended_interrupted += interrupted ? 1 : 0;

@@ -64,11 +64,27 @@ clipped `✓ done · …` is not a degraded datum, it is a lie with an ellipsis.
 Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 `DD_VERBOSE=verbose dd_tui` on the same 1,009,800-byte grep.
 
-### Mid-turn steering
-Input typed while a turn runs lands in `queued` (`src/dd_tui.cpp:1080`, pushed at `:1401-1402`) and is
-sent only by the idle loop (`:1499-1502`), gated on `!running`; only `/interrupt` acts during
-it. The loop never drains the queue between tool rounds, so steering cannot
-redirect work mid-turn.
+### Mid-turn steering — closed
+Input typed while a turn runs is folded into that turn instead of waiting for it to end. The
+TUI hands the running worker's queue to `Agent::steer_hook` (`src/dd_tui.cpp:1159`), which the
+loop calls at the tool-round boundary (`src/agent/agent.cpp:375`) — after the tool results are
+appended, before the next request — and the prompts it returns ride as user messages.
+`TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps each one with `steered`, so the
+fold is a fact of the tape rather than a widget's guess: the prompt card carries
+`·◈ steered · 1 prompt entered this turn` whether or not the sidebar has room for it; the
+sidebar's history row counts it too, but the tape panel is a vertical budget — cards can eat the
+rows that open it — so it is asserted offscreen (`tests/ui_test.cpp`) at 120x30 verbose and
+120x46 normal, and the row degrades to the message count rather than clipping the fold to
+"1 s…". `begin_turn` resets the count (`:317`) so the number belongs to the turn, never to the
+session. A prompt
+typed after the last round is left to the idle loop rather than folded mid-turn — a fold there
+would silently swap the answer the operator asked for (`tests/agent_loop_test.cpp`) — and
+`interrupt()` drops the fold with the tool batch. Order across the boundary is asserted
+(`tests/agent_run_test.cpp`). Seen live on the same 1,009,800-byte grep at 120x30: typing
+"stop. report only how many lines matched" while the tool card was up redirected the answer the
+model was composing from the truncated dump — 12 lines, no further call — and the tape log
+records the second call on the same epoch with its prefix cached
+(`{"epoch":0,"tape":5,"history":5,"prompt":9187,"cached":4249}`).
 
 ### Sub-agents
 None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:101`, applied at `:352`) caps
@@ -99,9 +115,10 @@ each step built, tested, then looked at:
    `/plan`, and a count on the status row in verbose.
 4. **This ledger**, plus the README line that drifted.
 
-Next, in priority order, not promised: the four gaps above — the tool output
-budget first (it is what makes verbose honest about a result), then mid-turn
-steering, sub-agents, calibration.
+Next, in priority order, not promised: sub-agents, then calibration. The tool
+output budget and mid-turn steering shipped on this branch — the first because
+it is what makes verbose honest about a result, the second because a turn that
+cannot be redirected is a turn the operator cannot steer.
 
 ## Verification
 

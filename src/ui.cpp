@@ -1553,7 +1553,19 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         } else {
             row(py + 2, "reuse", "—", mut);
         }
-        row(py + 3, "history", std::to_string(tape_.history) + " msgs · tape " + std::to_string(tape_.tape), val);
+        // The sidebar's value column is 22 cells, so the widest form is the one that
+        // fits — a clipped "2 s…" would report a fold without saying what it was, the
+        // same lie a clipped card status was. The tape count is the expendable segment:
+        // the fold count and the message count are the ones the operator reads.
+        std::vector<std::string> hist_forms = {std::to_string(tape_.history) + " msgs · tape " + std::to_string(tape_.tape) +
+                                               (tape_.steered ? " · " + std::to_string(tape_.steered) + " steered" : ""),
+                                               std::to_string(tape_.history) + " msgs" +
+                                                   (tape_.steered ? " · " + std::to_string(tape_.steered) + " steered" : ""),
+                                               std::to_string(tape_.history) + " msgs"};
+        std::string hist;
+        for (const auto& form : hist_forms)
+            if (text_width(form) <= vw) { hist = form; break; }
+        row(py + 3, "history", hist, val);
         row(py + 4, "tools", std::to_string(tape_.visible) + " in · " + std::to_string(tape_.deferred) + " deferred", val);
         std::string mz = tape_.maze ? "● " : "○ down · ";
         mz += std::to_string(tape_.ledger) + " nodes · " + std::to_string(tape_.edges) + " edges";
@@ -1632,7 +1644,7 @@ void Scene::paint_prompt(Frame& f, int x, int y, int w, int& cur_x) const {
     const int vx = sx + sym, vw = x + w - 2 - vx;
     cur_x = vx;
     if (input_.empty()) {
-        f.text(vx, y + 1, busy_ ? "type ahead — it sends when the turn ends" : "ask the maze…",
+        f.text(vx, y + 1, busy_ ? "type ahead — it lands at the next tool round" : "ask the maze…",
                Style{th_.muted, kNone, kItalic}, vw);
         return;
     }

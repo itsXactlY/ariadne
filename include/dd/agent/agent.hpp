@@ -49,6 +49,12 @@ struct ContextEngine {
     virtual void on_assistant(const core::Message& m) = 0;
     virtual void on_tool_results(const std::vector<core::Message>& results) = 0;
     virtual void after_tools() = 0;                     // between calls: watermarks
+    // Input the operator typed while the turn was running, folded in at a round
+    // boundary: already role "user", appended after this round's tool results and
+    // before the next call, so the newest words are the last thing the model reads.
+    // The engine records it as mid-turn, not as the turn's question: a tape that
+    // cannot tell when input arrived cannot tell what the model was asked.
+    virtual void on_steering(const std::vector<core::Message>& notes) = 0;
     virtual void end_turn(const std::string& final_response, bool interrupted) = 0;
     // The server refused a request for the context window (what() of the failed call). true: the history was
     // rebuilt to fit and the call goes out again, once; false: the error stands.
@@ -82,6 +88,12 @@ public:
     // loop appends. A TUI sets it to a colored per-step printer; the loop
     // logic is otherwise untouched.
     std::function<void(const core::Message&)> step_hook;
+
+    // Pull hook at the round boundary. The owner hands back the prompts typed since
+    // the last pull and removes them; empty means nothing was typed. Runs on the
+    // agent thread, so the owner owns the lock, not the loop. An interrupt stops the
+    // pull — it does not discard what was typed, which the idle loop still sends.
+    std::function<std::vector<std::string>()> steer_hook;
 
     // ---- collaborators (not owned) ----
     tools::ToolRegistry* registry = nullptr;

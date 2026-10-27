@@ -368,6 +368,24 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
             context->on_tool_results(std::vector<core::Message>(messages.begin() + static_cast<long>(before), messages.end()));
             context->after_tools();
         }
+
+        // Mid-turn steering, after the round's results and the router's note: the
+        // operator's newest words enter the next call, so a turn can be redirected
+        // without waiting for it to finish.
+        if (steer_hook && !interrupt_requested.load(std::memory_order_acquire)) {
+            const std::vector<std::string> typed = steer_hook();
+            if (!typed.empty()) {
+                std::vector<core::Message> notes;
+                for (const std::string& t : typed) {
+                    core::Message m;
+                    m.role = "user";
+                    m.content = t;
+                    notes.push_back(m);
+                    messages.push_back(std::move(m));
+                }
+                if (context) context->on_steering(notes);
+            }
+        }
     }
 
     if (final_response.empty() && !interrupted && api_call_count >= max_iterations)

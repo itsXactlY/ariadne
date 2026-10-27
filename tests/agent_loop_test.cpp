@@ -183,7 +183,7 @@ struct Refusing : agent::LLMClient {
 
 struct Rebuilder : agent::ContextEngine {
     bool fixes = true;
-    int overflows = 0, payloads = 0;
+    int overflows = 0, payloads = 0, steered = 0;
     void begin_turn(const std::string&) override {}
     std::vector<core::Message> payload() override {
         ++payloads;
@@ -196,6 +196,7 @@ struct Rebuilder : agent::ContextEngine {
     void on_assistant(const core::Message&) override {}
     void on_tool_results(const std::vector<core::Message>&) override {}
     void after_tools() override {}
+    void on_steering(const std::vector<core::Message>& notes) override { steered += static_cast<int>(notes.size()); }
     void end_turn(const std::string&, bool) override {}
     bool on_overflow(const std::string&) override {
         ++overflows;
@@ -359,12 +360,175 @@ static int test_gate() {
     return 0;
 }
 
+// Mid-turn steering: input typed while a turn runs enters the NEXT call, after this
+// round's tool results. It is a user message, not the turn's question and not a
+// retrieval note; a turn that never reaches a round boundary never pulls it, and an
+// interrupt stops the pull without discarding what was typed.
+struct SteerScript : agent::LLMClient {
+    std::vector<std::vector<std::string>> sent;   // per call: "role:content" of everything sent
+    int round = 0;
+    core::Message chat(const std::vector<core::Message>& msgs, const core::Json&) override {
+        std::vector<std::string> seen;
+        for (const auto& m : msgs) seen.push_back(m.role + ":" + m.content);
+        sent.push_back(seen);
+        core::Message m;
+        m.role = "assistant";
+        if (round++ == 0) {
+            m.tool_calls = {{"c1", "echo", "{}"}};
+            return m;
+        }
+        m.content = "done";
+        m.finish_reason = "stop";
+        return m;
+    }
+};
+
+struct OrderSpy : agent::ContextEngine {
+    std::vector<std::string> events;
+    std::vector<std::string> steered;
+    void begin_turn(const std::string&) override { events.push_back("begin"); }
+    std::vector<core::Message> payload() override {
+        events.push_back("payload");
+        core::Message u;
+        u.role = "user";
+        u.content = "go";
+        return {u};
+    }
+    core::Json tools() override { return core::json_arr(); }
+    void on_assistant(const core::Message&) override { events.push_back("assistant"); }
+    void on_tool_results(const std::vector<core::Message>&) override { events.push_back("results"); }
+    void after_tools() override { events.push_back("after_tools"); }
+    void on_steering(const std::vector<core::Message>& notes) override {
+        events.push_back("steering");
+        for (const auto& m : notes) steered.push_back(m.content);
+    }
+    void end_turn(const std::string&, bool) override { events.push_back("end"); }
+};
+
+// A registry per case, as every other test in this file builds one: the loop owns
+// nothing of it, so sharing one across cases would make one case's state another's.
+static tools::ToolRegistry make_echo() {
+    tools::ToolRegistry reg;
+    tools::ToolEntry echo;
+    echo.name = "echo";
+    echo.handler = [](const Json&) { return std::string("echoed"); };
+    reg.register_tool(echo);
+    return reg;
+}
+
+static int test_steering() {
+    // The engine path: steering lands between the tool results and the next call.
+    {
+        OrderSpy ctx;
+        SteerScript llm;
+        agent::Agent a;
+        tools::ToolRegistry reg = make_echo();
+        a.registry = &reg;
+        a.llm = &llm;
+        a.context = &ctx;
+        a.max_iterations = 10;
+        a.tool_delay = 0.0;
+        int pulls = 0;
+        a.steer_hook = [&] {
+            ++pulls;
+            return pulls == 1 ? std::vector<std::string>{"stop, use the bounded grep"}
+                              : std::vector<std::string>{};
+        };
+        CHECK(a.run("go") == "done");
+        CHECK(pulls == 1);                                    // pulled once, at the round boundary
+        CHECK(ctx.steered.size() == 1);
+        CHECK(ctx.steered[0] == "stop, use the bounded grep");
+        const std::vector<std::string> want = {"begin", "payload", "assistant", "results",
+                                              "after_tools", "steering", "payload", "assistant", "end"};
+        if (ctx.events != want) {
+            std::cerr << "FAIL: engine order · got";
+            for (const auto& e : ctx.events) std::cerr << " " << e;
+            std::cerr << "\n";
+            return 1;
+        }                                            // steering after the results, before the next call
+        CHECK(llm.sent.size() == 2);
+    }
+
+    // Without an engine the loop's own transcript carries it, in order: the tool
+    // result first, the operator's new words last.
+    {
+        SteerScript llm;
+        agent::Agent a;
+        tools::ToolRegistry reg = make_echo();
+        a.registry = &reg;
+        a.llm = &llm;
+        a.system_prompt = "sys";
+        a.max_iterations = 10;
+        a.tool_delay = 0.0;
+        int pulls = 0;
+        a.steer_hook = [&] {
+            ++pulls;
+            return pulls == 1 ? std::vector<std::string>{"redirect"} : std::vector<std::string>{};
+        };
+        CHECK(a.run("hello") == "done");
+        CHECK(pulls == 1);
+        CHECK(llm.sent[0].back() == "user:hello");           // the first call: only the question
+        const auto& second = llm.sent[1];
+        CHECK(second[0] == "system:sys" && second[1] == "user:hello");
+        CHECK(second[2] == "assistant:" && second[3] == "tool:echoed");
+        CHECK(second.back() == "user:redirect");             // newest words last
+        CHECK(second.size() == 5);
+    }
+
+    // A turn that answers without tools has no round boundary: nothing is pulled,
+    // so typed input is not folded into a turn that already finished.
+    {
+        struct Answer : agent::LLMClient {
+            int calls = 0;
+            core::Message chat(const std::vector<core::Message>&, const core::Json&) override {
+                ++calls;
+                core::Message m;
+                m.role = "assistant";
+                m.content = "answered";
+                m.finish_reason = "stop";
+                return m;
+            }
+        } answer;
+        agent::Agent a;
+        a.llm = &answer;
+        int pulls = 0;
+        a.steer_hook = [&] { ++pulls; return std::vector<std::string>{"too late"}; };
+        CHECK(a.run("go") == "answered" && answer.calls == 1 && pulls == 0);
+    }
+
+    // An interrupt at the boundary stops the pull; it does not inject, and the
+    // typed input stays where the idle loop can still send it.
+    {
+        SteerScript llm;
+        OrderSpy ctx;
+        agent::Agent a;
+        tools::ToolRegistry reg = make_echo();
+        a.registry = &reg;
+        a.llm = &llm;
+        a.context = &ctx;
+        a.max_iterations = 10;
+        a.tool_delay = 0.0;
+        int pulls = 0;
+        a.steer_hook = [&] {
+            ++pulls;
+            a.interrupt_requested = true;   // Esc at the boundary, nothing typed
+            return std::vector<std::string>{};
+        };
+        a.run("go");
+        CHECK(pulls == 1 && llm.round == 1 && ctx.steered.empty());
+        CHECK(ctx.events.back() == "end");
+        CHECK(ctx.events.size() == 6);   // begin, payload, assistant, results, after_tools, end
+    }
+    return 0;
+}
+
 int main() {
     if (test_helpers()) return 1;
     if (test_run_loop()) return 1;
     if (test_max_iterations()) return 1;
     if (test_overflow_retry()) return 1;
     if (test_gate()) return 1;
+    if (test_steering()) return 1;
     std::cout << "all agent-loop tests passed\n";
     return 0;
 }
