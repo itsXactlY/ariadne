@@ -376,7 +376,7 @@ int main() {
         const Json* ci = p ? dd::core::json_get(*p, "clientInfo") : nullptr;
         const Json* nm = ci ? dd::core::json_get(*ci, "name") : nullptr;
         const Json* pv = p ? dd::core::json_get(*p, "protocolVersion") : nullptr;
-        chk(nm && nm->str == "daedalus-cpp" && pv && pv->str == "2025-06-18" && p && dd::core::json_get(*p, "capabilities"),
+        chk(nm && nm->str == "ariadne" && pv && pv->str == "2025-06-18" && p && dd::core::json_get(*p, "capabilities"),
             "initialize params carry protocolVersion, capabilities, clientInfo");
         chk(!srv.req(base).has_header("mcp-session-id"), "no session id before the server gives one");
         chk(has(srv.req(base + 1).body, "notifications/initialized") && srv.req(base + 1).header("mcp-session-id") == "sess-123",
