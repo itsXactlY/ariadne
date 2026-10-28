@@ -86,6 +86,8 @@ public:
     void on_steering(const std::vector<core::Message>& notes) override;   // mid-turn input, folded here
     void end_turn(const std::string& final_response, bool interrupted) override;
     bool on_overflow(const std::string& error) override;   // the server refused the window: rebase, send again
+    // Under a tape the plan never rides the tail: a rebase's turn 0 carries it, inside an epoch the todo results do.
+    bool take_ephemeral(const std::string& prompt) override;
 
     void on_call(const agent::CallStats& st);   // tokens as the server counted them
     // ---- between turns (no turn running) ----
@@ -139,6 +141,7 @@ private:
     Renderer render_;
     Tape tape_;
     std::string injection_, question_;
+    std::string plan_;   // the loop's ephemeral prompt, for the next epoch's anchor (the worker thread)
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
     int steered_ = 0;         // prompts folded in at round boundaries since begin_turn
@@ -169,7 +172,8 @@ private:
     void join_prep(bool cancel);
     // ratio: server tokens per chars/4, so the new epoch is sized as the server will count it
     std::vector<ItemPtr> retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                        bool* recalled, double ratio, const std::vector<long>& turn_ids) const;
+                                        bool* recalled, double ratio, const std::vector<long>& turn_ids,
+                                        const std::string& plan) const;
     void drain_ledger();
     std::set<long> in_window() const;              // ids written in this epoch: on the tape now
     std::vector<long> turn_ids(bool earlier_only) const;

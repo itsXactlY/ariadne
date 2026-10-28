@@ -415,7 +415,7 @@ bool TapeEngine::rebase(const char* why) {
     if (std::unique_ptr<Prep> stale(ready_.exchange(nullptr)); stale && stale->slot >= 0) ep_.erase(stale->slot);
     bool recalled = false;
     drain_ledger();
-    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio(), turn_ids(false));
+    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio(), turn_ids(false), plan_);
     const size_t before = session_->items().size();
     const long tokens = tokens_;
     // A rebase that cannot make room would rebase again on the next call,
@@ -466,7 +466,8 @@ long TapeEngine::prefix_tokens(double ratio) const {
 }
 
 std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
-                                                bool* recalled, double ratio, const std::vector<long>& turn_ids) const {
+                                                bool* recalled, double ratio, const std::vector<long>& turn_ids,
+                                                const std::string& plan) const {
     long cur = -1;
     for (size_t i = items.size(); i-- > 0;)
         if (items[i]->msg.role == "user" && !items[i]->hidden) {
@@ -518,6 +519,7 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
         const std::vector<ItemPtr> dropped(items.begin() + cur + 1, items.begin() + std::max(cur + 1, cut));
         if (std::string t = turn_so_far(dropped); !t.empty()) blocks.push_back(t);
     }
+    if (!plan.empty()) blocks.push_back(plan);   // the todo results that carried it may have left with the epoch
     std::string block;
     if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
@@ -615,6 +617,12 @@ void TapeEngine::on_call(const agent::CallStats& st) {
     emit();
 }
 
+bool TapeEngine::take_ephemeral(const std::string& prompt) {
+    if (!cfg_.tape) return false;   // a payload rebuilt every call has no prefix to keep
+    plan_ = prompt;
+    return true;
+}
+
 void TapeEngine::on_assistant(const Message& m) {
     session_->append(m);
     pending_calls_ = m.tool_calls;   // each meets its result in on_tool_results
@@ -706,14 +714,15 @@ void TapeEngine::start_prep() {
     const double ratio = render_.ratio();
     drain_ledger();
     const std::vector<long> ids = turn_ids(false);   // the thread gets a copy, never the ledger
+    const std::string plan = plan_;                   // and of the plan
     prep_cancel_.store(false);
     prep_running_.store(true);
     note("⟲ prewarming the next epoch: " + thousands(pool) + " tokens ≥ high watermark " + thousands(high_at()) +
          (slot >= 0 ? " · sidekick slot " + std::to_string(slot) : " · parked (one-conversation engine)"));
-    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio, ids]() mutable {
+    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio, ids, plan]() mutable {
         auto p = std::make_unique<Prep>();
         bool recalled = false;
-        p->base = retrieval_base(snapshot, sid, &recalled, ratio, ids);
+        p->base = retrieval_base(snapshot, sid, &recalled, ratio, ids, plan);
         if (high_at() > 0 && epoch_tokens(p->base, ratio) >= high_at()) {   // no room to make: nothing to warm
             note("⟲ prewarm dropped: the next epoch would not land under the high watermark");
             prep_running_.store(false);
@@ -766,6 +775,7 @@ void TapeEngine::reset() {
     tape_.reset();
     injection_.clear();
     question_.clear();
+    plan_.clear();
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
     if (router_) router_->on(know::SessionStarted{});

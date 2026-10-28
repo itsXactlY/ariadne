@@ -65,6 +65,8 @@ struct Spy : agent::ContextEngine {
     std::string last_final = "(unset)";
     bool throw_on_end = false;
     std::vector<size_t> assistant_calls, result_counts;
+    bool takes = false;                  // keeps the ephemeral prompt itself, as a tape does
+    std::vector<std::string> taken;      // what the loop handed over, once per call
     void begin_turn(const std::string&) override { ++begun; }
     std::vector<core::Message> payload() override {
         core::Message u;
@@ -77,6 +79,10 @@ struct Spy : agent::ContextEngine {
     void on_tool_results(const std::vector<core::Message>& r) override { result_counts.push_back(r.size()); }
     void after_tools() override {}
     void on_steering(const std::vector<core::Message>& notes) override { steered += static_cast<int>(notes.size()); }
+    bool take_ephemeral(const std::string& p) override {
+        taken.push_back(p);
+        return takes;
+    }
     void end_turn(const std::string& f, bool interrupted) override {
         ++ended;
         ended_interrupted += interrupted ? 1 : 0;
@@ -456,8 +462,9 @@ static void test_max_iterations_tool_summary() {
     chk(llm.calls == 3, "max iterations: two loop calls and one summary call");
 }
 
-// (g) the ephemeral prompt (the plan) reaches every call exactly once, behind the tape's
-// payload tail with a context engine and behind the standing system prompt without one.
+// (g) the ephemeral prompt (the plan) reaches every call exactly once: behind the standing system
+// prompt without a context engine, behind the payload with one that does not take it, and never
+// in the request with one that does (take_ephemeral).
 static int count_ephemeral(const std::vector<core::Message>& m, const std::string& text) {
     int n = 0;
     for (const auto& x : m)
@@ -524,6 +531,25 @@ static void test_ephemeral_prompt_placement() {
             summary[1].role == "system" && summary[1].content == "ACTIVE PLAN" &&
             summary[2].role == "user" && summary[2].content.find("maximum") != std::string::npos,
             "the summary call rides the tape, the plan, then its own request");
+    }
+    // an engine that takes the plan: it is handed over before every call and never sent behind the payload
+    {
+        Script script;
+        script.always_tools = true;
+        Spy spy;
+        spy.takes = true;
+        agent::Agent agent;
+        agent.ephemeral_system_prompt = "ACTIVE PLAN";
+        agent.max_iterations = 1;
+        tools::ToolRegistry reg;
+        add_tool(reg, "echo", [](const Json&) { return std::string("ok"); });
+        agent.registry = &reg;
+        agent.llm = &script;
+        agent.context = &spy;
+        agent.run("go");
+        chk(script.calls == 2 && spy.taken.size() == 2, "the plan is handed over before each call, the summary's too");
+        for (const auto& t : spy.taken) chk(t == "ACTIVE PLAN", "the engine gets the plan as it stands");
+        for (const auto& r : script.requests) chk(count_ephemeral(r, "ACTIVE PLAN") == 0, "a taken plan never rides the tail");
     }
 }
 

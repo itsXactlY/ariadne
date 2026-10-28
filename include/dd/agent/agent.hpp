@@ -59,6 +59,9 @@ struct ContextEngine {
     // The server refused a request for the context window (what() of the failed call). true: the history was
     // rebuilt to fit and the call goes out again, once; false: the error stands.
     virtual bool on_overflow(const std::string& /*error*/) { return false; }
+    // The loop's ephemeral prompt (the plan), handed over before every call. true: the engine keeps it
+    // where the cached prefix survives it; false: the loop sends it behind the payload.
+    virtual bool take_ephemeral(const std::string& /*prompt*/) { return false; }
 };
 
 // A rule that can refuse a tool call before it runs. veto() returns the tool result the model gets

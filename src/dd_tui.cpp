@@ -1014,9 +1014,10 @@ int main(int argc, char** argv) {
     agent.context = &engine;
     agent.gate = &gate;
 
-    // The plan reaches the model as an ephemeral prompt, never through the tape: the
-    // cached prefix stays byte-identical, only the tail moves. An empty ledger empties
-    // the prompt, so the weight disappears the moment the work is done.
+    // The plan reaches the model as the agent's ephemeral prompt, which the tape engine takes:
+    // the todo results carry it inside an epoch, a rebase's turn 0 after one. Nothing rides the
+    // tail, so the checkpoint in front of the answer stays good for the next call. An empty
+    // ledger empties the prompt, so the weight disappears the moment the work is done.
     publish_plan = [&todos, &scene, &agent] {
         const auto inj = todos.format_for_injection();
         agent.ephemeral_system_prompt = inj ? *inj : "";

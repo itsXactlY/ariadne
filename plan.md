@@ -166,10 +166,10 @@ token cost.
 
 ## W7 — mid-turn steering
 
-**Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:375`)
+**Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:380`)
 runs at the round boundary — after the tool results are appended, before the next request,
 never while a tool call is executing — and what it returns rides as user messages, which
-`TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps `steered` so the fold is a fact
+`TapeEngine::on_steering` (`src/context/engine.cpp:648`) stamps `steered` so the fold is a fact
 of the tape. The count is the turn's (`begin_turn` resets it at `:317`). `/interrupt` keeps its
 meaning and stays the only mid-call action.
 

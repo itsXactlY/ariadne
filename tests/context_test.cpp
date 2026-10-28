@@ -1,5 +1,6 @@
 // dd::context — the tape keeps every request an exact prefix of the next;
 // hygiene, rebase, tool deck and soak behave as the Python harness does.
+#include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
 #include "dd/context/deck.hpp"
 #include "dd/context/endpoint.hpp"
@@ -170,8 +171,79 @@ static int prefix_breaks(bool tape, int* calls_out, std::vector<std::vector<std:
     return breaks;
 }
 
+// The agent loop over a tape with a plan set. A plan sent behind the payload is gone at that spot
+// on the next call, so a server that only restores checkpoints re-reads from an older one each time.
+struct PlanScript : agent::LLMClient {
+    std::vector<std::vector<Message>> requests;
+    int calls = 0;
+    Message chat(const std::vector<Message>& m, const Json&) override {
+        requests.push_back(m);
+        Message a;
+        a.role = "assistant";
+        if (++calls % 3) {
+            a = assistant_calls(calls, "read_file", "/p" + std::to_string(calls), "think " + std::to_string(calls));
+        } else {
+            a.content = "done";
+            a.finish_reason = "stop";
+        }
+        return a;
+    }
+};
+
+struct Forward : agent::ContextEngine {   // the engine without take_ephemeral: what every call sent before
+    agent::ContextEngine& e;
+    explicit Forward(agent::ContextEngine& x) : e(x) {}
+    void begin_turn(const std::string& u) override { e.begin_turn(u); }
+    std::vector<Message> payload() override { return e.payload(); }
+    Json tools() override { return e.tools(); }
+    void on_assistant(const Message& m) override { e.on_assistant(m); }
+    void on_tool_results(const std::vector<Message>& r) override { e.on_tool_results(r); }
+    void after_tools() override { e.after_tools(); }
+    void on_steering(const std::vector<Message>& n) override { e.on_steering(n); }
+    void end_turn(const std::string& f, bool i) override { e.end_turn(f, i); }
+};
+
+static int plan_breaks(bool engine_takes, int* calls_out, int* late_system) {
+    tools::ToolRegistry reg;
+    add_tool(reg, "read_file", "", true);
+    ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+    deck.arrange({"read_file"});
+    Endpoint ep("http://203.0.113.1/v1");
+    agent::HttpLLM llm;
+    EngineConfig cfg;
+    cfg.turn_recall = false;
+    cfg.prewarm = false;
+    TapeEngine eng(cfg, "you are a test", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_plan"));
+    Forward fwd(eng);
+    PlanScript script;
+    agent::Agent ag;
+    ag.registry = &reg;
+    ag.llm = &script;
+    ag.context = engine_takes ? static_cast<agent::ContextEngine*>(&eng) : &fwd;
+    ag.ephemeral_system_prompt = "[Your active task list was preserved across context compression]\n- [>] 1. wire it (in_progress)";
+    ag.run("first: read the files");
+    ag.run("second: read them again");
+    int breaks = 0;
+    *late_system = 0;
+    for (size_t i = 0; i < script.requests.size(); ++i) {
+        const auto& r = script.requests[i];
+        for (size_t k = 1; k < r.size(); ++k) *late_system += r[k].role == "system";
+        if (i && !is_prefix(wire(script.requests[i - 1]), wire(r))) ++breaks;
+    }
+    *calls_out = static_cast<int>(script.requests.size());
+    return breaks;
+}
+
 int main() {
     // ---- tape ----
+    {   // the plan rides no tail: every request extends the last, before it every one broke
+        int calls = 0, late = 0;
+        const int before = plan_breaks(false, &calls, &late);
+        chk(calls == 6 && before == calls - 1 && late == calls,
+            "plan behind the payload: every call breaks the prefix (" + std::to_string(before) + " of " + std::to_string(calls) + ")");
+        const int after = plan_breaks(true, &calls, &late);
+        chk(after == 0 && late == 0, "plan taken by the tape: no break, no late system message (" + std::to_string(after) + " breaks)");
+    }
     {
         Session s("dd-test");
         Message m;
@@ -279,6 +351,7 @@ int main() {
         cfg.prewarm = false;
         TapeEngine eng(cfg, "sys", ep, maze, nullptr, deck, llm, tmp_dir("spill"));
         std::vector<std::string> notes;
+        eng.take_ephemeral("PLAN: [>] 1. wire the anchor (in_progress)");
         eng.on_note = [&](const std::string& s) { notes.push_back(s); };
         eng.begin_turn("first question, long enough to anchor a short follow-up later on");
         eng.payload();
@@ -308,6 +381,7 @@ int main() {
                 items[1]->msg.content.find("read_file(/r1)") != std::string::npos,
             "what the turn already ran survives as one line per call");
         chk(items[1]->msg.content.find("[memory unreachable]") != std::string::npos, "a dead maze is said, not hidden");
+        chk(items[1]->msg.content.find("PLAN: [>] 1. wire the anchor") != std::string::npos, "the plan survives the rebase in turn 0");
         chk(items.back()->msg.role == "tool" && items.back()->msg.content == "r5", "the protected tail stays");
         const auto p = wire(eng.payload());
         chk(p.size() == 1 + items.size(), "a new epoch renders the rebased history");

@@ -16,7 +16,7 @@ on branch `fix/audit-20261024`, not read out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:527`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1019-1032`, `src/dd_tui.cpp:1338-1344`, `src/dd_agent_main.cpp:197-218` |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:527`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1020-1033`, `src/dd_tui.cpp:1339-1345`, `src/dd_agent_main.cpp:197-218` |
 
 ## What is missing — measured, not assumed
 
@@ -70,9 +70,9 @@ typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1133`) and `Agen
 (`src/dd_tui.cpp:1193`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 prompt typed earlier enters earlier however the slots wrapped. Overflow is held in a list the key handler
 owns alone, and once anything is held everything typed after it waits too. The
-loop calls at the tool-round boundary (`src/agent/agent.cpp:375`) — after the tool results are
+loop calls at the tool-round boundary (`src/agent/agent.cpp:380`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
-`TapeEngine::on_steering` (`src/context/engine.cpp:639`) stamps each one with `steered`, so the
+`TapeEngine::on_steering` (`src/context/engine.cpp:648`) stamps each one with `steered`, so the
 fold is a fact of the tape rather than a widget's guess: the prompt card carries
 `·◈ steered · 1 prompt entered this turn` whether or not the sidebar has room for it; the
 sidebar's history row counts it too, but the tape panel is a vertical budget — cards can eat the
@@ -158,6 +158,10 @@ each step built, tested, then looked at:
    `ephemeral_system_prompt`, never the tape, so the cached prefix stays
    byte-identical and the plan survives a rebase by construction. Sidebar panel,
    `/plan`, and a count on the status row in verbose.
+   *Corrected 2026-10-28:* the premise was wrong on Strata's hybrid models. The
+   plan behind the payload sat in front of the engine's turn checkpoint, so every
+   call fell back to a periodic one (every 16,384 tokens read) and re-read up to
+   that much. The tape engine now takes the plan (`take_ephemeral`).
 4. **This ledger**, plus the README line that drifted.
 
 Also shipped here, each with its number: the wire's transient retry (proved

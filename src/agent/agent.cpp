@@ -210,10 +210,12 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
 }
 
 namespace {
-// The ephemeral prompt rides every call exactly once and is never stored in `messages`:
-// under a tape it goes after the rendered payload, so the cached prefix stays
-// byte-identical and only the part after it changes; without a tape the payload is
-// rebuilt anyway, so it sits behind the standing system prompt.
+// The ephemeral prompt rides every call exactly once and is never stored in `messages`,
+// unless the context engine takes it (take_ephemeral). An engine that does not goes on
+// with it after the rendered payload. That is cheap only where the server can cut its KV
+// back to any token. A hybrid model's engine restores a checkpoint, and its turn checkpoint
+// sits behind this message, so every call re-reads from an older one. Without an engine
+// the payload is rebuilt anyway, so it sits behind the standing system prompt.
 void attach_ephemeral(std::vector<core::Message>& payload, const std::string& prompt,
                       bool under_tape, bool standing_system) {
     if (prompt.empty()) return;
@@ -239,9 +241,10 @@ std::string Agent::handle_max_iterations(std::vector<core::Message>& messages, i
     try {
         core::Json tools = core::json_arr();  // no tools on the summary call
         std::vector<core::Message> sent = messages;   // req is already in messages
-        if (context) {   // the tape plus the plan plus the request: everything before it is already cached
+        if (context) {   // the tape plus the request: everything before it is already cached
+            const bool kept = context->take_ephemeral(ephemeral_system_prompt);
             sent = context->payload();
-            attach_ephemeral(sent, ephemeral_system_prompt, true, false);
+            if (!kept) attach_ephemeral(sent, ephemeral_system_prompt, true, false);
             sent.push_back(req);
             tools = context->tools();   // unchanged, or the server re-reads the whole prefix
         } else {
@@ -324,6 +327,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
 
         std::vector<core::Message> payload = messages;
         core::Json tools = core::json_arr();
+        const bool kept = context && context->take_ephemeral(ephemeral_system_prompt);
         if (context) {
             payload = context->payload();
             tools = context->tools();
@@ -331,7 +335,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
             for (auto& d : registry->get_definitions(registry->get_all_tool_names()))
                 core::arr_push(tools, d);
         }
-        attach_ephemeral(payload, ephemeral_system_prompt, context != nullptr, !system_prompt.empty());
+        if (!kept) attach_ephemeral(payload, ephemeral_system_prompt, context != nullptr, !system_prompt.empty());
 
         core::Message assistant;
         if (llm) {
@@ -344,6 +348,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
                     again = true;
                     payload = context->payload();
                     tools = context->tools();
+                    if (!kept) attach_ephemeral(payload, ephemeral_system_prompt, true, false);
                 }
             }
         }
