@@ -203,7 +203,9 @@ struct Forward : agent::ContextEngine {   // the engine without take_ephemeral: 
     void end_turn(const std::string& f, bool i) override { e.end_turn(f, i); }
 };
 
-static int plan_breaks(bool engine_takes, int* calls_out, int* late_system) {
+static int plan_breaks(bool engine_takes, int* calls_out, int* late_system, int* carried, int* ledger_items) {
+    // What the model sees per call, how many requests are exact extensions of the last, and how
+    // many ledger items the session holds: one state on the tape, none behind the payload.
     tools::ToolRegistry reg;
     add_tool(reg, "read_file", "", true);
     ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
@@ -225,11 +227,23 @@ static int plan_breaks(bool engine_takes, int* calls_out, int* late_system) {
     ag.run("second: read them again");
     int breaks = 0;
     *late_system = 0;
+    *carried = 0;
+    *ledger_items = 0;
     for (size_t i = 0; i < script.requests.size(); ++i) {
         const auto& r = script.requests[i];
-        for (size_t k = 1; k < r.size(); ++k) *late_system += r[k].role == "system";
+        bool has_plan = false;
+        for (size_t k = 0; k < r.size(); ++k) {
+            if (k >= 1 && r[k].role == "system") ++*late_system;
+            if (r[k].content.find("active task list") != std::string::npos) has_plan = true;
+        }
+        if (has_plan) ++*carried;
         if (i && !is_prefix(wire(script.requests[i - 1]), wire(r))) ++breaks;
     }
+    // how many ledger items the session itself holds: the tape appends one per state, the
+    // per-call tail appends none
+    for (const auto& it : eng.session().items())
+        if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos)
+            ++*ledger_items;
     *calls_out = static_cast<int>(script.requests.size());
     return breaks;
 }
@@ -237,12 +251,14 @@ static int plan_breaks(bool engine_takes, int* calls_out, int* late_system) {
 int main() {
     // ---- tape ----
     {   // the plan rides no tail: every request extends the last, before it every one broke
-        int calls = 0, late = 0;
-        const int before = plan_breaks(false, &calls, &late);
-        chk(calls == 6 && before == calls - 1 && late == calls,
+        int calls = 0, late = 0, carried = 0, items = 0;
+        const int before = plan_breaks(false, &calls, &late, &carried, &items);
+        chk(calls == 6 && before == calls - 1 && late == calls && carried == calls && items == 0,
             "plan behind the payload: every call breaks the prefix (" + std::to_string(before) + " of " + std::to_string(calls) + ")");
-        const int after = plan_breaks(true, &calls, &late);
-        chk(after == 0 && late == 0, "plan taken by the tape: no break, no late system message (" + std::to_string(after) + " breaks)");
+        const int after = plan_breaks(true, &calls, &late, &carried, &items);
+        chk(after == 0 && carried == calls && items == 1,
+            "plan on the tape: no break, every call carries it, one item for " + std::to_string(calls) +
+            " calls (" + std::to_string(after) + " breaks, " + std::to_string(items) + " item)");
     }
     {
         Session s("dd-test");

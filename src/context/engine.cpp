@@ -519,7 +519,9 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
         const std::vector<ItemPtr> dropped(items.begin() + cur + 1, items.begin() + std::max(cur + 1, cut));
         if (std::string t = turn_so_far(dropped); !t.empty()) blocks.push_back(t);
     }
-    if (!plan.empty()) blocks.push_back(plan);   // the todo results that carried it may have left with the epoch
+    // The ledger only needs re-stating here if its tape item left with the epoch; while the item
+    // is still in the window it is already on the wire, and a second copy is pure duplication.
+    if (!plan.empty() && index_of(items, plan_item_) < cut) blocks.push_back(plan);
     std::string block;
     if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
@@ -620,6 +622,15 @@ void TapeEngine::on_call(const agent::CallStats& st) {
 bool TapeEngine::take_ephemeral(const std::string& prompt) {
     if (!cfg_.tape) return false;   // a payload rebuilt every call has no prefix to keep
     plan_ = prompt;
+    // The ledger rides the tape as real history. An appended item is committed with the turn, so
+    // the next request is an exact extension of the last one; the ephemeral tail message this
+    // replaced was never committed, and broke the prefix on every call inside an epoch. One item
+    // per state, not one per call: the cost is per epoch, and an unchanged ledger costs nothing.
+    if (prompt.empty() || (plan_item_ && plan_item_->msg.content == prompt)) return true;
+    Message m;
+    m.role = "system";
+    m.content = prompt;
+    plan_item_ = session_->append(std::move(m), true);
     return true;
 }
 
@@ -776,6 +787,7 @@ void TapeEngine::reset() {
     injection_.clear();
     question_.clear();
     plan_.clear();
+    plan_item_.reset();
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
     if (router_) router_->on(know::SessionStarted{});

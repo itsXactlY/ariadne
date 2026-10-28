@@ -86,7 +86,9 @@ public:
     void on_steering(const std::vector<core::Message>& notes) override;   // mid-turn input, folded here
     void end_turn(const std::string& final_response, bool interrupted) override;
     bool on_overflow(const std::string& error) override;   // the server refused the window: rebase, send again
-    // Under a tape the plan never rides the tail: a rebase's turn 0 carries it, inside an epoch the todo results do.
+    // Under a tape the plan rides as real history, not as a tail message: one item per state
+    // change, so a request stays an exact extension of the last. A rebase's turn 0 carries it
+    // too, only once the item itself has left the window.
     bool take_ephemeral(const std::string& prompt) override;
 
     void on_call(const agent::CallStats& st);   // tokens as the server counted them
@@ -142,6 +144,7 @@ private:
     Tape tape_;
     std::string injection_, question_;
     std::string plan_;   // the loop's ephemeral prompt, for the next epoch's anchor (the worker thread)
+    ItemPtr plan_item_;    // the ledger on the tape: appended when it changes, never per call
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
     int steered_ = 0;         // prompts folded in at round boundaries since begin_turn
