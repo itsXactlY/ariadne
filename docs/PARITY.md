@@ -46,8 +46,36 @@ tokens** bounded against **22151** unbounded, and the call after it **9403**
 against **22308**. That is **12,944 prompt tokens per call** for bytes the
 model never reads. `level` stayed `ok` in both arms, so this is window cost,
 not compaction.
-Still open: a spill read verb (the dropped tail cannot be recovered from the
-reply, only re-fetched by narrowing).
+@@ reply, only re-fetched by narrowing.
+reply, only re-fetched by narrowing.
+
+### Measured substrate: the ceiling, not a scorecard
+
+Session `dd-6ae2310c` (2026-10-28, from 06:01), as the harness counters reported them and cross-checked
+against `/props`. They move every turn; the ratios are the point, not the totals.
+
+| counter | value | what it constrains |
+|---|---|---|
+| requests | 1,147 | — |
+| prompt tokens read | 908,307 at 146 tok/s | the *uncached* part. Every token a window or a note adds lands here |
+| prompt tokens reused | 45,573,645 | 98% of all prompt tokens (45,573,645 / 46,481,952); 500 of 500 requests reused part of their prompt; last request 5,310 of 10,962 |
+| tokens written | 571,178 at 46.7 tok/s | decode. The long-reply side is the slow side |
+| context | 78,690 tokens (`/props n_ctx`) | `total_slots: 1` — two concurrent runs cannot share the server |
+| KV cache | 8-bit, streamed: 32,768 positions per layer in VRAM, the rest in RAM | past 32,768 positions a layer reads RAM, not VRAM |
+| experts in VRAM | 8,651 (8.5 GB) | the rest of the MoE is fetched from RAM per call |
+| speculation | MTP drafts up to 3 tokens, prompt lookup on | the only decode accelerator on this box |
+| images | off | vision is not resident |
+| model / engine | `qwen3.8-flash-next-gyro-gyro-s` / v0.1.51 | — |
+| GPU | RTX 4060 Ti, 16 GB — 15,707 of 16,380 MiB used | 673 MiB of headroom |
+| CPU / RAM | Ryzen 7 3800X, 16 threads; 27 Gi of 31 Gi used, 3.8 Gi available | the KV spill and the RAM experts share it |
+
+Read these as a constraint ledger, not a result to beat. Per request the model re-reads ~39.7k cached
+tokens and only ~790 fresh ones, so 98% reuse is what a warm prefix costs on a box with 673 MiB of VRAM
+free and 3.8 GiB of RAM free — it is the boundary, not a win. The moment a prompt goes cold the price is
+146 tok/s of prefill, not the ~500 tok/s this repo previously claimed; at 46.7 tok/s decode a
+1,500-token turn budget is ~32 s of writing before it pays for itself. Any second GPU consumer — a pulse
+deep leg, a second slot, images switched on — pushes the KV/expert layout past 16 GB and the spill lands
+in the RAM that is left, which is why the pod invariant keeps the deep leg serialised.
 
 ### What a card says about a cut result
 
