@@ -118,6 +118,14 @@ struct Theme {
              input_rule = rgb(0xB026FF), response = rgb(0xD000FF),
              session_label = rgb(0xFF66E8), session_border = rgb(0x7200A8),
              status_bg = rgb(0x10051C), select_bg = rgb(0x291044), muted = rgb(0x8A7AA8);
+    // The code palette. A patch or a fenced block has to read as structure at a glance, and
+    // one grey run cannot say which line was added, which was removed, and which is a hunk.
+    // Defaults only: a skin overlays them exactly as it overlays every other colour.
+    uint32_t code_kw = rgb(0xFF5FD8), code_ty = rgb(0x7FE3FF), code_str = rgb(0xFFBF00),
+             code_num = rgb(0xFF9A57), code_cmt = rgb(0x7200A8), code_fn = rgb(0x39FFB6),
+             diff_add = rgb(0x45F5B0), diff_del = rgb(0xFF5C7E), diff_hunk = rgb(0xFFE66D),
+             diff_add_bg = rgb(0x123024), diff_del_bg = rgb(0x2E1022),
+             diff_hunk_bg = rgb(0x241C10);
     std::vector<std::pair<std::string, std::string>> wings = {
         {"⟪◉", "◉⟫"}, {"⟪◈", "◈⟫"}, {"⟪⬡", "⬡⟫"}, {"⟪◌", "◌⟫"}, {"⟪⦿", "⦿⟫"}};
     std::vector<std::string> verbs = {"weaving synapses", "firing neurons", "mapping the maze",
@@ -130,6 +138,26 @@ struct Theme {
     // unreadable file leaves the defaults.
     static Theme load(const std::string& skin_yaml);
 };
+
+// A body's colouring state, carried across the rows of one card. A fence toggles on a ```
+// row; a diff body colours +/- rows instead of leaving them the body's grey. Both are facts
+// about the body, not guesses about the row: a '-' that opens a prose bullet is a bullet, and
+// calling it a deletion is the lie this state machine exists to refuse.
+struct CodeCtx { bool diff_body = false; bool fence = false; };
+struct Span { std::string text; Style st; };
+
+// One row -> styled runs. The runs concatenate back to the row exactly (tests hold that), so
+// colouring can never rewrite what the model wrote.
+std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx& ctx);
+
+// Whether the body carries diff or patch markers at all. +/- colouring is only honest when it
+// does, so this is scanned once per body rather than once per row.
+bool looks_like_diff(const std::string& body);
+
+// Paints one row as runs and returns the columns used. A diff stripe runs to max_w: a stripe
+// cut short reads as a line that ended, which is a claim about the file that is not true.
+int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, CodeCtx& ctx,
+              const Style& base, int max_w = -1);
 
 enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory };
 // How reasoning cards show: a fixed-height live tail, every line, or one line.

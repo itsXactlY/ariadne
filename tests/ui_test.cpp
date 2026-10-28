@@ -870,6 +870,86 @@ int main() {
         chk(rows, "present matches across thread counts");
     }
 
+    // ---- code colour: painting never rewrites what the model wrote ----
+    {
+        const Theme th;
+        // A row's spans must concatenate back to the row exactly. Colour may split a row; it
+        // may never edit one. Wide glyphs, tabs and diff markers are in the set because those
+        // are where a naive splitter drops or duplicates a column.
+        const std::vector<std::string> rows = {
+            "plain prose row",
+            "- a bullet, not a deletion",
+            "+int x = 42;",
+            "@@ -1,3 +1,4 @@",
+            "--- a/src/ui.cpp",
+            "*** Add File: src/new.cpp",
+            "\tint x = 42;  // a comment",
+            "日本 + not a diff marker",
+            "",
+        };
+        for (const auto& row : rows) {
+            CodeCtx ctx;
+            ctx.diff_body = looks_like_diff(row);
+            std::string back;
+            for (const auto& s : highlight_row(row, th, ctx)) back += s.text;
+            chk(back == row, "spans concatenate back to the row: " + row);
+        }
+
+        // +/- colouring is honest only when the body carries diff markers at all. A prose '-'
+        // bullet stays the body's own colour: calling a bullet a deletion is the lie the state
+        // machine exists to refuse.
+        const std::string prose_body = "notes:\n- a bullet\n+ a plus sign in prose";
+        chk(!looks_like_diff(prose_body), "prose is not a diff body");
+        CodeCtx prose;
+        prose.diff_body = looks_like_diff(prose_body);
+        const auto bullet = highlight_row("- a bullet, not a deletion", th, prose);
+        chk(bullet.size() == 1 && bullet[0].text == "- a bullet, not a deletion" &&
+            bullet[0].st == Style{th.text}, "a prose bullet is not coloured as a deletion");
+
+        // A real diff body does colour: the marker first, then the row's own code.
+        chk(looks_like_diff("--- a/src/ui.cpp\n+++ b/src/ui.cpp\n@@ -1,3 +1,4 @@"), "a diff body is recognised");
+        CodeCtx d;
+        d.diff_body = true;
+        const auto add = highlight_row("+int x = 42;", th, d);
+        chk(add.size() >= 1 && add[0].text == "+" && add[0].st.fg == th.diff_add &&
+            add[0].st.bg == th.diff_add_bg, "an added row carries the add stripe");
+        CodeCtx d2;
+        d2.diff_body = true;
+        const auto del = highlight_row("-int y = 1;", th, d2);
+        chk(del.size() >= 1 && del[0].st.fg == th.diff_del && del[0].st.bg == th.diff_del_bg,
+            "a removed row carries the delete stripe");
+        CodeCtx d3;
+        d3.diff_body = true;
+        const auto hunk = highlight_row("@@ -1,3 +1,4 @@", th, d3);
+        chk(hunk.size() == 1 && hunk[0].st.fg == th.diff_hunk && hunk[0].st.bg == th.diff_hunk_bg,
+            "a hunk row reads as a hunk");
+
+        // A fence is state across the rows of one body: it opens, colours, and closes.
+        CodeCtx f;
+        chk(highlight_row("```cpp", th, f).size() == 1 && f.fence, "a fence row opens the fence");
+        const auto inner = highlight_row("int x = 42;  // comment", th, f);
+        std::string back;
+        for (const auto& s : inner) back += s.text;
+        chk(back == "int x = 42;  // comment" && inner.size() >= 2, "a fenced row is split, not rewritten");
+        highlight_row("```", th, f);
+        chk(!f.fence, "the closing fence closes the fence");
+
+        // paint_row reports what it painted, and a painted row reads back as the row. A row
+        // clamped by a narrow box still starts with its marker: a stripe cut short reads as a
+        // line that ended, which is a claim about the file that is not true.
+        Canvas wide(60, 3);
+        CodeCtx p;
+        p.diff_body = true;
+        const int used = paint_row(wide, 2, 1, "+int x = 42;", th, p, Style{th.text}, 58);
+        chk(used == text_width("+int x = 42;"), "paint_row reports the columns it used");
+        chk(wide.row_text(1) == "  +int x = 42;", "a painted row reads back exactly");
+        Canvas narrow(12, 3);
+        CodeCtx q;
+        q.diff_body = true;
+        paint_row(narrow, 1, 1, "+long row that does not fit", th, q, Style{th.text}, 10);
+        chk(narrow.row_text(1).find("+") == 1, "a clamped row still starts with its marker");
+    }
+
     if (g_fail) std::printf("%d FAILED\n", g_fail);
     else std::printf("ui: all passed (best kernels: %s)\n", best.c_str());
     return g_fail ? 1 : 0;

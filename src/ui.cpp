@@ -749,6 +749,18 @@ Theme Theme::load(const std::string& path) {
     col("session_border", t.session_border);
     col("status_bar_bg", t.status_bg);
     col("completion_menu_current_bg", t.select_bg);
+    col("code_keyword", t.code_kw);
+    col("code_type", t.code_ty);
+    col("code_string", t.code_str);
+    col("code_number", t.code_num);
+    col("code_comment", t.code_cmt);
+    col("code_function", t.code_fn);
+    col("diff_add", t.diff_add);
+    col("diff_removed", t.diff_del);
+    col("diff_hunk", t.diff_hunk);
+    col("diff_add_bg", t.diff_add_bg);
+    col("diff_removed_bg", t.diff_del_bg);
+    col("diff_hunk_bg", t.diff_hunk_bg);
     t.muted = mix(t.text, t.dim, 0.55);
 
     if (const core::Json* w = c.get_list("spinner.wings"); w && w->type == core::Json::Arr) {
@@ -914,6 +926,256 @@ void Scene::tool_result(const std::string& id, const std::string& text) {
     e.a = text;
     e.c = id;
     post(std::move(e));
+}
+
+// ---------------- code colour ----------------
+
+namespace {
+
+bool starts_with_at(const std::string& s, size_t pos, size_t end, const std::string& p) {
+    const size_t n = end - pos;
+    return n >= p.size() && s.compare(pos, p.size(), p) == 0;
+}
+
+enum class DiffKind { None, Add, Del, Hunk, File, Patch };
+
+DiffKind diff_kind_at(const std::string& s, size_t pos, size_t end) {
+    auto sw = [&](const std::string& p) { return starts_with_at(s, pos, end, p); };
+    if (sw("@@")) return DiffKind::Hunk;
+    if (sw("--- ") || sw("+++ ") || sw("diff --git ")) return DiffKind::File;
+    if (sw("*** Begin Patch") || sw("*** End Patch") || sw("*** Add File") ||
+        sw("*** Update File") || sw("*** Delete File") || sw("*** Move File"))
+        return DiffKind::Patch;
+    if (pos < end && s[pos] == '+') return DiffKind::Add;
+    if (pos < end && s[pos] == '-') return DiffKind::Del;
+    return DiffKind::None;
+}
+
+DiffKind diff_kind(const std::string& row) { return diff_kind_at(row, 0, row.size()); }
+
+bool ascii_letter(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+bool ascii_digit(char c) { return c >= '0' && c <= '9'; }
+bool ascii_hex(char c) {
+    return ascii_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+bool ascii_ident_char(char c) { return ascii_letter(c) || ascii_digit(c); }
+bool ascii_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+bool is_keyword(const std::string& w) {
+    static const char* const kw[] = {
+        "auto", "break", "case", "catch", "class", "const", "constexpr", "continue",
+        "default", "delete", "do", "else", "enum", "explicit", "extern", "for",
+        "friend", "goto", "if", "inline", "namespace", "new", "operator",
+        "private", "protected", "public", "return", "sizeof", "static", "struct",
+        "switch", "template", "this", "throw", "try", "typedef", "typename",
+        "union", "using", "virtual", "volatile", "while",
+        "def", "elif", "except", "lambda", "None", "True", "False", "import",
+        "from", "pass", "raise", "with", "as", "async", "await", "yield",
+        "fn", "let", "mut", "pub", "impl", "match", "unsafe", "trait", "dyn", "crate",
+        "function", "var", "null", "undefined", "export",
+        "static_cast", "reinterpret_cast", "dynamic_cast", "const_cast",
+    };
+    for (const char* s : kw) if (w == s) return true;
+    return false;
+}
+
+bool is_type(const std::string& w) {
+    static const char* const ty[] = {
+        "bool", "char", "int", "unsigned", "signed", "float", "double", "void",
+        "long", "short", "string", "vector", "array", "map", "set", "pair",
+        "Json", "Config", "Canvas", "Frame", "Theme", "Style", "Cell", "Scene",
+        "Entry", "CodeCtx", "Span", "uint32_t", "size_t",
+    };
+    for (const char* s : ty) if (w == s) return true;
+    if (w.size() > 2 && w.compare(w.size() - 2, 2, "_t") == 0) return true;
+    if (w.size() > 1 && w[0] >= 'A' && w[0] <= 'Z') return true;
+    return false;
+}
+
+size_t highlight_code(const std::string& row, size_t start, const Theme& th, std::vector<Span>& out) {
+    size_t pos = start;
+    auto push = [&](size_t a, size_t b, Style st) {
+        if (b > a) out.emplace_back(row.substr(a, b - a), st);
+    };
+    while (pos < row.size()) {
+        const unsigned char ch = static_cast<unsigned char>(row[pos]);
+        if (ascii_space(row[pos])) {
+            size_t p = pos;
+            while (p < row.size() && ascii_space(row[p])) ++p;
+            push(pos, p, Style{th.text});
+            pos = p;
+            continue;
+        }
+        if (ch == '/' && pos + 1 < row.size()) {
+            if (row[pos + 1] == '/') {
+                push(pos, row.size(), Style{th.code_cmt});
+                break;
+            }
+            if (row[pos + 1] == '*') {
+                const size_t end = row.find("*/", pos + 2);
+                const size_t p = end == std::string::npos ? row.size() : end + 2;
+                push(pos, p, Style{th.code_cmt});
+                pos = p;
+                continue;
+            }
+        }
+        if (ch == '#' && (pos == start || pos == 0 || ascii_space(row[pos - 1]))) {
+            if (pos + 1 < row.size() && (row[pos + 1] == '!' || row[pos + 1] == ' ' || row[pos + 1] == '\t')) {
+                push(pos, row.size(), Style{th.code_cmt});
+                break;
+            }
+            if (pos + 1 < row.size() && ascii_letter(row[pos + 1])) {
+                size_t e = pos + 1;
+                while (e < row.size() && ascii_ident_char(row[e])) ++e;
+                push(pos, e, Style{th.code_kw, kNone, kBold});
+                pos = e;
+                continue;
+            }
+            push(pos, row.size(), Style{th.code_cmt});
+            break;
+        }
+        if (ch == '"' || ch == '\'') {
+            size_t p = pos + 1;
+            while (p < row.size()) {
+                if (row[p] == '\\' && p + 1 < row.size()) { p += 2; continue; }
+                if (row[p] == '\n') break;
+                if (row[p] == static_cast<char>(ch)) { ++p; break; }
+                ++p;
+            }
+            push(pos, p, Style{th.code_str});
+            pos = p;
+            continue;
+        }
+        if (ascii_digit(row[pos])) {
+            size_t p = pos + 1;
+            if (p < row.size() && (row[p] == 'x' || row[p] == 'X')) {
+                ++p;
+                while (p < row.size() && ascii_hex(row[p])) ++p;
+            } else {
+                while (p < row.size() && ascii_digit(row[p])) ++p;
+                if (p < row.size() && row[p] == '.') {
+                    ++p;
+                    while (p < row.size() && ascii_digit(row[p])) ++p;
+                }
+                if (p < row.size() && (row[p] == 'e' || row[p] == 'E')) {
+                    ++p;
+                    if (p < row.size() && (row[p] == '+' || row[p] == '-')) ++p;
+                    while (p < row.size() && ascii_digit(row[p])) ++p;
+                }
+            }
+            push(pos, p, Style{th.code_num});
+            pos = p;
+            continue;
+        }
+        if (ch < 0x80 && ascii_letter(static_cast<char>(ch))) {
+            size_t e = pos + 1;
+            while (e < row.size() && ascii_ident_char(row[e])) ++e;
+            const std::string word = row.substr(pos, e - pos);
+            size_t after = e;
+            while (after < row.size() && ascii_space(row[after])) ++after;
+            const bool call = after < row.size() && row[after] == '(';
+            Style st{th.text};
+            if (is_type(word)) st = Style{th.code_ty, kNone, kBold};
+            else if (is_keyword(word)) st = Style{th.code_kw, kNone, kBold};
+            else if (call) st = Style{th.code_fn, kNone, kBold};
+            push(pos, e, st);
+            pos = e;
+            continue;
+        }
+        if (ch >= 0x80) {
+            size_t p = pos;
+            decode(row, p);
+            push(pos, p, Style{th.text});
+            pos = p;
+            continue;
+        }
+        push(pos, pos + 1, Style{th.text});
+        ++pos;
+    }
+    return pos;
+}
+
+}  // namespace
+
+bool looks_like_diff(const std::string& body) {
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t end = body.find('\n', pos);
+        if (end == std::string::npos) end = body.size();
+        if (end > pos && body[end - 1] == '\r') --end;
+        const DiffKind k = diff_kind_at(body, pos, end);
+        if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) return true;
+        pos = end + 1;
+    }
+    return false;
+}
+
+std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx& ctx) {
+    std::vector<Span> out;
+    auto push = [&](size_t a, size_t b, Style st) {
+        if (b > a) out.emplace_back(row.substr(a, b - a), st);
+    };
+    size_t lead = 0;
+    while (lead < row.size() && (row[lead] == ' ' || row[lead] == '\t')) ++lead;
+    if (!ctx.diff_body && lead + 3 <= row.size() && row.compare(lead, 3, "```") == 0) {
+        ctx.fence = !ctx.fence;
+        push(0, row.size(), Style{th.code_fn, kNone, kBold});
+        return out;
+    }
+    if (ctx.diff_body) {
+        const DiffKind k = diff_kind(row);
+        if (k == DiffKind::Add) {
+            push(0, 1, Style{th.diff_add, th.diff_add_bg, kBold});
+            highlight_code(row, 1, th, out);
+            return out;
+        }
+        if (k == DiffKind::Del) {
+            push(0, 1, Style{th.diff_del, th.diff_del_bg, kBold});
+            highlight_code(row, 1, th, out);
+            return out;
+        }
+        if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) {
+            push(0, row.size(), Style{th.diff_hunk, th.diff_hunk_bg, kBold});
+            return out;
+        }
+        if (ctx.fence) {
+            highlight_code(row, 0, th, out);
+            return out;
+        }
+        push(0, row.size(), Style{th.text});
+        return out;
+    }
+    if (ctx.fence) {
+        highlight_code(row, 0, th, out);
+        return out;
+    }
+    push(0, row.size(), Style{th.text});
+    return out;
+}
+
+int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, CodeCtx& ctx,
+              const Style& base, int max_w) {
+    auto spans = highlight_row(row, th, ctx);
+    if (spans.size() == 1 && spans[0].text == row && spans[0].st == Style{th.text})
+        spans[0].st = base;
+    const int limit = max_w < 0 ? c.w() - x : max_w;
+    const int clamped = std::max(0, limit);
+    int used = 0;
+    for (const Span& s : spans) {
+        if (used >= clamped) break;
+        const int n = c.text(x + used, y, s.text, s.st, clamped - used);
+        used += n;
+        if (n < text_width(s.text)) break;
+    }
+    uint32_t bg = kNone;
+    const DiffKind k = diff_kind(row);
+    if (k == DiffKind::Add) bg = th.diff_add_bg;
+    else if (k == DiffKind::Del) bg = th.diff_del_bg;
+    else if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) bg = th.diff_hunk_bg;
+    if (bg != kNone && used < clamped) c.fill(x + used, y, clamped - used, 1, Style{base.fg, bg, kNone});
+    return used;
 }
 
 // ---------------- Scene: render side ----------------
@@ -1237,7 +1499,14 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.put(4 + n, 0, U' ', b);
         c.put(5 + n, 0, U'├', b);
         if (e.ms > 0) c.title_right(w - 2, 0, fmt_ms(e.ms), Style{th_.muted}, b);
-        for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k) + 1, lines[k], Style{th_.text});
+        CodeCtx ctx;
+        ctx.diff_body = looks_like_diff(e.text);
+        const bool code = ctx.diff_body || e.text.find("```") != std::string::npos;
+        const Style base{th_.text};
+        for (size_t k = 0; k < lines.size(); ++k) {
+            if (code) paint_row(c, 2, static_cast<int>(k) + 1, lines[k], th_, ctx, base, w - 4);
+            else c.text(2, static_cast<int>(k) + 1, lines[k], base);
+        }
         return c;
     }
     case Kind::Tool: {
@@ -1309,14 +1578,24 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.text(w - sw - 2, 0, st, ss);
         c.put(w - 2, 0, U' ', b);
         int ry = 1;
+        CodeCtx args_ctx;
+        args_ctx.diff_body = looks_like_diff(e.text);
+        const bool args_code = args_ctx.diff_body || e.text.find("```") != std::string::npos;
         for (size_t k = 0; k < alines.size(); ++k, ++ry) {
             if (alines[k].empty()) continue;
-            c.text(2, ry, alines[k], Style{th_.muted});
+            if (args_code) paint_row(c, 2, ry, alines[k], th_, args_ctx, Style{th_.muted}, w - 4);
+            else c.text(2, ry, alines[k], Style{th_.muted});
         }
         if (e.resolved) {
             c.text(2, ry++, "◂", Style{err ? th_.error : th_.ok, kNone, kBold});
-            for (size_t k = 0; k < rlines.size(); ++k)
-                c.text(4, ry + static_cast<int>(k), rlines[k], Style{err ? th_.error : th_.text});
+            CodeCtx res_ctx;
+            res_ctx.diff_body = looks_like_diff(f.body);
+            const bool res_code = res_ctx.diff_body || f.body.find("```") != std::string::npos;
+            const Style base{err ? th_.error : th_.text};
+            for (size_t k = 0; k < rlines.size(); ++k) {
+                if (res_code) paint_row(c, 4, ry + static_cast<int>(k), rlines[k], th_, res_ctx, base, w - 8);
+                else c.text(4, ry + static_cast<int>(k), rlines[k], base);
+            }
             ry += static_cast<int>(rlines.size());
             if (!acct_rows.empty()) {
                 for (size_t k = 0; k < acct_rows.size(); ++k)
@@ -1393,8 +1672,13 @@ Canvas Scene::render(const Entry& e, int w) const {
         c.title(2, 0, head, Style{th_.accent, kNone, kItalic | kBold}, dim);
         c.title_right(w - 2, 0, meta, Style{th_.muted}, dim);
         if (first > 0) c.title_right(w - 2, rows + 2, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
-        for (size_t k = 0; k < lines.size(); ++k)
-            c.text(2, 1 + static_cast<int>(k), lines[k], txt);
+        CodeCtx ctx;
+        ctx.diff_body = looks_like_diff(e.text);
+        const bool code = ctx.diff_body || e.text.find("```") != std::string::npos;
+        for (size_t k = 0; k < lines.size(); ++k) {
+            if (code) paint_row(c, 2, 1 + static_cast<int>(k), lines[k], th_, ctx, txt, w - 4);
+            else c.text(2, 1 + static_cast<int>(k), lines[k], txt);
+        }
         return c;
     }
     case Kind::Memory: {
