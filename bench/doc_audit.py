@@ -154,7 +154,10 @@ def citations():
               + glob.glob(str(ROOT / "tests/*.cpp"))
               + glob.glob(str(ROOT / "docs/*.md"))
               + glob.glob(str(ROOT / "mk/*.md"))
-              + ["README.md", "examples/daedalus/config.yaml", "bench/replay_corpus.py",
+              # Tier A renamed examples/daedalus -> examples/ariadne; the citable list is
+              # name-coupled to that rename and had to move with it, or the gate cannot resolve
+              # the reference config the README points at.
+              + ["README.md", "examples/ariadne/config.yaml", "bench/replay_corpus.py",
                  "bench/doc_audit.py", "src/core/default_config.cpp"]):
         if (ROOT / f).exists():
             tree[rel(f)] = (ROOT / f).read_text(errors="replace")

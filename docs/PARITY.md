@@ -154,7 +154,7 @@ each step built, tested, then looked at:
    cards re-block only when it changes; render kernels and the scene feed stayed
    untouched.
 2. **Workflow contract.** `PromptComposer::workflow_contract()`, toggled by
-   `agent.contract`. `README.md:136` now names it; its old "built-in tool
+   `agent.contract`. `README.md:76-77` names it; its old "built-in tool
    preamble" claim was drift — no such string ever existed.
 3. **Plan lifecycle.** `todo` registered in both binaries; the ledger rides
    `ephemeral_system_prompt`, never the tape, so the cached prefix stays

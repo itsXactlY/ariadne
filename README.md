@@ -1,192 +1,448 @@
-# daedalus-cpp
+# DAEDALUS / ARIADNE
+### A C++20 agent harness built to outgrow its own assumptions.
 
+<p align="center">
+  <img src="Daedalus-CPP.png" alt="Daedalus C++" width="88%">
+</p>
 
-<p align="center"><img src="Daedalus-CPP.png" alt="Daedalus-CPP" width="90%"/></p>
+<p align="center">
+  <strong>One native binary. A live inference engine. A context architecture that knows when to forget.</strong><br>
+  <em>Not another wrapper around a wrapper. A working systems substrate for agents that must survive contact with reality.</em>
+</p>
 
-**TL;DR:** C++20 port of the Daedalus agent. Plain `g++` + `Makefile`. One real agent binary (`build/ariadne-agent`) that drives the ported run loop over a live llama.cpp OpenAI endpoint via libcurl, with working `read_file`/`write_file`/`list_dir` tools doing real I/O.
-
-```
-make                         # build/ariadne, the harness (default goal)
-make build/ariadne-skills                # the skill/learn CLI
-make build/ariadne-agent          # the plain agent binary (links -lcurl)
-make test                    # every test binary, one after another; keeps going and fails at the end
-make doc-audit               # re-derive the wiring list and every doc anchor from the tree
-make BUILD=build-x ...       # any target into another output folder (parallel work trees)
-```
-
-## Build
-
-- **Compiler:** `g++`, `-std=c++20 -Wall -Wextra -Werror -O2 -Iinclude`.
-- **Build system:** the `Makefile` is the only one (a CMake stub that built nothing real was removed). Each target compiles its sources in one `g++` call, there are no per-file objects. `mk/*.mk` fragments add targets; every test binary joins `TEST_BINS`, which `make test` runs.
-- `-Werror` is strict, including `-Werror=unused-function`: every non-`inline` `static` helper must be referenced in its TU. Prefer `inline`/`constexpr`.
-- `std::regex` here gets no lookaround; `\w`/`\d` are ASCII-only.
-- **OpenMP:** every target that links `bm25.cpp`, `skills.cpp` or `memory_catalogue.cpp` (`ariadne`, `ariadne`, `dd_know_tests`, `dd_know_router_tests`, `dd_know_rules_tests`, `dd_know_bm25_tests`, `dd_context_tests`, `dd_maze_tests`) is built with `-fopenmp` (GCC libgomp); an unknown `#pragma omp` is an error under `-Wall -Werror`, so a new target that links them needs the flag too.
-
-Layout: `src/` (port TUs) · `include/dd/` (headers) · `tests/` (`_test.cpp` suites) · `build/` (outputs).
-
-**Ported but not wired.** Measured, not remembered: `python3 bench/doc_audit.py` expands the three product recipes and takes the transitive include closure from them — **176 files reached** (83 TUs, 93 headers), **33 of 116** `src/*.cpp` linked into no product binary, **49 of 142** headers reached by none, 16 of them header-only ports. They build and are tested by their own suites only: `src/tools/` (audio_container, binary_extensions, browser_camofox_state, budget_config, debug_helpers, delegation_output_schema, env_passthrough, interrupt, osv_package_parse, schema_sanitizer, threat_patterns, tool_backend_helpers, website_policy), `src/gateway/` (authz_mixin, channel_directory, hooks, mirror, pairing, platform_registry, sticker_cache), `src/cron/` (jobs, schedule), `src/agent/` (backend_kind, classification, kv_watermarks, message_sanitization, payload_tape, prompt_cache_boundary, prompt_caching, retry_utils, ssl_guard), `src/core/` (env, sha1), and the header-only ports under `include/dd/` (context_compressor, harness_config, task_intensity, trajectory_compressor, constants, model_metadata, run_helpers, context_references, usage_pricing, turn_context, errors, state_errors, state_scrub, state_sql, `acp/tools`, `cli/heuristics`). Among the security helpers some **are** now wired: `url_safety` gates every URL that reaches the wire — all three HTTP clients (plain, MCP, LLM stream) call `is_safe_url` before connecting, loopback endpoints allowed, and the stream sink is capped at 64 MiB; `retry` is the wire's send policy — `wire_failure` classifies one send, `wire_backoff_ms` decorrelates the pause before the next (250 ms base, 2 s cap), and `HttpLLM::chat`/`prime` re-send only what the **socket** failed on: a refused connect, a cut socket, a 5xx that handed nothing out. A stream that already handed a delta to the caller is never sent again (`StreamSink::spoke`) — the caller would get the same words twice — and neither a 4xx nor a call cut by Esc is ever re-sent. The send count rides out in `CallStats.attempts` and in the error text, so a slow endpoint is visible; `tests/agent_wire_retry_test.cpp` proves it against a real loopback endpoint that answers 500 then 200 and never answers anything twice. `path_security` rejects `..` components in `fs_read`/`fs_write`/`fs_list`; `redact` masks long key-like tokens in tool output before it re-enters the prompt. Wired since `5c1d207`, and the claim is measured rather than asserted: `patch_parser` + `fuzzy_match` + `patch_apply` are the `edit_file` tool in `ariadne`'s core deck (a patch that cannot be applied lands nothing at all and names the hunk the model must rewrite; a hunk with context lines and additions inserts at that context rather than appending at EOF, and an unmatched context fails instead of landing somewhere else), and `skill_provenance` names the writer of every skill write — a per-thread origin stack, so the learn loop's write and the model's edit cannot mis-attribute each other; a learned skill carrying `edited_by` outranks a draft and the sink hands it back instead of overwriting it. That handback is proven against a live edit, not a fixture: `make build/dd_sink_handback_probe` then `build/dd_sink_handback_probe <skills-root> learned <name>` feeds a draft newer than a file the model edited through `edit_file` and reports the bytes unmoved. Measured against the local server with `bench/ab-edit-file.sh` (same binary, same prompt, deck differs only by `DD_DISABLE_TOOLS`): the schema costs **+260 prompt tokens per call**, and the hunk saves **23,196 prompt tokens of tape churn** plus 381 completion tokens on a two-place edit of a 129-line file — net **−22,277 tokens**, cache reuse 0.68 → 0.78. Without `edit_file` the model routed the same edit through five `run_terminal` calls rather than rewriting the file. `tool_output_limits` + `terminal_hints` are wired now, and they are the tool-result envelope: `tool_output` in config.yaml resolves through `tools::resolve_tool_output_from(cfg)` into `ShellOptions::max_output` and `FsLimits`, so a result is bounded where it is produced rather than at the card, and an unset section keeps the shipped numbers (8000 / 2000 / 4000 / 1 MiB) rather than the ported parity defaults (50000). A cut is accounted and resumable, not announced: `run_terminal` says `[truncated: N of M bytes dropped]` plus `bytes_dropped`; `read_file` says `lines_dropped`, `lines_cut` and `next_offset`, and a window that stops inside a file reports `truncated`. `annotate_failure` rides a non-zero exit, and two rules the port lacks are added — a cut result names the dropped bytes and says narrow rather than rerun, and exit 0 with empty output from a query verb says the silence means nothing matched. Messages are pinned to `LC_MESSAGES=C` for the child because hint detection matches English wording: on this host `sh` is bash in a German locale and printed `Kommando nicht gefunden`, so every hint silently missed before the pin. Measured with `DD_TAPE_LOG` (two homes, config differs by one line, same prompt, `grep -R TODO` over 1200 files = 1,009,800 bytes): **9207 prompt tokens** carrying the result bounded against **22151** unbounded, **9403** against **22308** on the call after — **12,944 tokens per call** spent on bytes the model never reads; `level` stayed `ok` in both arms, so it is window cost, not compaction. `tests/tools_output_envelope_test.cpp` is the suite.
-
-The rest stay unwired **by design**: `website_policy`/`threat_patterns` have no call site (no fetch tool in the shipping harness), `ssl_guard` is an env opt-out whose wiring would bypass the CA verification all three clients rely on, `env_passthrough` has no callers. The only guard on the shell tool remains the one in `src/tools/shell.cpp` — guard, **not** a jail.
-
-## Run the agent
-
-```
-build/ariadne-agent                                  # msg on stdin, config.yaml beside the binary
-build/ariadne-agent path/to/config.yaml -- hello     # config arg, then -- , then message words
-echo "list files in /tmp/ using list_dir" | build/ariadne-agent
-```
-
-**Everything lives beside the binary.** `build/ariadne --init` writes `config.yaml` (the embedded copy of `examples/ariadne/config.yaml`: model, turns, skin, MCP, denylist, knowledge) and `state/ cache/ logs/` next to it; `--init --from FILE` starts from an existing config, `--init --rules` also installs a starter set of tripwires. `skills/`, `rules/`, `skins/` and an optional `brief.md` sit there too. Nothing is read from `~/.daedalus` (the Python Daedalus's home): `ariadne-skills import-daedalus` copies skills and skins over once, on request. Resolution, first match wins: `--home DIR` → the folder of `--config FILE` (or a bare path argument) → `$DD_HOME` (or `$DAEDALUS_HOME`) → the binary's folder when it holds a `config.yaml` → the folder ariadne was started from when it holds a `config.yaml` → a folder that already has `state/ cache/ logs/ learn/`. `~/.daedalus` is refused as a home, and so is a `build/` folder picked implicitly (`make install` refuses both, rather than discovering them after the build). The message is stdin, or the words after `--`.
-
-## Install it — a sidegag that compiles itself
-
-```
-make install              # ariadne + the config its home owns; INSTALL_DIR=$(HOME)/projects/daedalus
-make install-all          # same sidegag, wider: also ariadne-agent and ariadne
-```
-
-`installer/ariadne_install.cpp` is one TU compiled by a bare `g++` with nothing else in the tree
-built; it re-execs itself, then builds `ariadne`, installs it `0755`, seeds the home with
-`ariadne --init` (ariadne owns the reference config — an installer holding a second copy would
-drift the moment ariadne changes one key), and proves the binary that landed runs. Exit codes:
-`0` installed, `2` bad arguments, `3` build or install failed.
-
-It brings nothing else: no toolchain probes, no suite gate, no doc audit, no skill seeding,
-no import. A missing libcurl or OpenMP is `make`'s own failure, stated in the language that
-matters — a probe that paraphrases that in advance is a line the installer would only
-repeat. Two things it does check, because `make` never does: a folder named `build/` `out/`
-`obj/` is make's output and is refused as a home, and `~/.daedalus` belongs to the Python
-Daedalus and is refused. `skills/`, `rules/` and `skins/` are not pre-created — ariadne creates the directory it
-writes into itself (`src/learn/skill_sink.cpp:112` — `create_directories(target.parent_path())`
-for a learned skill), so an installer that guesses ahead only duplicates a decision ariadne owns.
-One shipped file is the exception, and it is shipped data rather than operator content: `make
-install` copies the language defaults to `skills/highlight.yaml` when the home holds none
-(`installer/ariadne_install.cpp:179-186`), because the harness ships its languages as data and a home
-with no grammar file colours code only with the facts every language shares.
-
-| Env | Overrides |
-|---|---|
-| `DD_BASE_URL` | `model.base_url` (must end `/v1`; code POSTs `/chat/completions`) |
-| `DD_MODEL` | `model.name` |
-| `DD_API_KEY` | `model.api_key` (llama.cpp needs none) |
-| `DD_WIRE_ATTEMPTS` | sends per LLM call (default `2`: one re-send, and only for a failure the socket caused — never a 4xx, never a cut call); `1` is the old one-shot wire |
-| `DD_MAX_TURNS` | `agent.max_turns` (config default `400` — **cap it**; a bad sample loops for minutes, ~17s/turn on the local model) |
-
-Output: `[base=... model=... turns=...]` header, then `=== final (N LLM calls) ===` + the assistant's final answer. `read_file`/`write_file`/`list_dir` run real filesystem I/O.
-
-## Full harness kit (`build/ariadne`)
-
-`build/ariadne` is the real agentic harness: a next-gen OOP TUI (`dd::ui`: double-buffered cell-diff `Frame` + `Widget` subclasses + `Scene` row layout) that drives the **same** run loop (`Agent::run`) — no fork of the loop, one `step_hook` added to `agent.hpp`/`agent.cpp` for per-step streaming.
-
-```
-make build/ariadne
-build/ariadne                                   # interactive REPL (you> ), config.yaml beside the binary
-build/ariadne path/to/config.yaml -- "msg"      # single-shot
-```
-
-### TUI internals (`dd::ui`)
-
-- **Layout, fixed geometry:** transcript panel | 34-col sidebar (`session`, `engine`, `plan`, `tools`) over a 3-row prompt box and a status row. Panels are rounded boxes with their titles set into the border. The sidebar drops under 100 cols; under 60×14 the screen says so. Cards are at most 112 cols wide.
-- **Cards:** user = gold bar; answer = rounded `⟁ ARIADNE ⟁` box with the call latency; tool = square card of **fixed height** (name, status `queued`/spinner/`✓ 1.2s`/`✗`, flattened args, two-line result preview); notes; errors; a rule closing each turn (`turn 3 · 4 calls · 2 tools · 41.2s`).
-- **Verbosity:** `/verbose off|normal|full` (a bare `/verbose` toggles), `display.verbose`, env `DD_VERBOSE`. `off` folds a turn to a glance (4-line answers, 2-line arguments, one-line notes); `full` opens everything — argument values unclipped to 240 cols, results up to 48 rows, reasoning every line — and puts on the status row the accounting nothing else asks for (`calls`, `out`, `cache`, `epoch`, `deferred`, `plan N/M`, `mode verbose`). It also lowers the sidebar's height gates, so the token, cache and epoch readouts survive on a short terminal. One more cache key: cards re-block when it changes, never per frame. A result the
-tool cut states the cut rather than the card's cap: the header carries the tool's
-dropped count (`✓ 95ms · 1,001,800 bytes dropped`), `full` adds the reconciliation
-row (`8,000 of 1,009,800 bytes reached the model · 1,001,800 dropped`, and for a
-cut read `300 of 1,312 lines · 1,012 dropped · continue at offset 301`), and the
-card's own row cap announces itself (`… +46 rows past the verbose cap`). On a
-narrow header the number moves to the wrapped accounting rows instead of being
-clipped away.
-- **Plan:** the model keeps its own ledger with the `todo` tool; the sidebar shows it (`plan · N open of M`, newest last, older folded behind an `↑` count). It reaches the model through `ephemeral_system_prompt`, which the tape engine takes (`take_ephemeral`): inside an epoch the `todo` results already carry the list, and a rebase writes it into turn 0. Nothing rides the tail of a request: a hybrid model's engine restores checkpoints, not tokens, and a message sent behind the payload sits in front of the checkpoint the next call needs. Without a tape it sits behind the standing system prompt. `/plan` reads the list back; `/clear` starts a session with none.
-- **Skin:** colours, spinner wings, thinking verbs and branding come from `skins/<display.skin>.yaml` beside the binary (neural defaults built in). Truecolor when `COLORTERM=truecolor|24bit`, else xterm-256.
-- **Code, coloured by a file, not a table:** a fence names a language and a file answers what that language's words are. `GrammarSet::load` walks every skill root for a `highlight.yaml`, and `code_color` orders who owns the hue — the skin's own `colors.code_*` line, then the language file, then the palette default (`include/dd/ui.hpp:201-224`, `src/ui_grammar.cpp:273-327`) — so keyword lists and token hues are data the operator or the model edits without a rebuild, and the C++ names no language at all. A fence whose tag no file defines colours only what every language shares — strings, numbers, comments — and claims no keyword (`src/ui_grammar.cpp:197-208`): the walker never decides a word means something, which is why a `grep` of paths paints paths as text and the words `sed`, `grep`, `timeout` as keywords. A `-` inside a python fence stays punctuation, because only a language the file declares `diff: true` colours a deletion, and outside a fence a patch marker needs evidence rather than a leading dash, and the scope of that evidence is a hunk header's own claim — `@@ -a,b +c,d @@` promises at most b + c rows and the colour stops when the claim is spent, so a `-` after a patch block is a bullet, whatever the block held (`hunk_contract` at `src/ui.cpp:1278-1310`, `highlight_row` at `src/ui.cpp:1353-1448`); a fence inside a diff body owns its rows.
-- **Contrast, reconciled at load:** a skin bright enough to read on its own ground is bright enough to wash out on a white terminal, and `#FFFFFF` on `#FFFFFF` paints nothing. Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and pushed down a ladder toward the pole the ground is not — `lift` and `Theme::readable` at `src/ui.cpp:746-762`, applied per colour at `src/ui.cpp:856-897` — so a hue keeps its hue and gives up only luminance; borders are exempt, because a rule is not text. A stripe whose ground is the colour of the ground it sits on loses the fill before the colour does, so the row still reads in the colour the skin asked for. A hue with no chroma has nothing left to preserve and falls back to the palette's hue for that token kind rather than landing on the same grey every other unreadable kind lands on (`src/ui_grammar.cpp:296-315`); a grammar file can make the same mistake as a skin, so its hues are measured against the same ground before anything is drawn. What moved is counted and named on the status row (`hues moved`, `src/ui.cpp:2283-2288`) rather than swallowed. Asserted in `tests/ui_test.cpp:1160-1230`: a white-on-white skin moves its palette, a stripe that cannot be shown drops its ground, an achromatic grammar hue takes the theme's kind hue, a chromatic one loses luminance and keeps its hue, and the count says how many moved.
-- **Reasoning, live:** calls stream (`stream: true`, `dd/agent/chat_stream`); `delta.reasoning_content` fills a dashed `◈ thinking` card (fixed-height live tail, so nothing below it jumps), the answer streams into its card. `/reasoning show|full|hide` picks tail / every line / one row (`display.show_reasoning: false` starts hidden).
-- **Effort:** `/effort` or `/reasoning` + `off low medium high xhigh max ultra`, sent as `reasoning_effort` (`off` → `"none"`, thinking disabled). Only levels the model's chat template names (read from `/props`) are offered — anything else makes the template raise, a 500 — so `xhigh/max/ultra` appear only on templates that go that deep. The start level is `agent.reasoning_effort`, rounded down to the template's ceiling.
-- **Engine stats are real:** each call reports llama-server `timings` (gen/prefill t/s, `cache_n`) and `usage`; `n_ctx` comes from `/props` once at start (the ctx meter).
-- **Render:** `Canvas` (16-byte padding-free `Cell`, wide-glyph aware) → `Frame::present()` diffs against the last frame and emits only changed cells, inside synchronized output (`?2026`), on the alternate screen. An unchanged frame writes nothing.
-- **Threads, no locks, no queues:** a lifecycle event publishes into the scene's fixed-slot ring (`core::SlotRing`) — one `fetch_add` for the order stamp, one CAS for ownership — and a streamed delta is not an event at all: its bytes go into a 512 KiB buffer its producing thread owns alone and only the **length** word is shared (bytes land before the length moves, release), so a token costs no node and no copy. The render thread owns every bit of scene state and claims what was published. Nothing in `src` or `include` holds a mutex, a `lock_guard` or a `condition_variable`. Measured across a 200-delta turn: the hand-off allocates **0** where the queue this replaced allocated **214**. A full ring refuses and counts (`dropped_events()`, `dropped_live_bytes()`); nothing is dropped without a number attached. `Agent::interrupt_requested` is `std::atomic<bool>`, and doubles as the libcurl abort flag, so Esc cancels an LLM call in flight (measured: 0.86 s from Esc to ready during a live generation).
-- **SIMD + OpenMP (`dd/ui_simd.hpp`):** cell diff, ASCII scan/width/widen as AVX-512 (F+BW+VL) / AVX2 / scalar kernels, picked once by CPUID — one binary for every box. Rows encode in parallel (OpenMP) on big frames, cards re-wrap in parallel after a resize; small frames stay serial so the TUI never wakes threads on cores the model uses. `tests/ui_test.cpp` checks each kernel set the CPU has against scalar, and 1-thread vs 8-thread frames byte for byte. The AVX-512 set has not run on hardware yet (Zen 2 here; QEMU TCG has no AVX-512).
-- **Input:** raw `termios` (restored on exit and on fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse wheel (`DD_TUI_MOUSE=0` leaves the mouse to the terminal), UTF-8 line editing, history. Enter sends (while busy: folded into the running turn at the next tool-round boundary and counted `(N)` until it lands; if no round follows, the idle loop drains it one per turn), Esc/Ctrl-C interrupt, PgUp/PgDn or wheel scroll, Tab completes `/help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full /plan /context /rebase /resume /clear /learn /interrupt /mcp /quit` and their arguments, Ctrl-L redraws. stderr goes to `<home>/logs/ariadne.log` while the screen is up.
-- **No tty** (`-- msg` or piped stdin): the same cards print inline, in order.
-- `run_terminal` runs `{ cmd; } </dev/null 2>&1`: a child never reads the raw-mode tty.
-
-### Context tape (`dd::context`, `src/context/`)
-
-The agent loop no longer re-sends a growing transcript. `TapeEngine` (an `agent::ContextEngine`) keeps the session and decides what each request carries — the Daedalus tape, ported:
-
-- **Render once, append only.** The first call of an epoch renders the whole view with every hygiene layer; after that a message is rendered once, when it enters the payload, and every later request reuses those bytes. The previous request is an exact prefix of the next, so the server re-reads only what is new (`context_test`: 0 prefix breaks over 20 tool-heavy calls, 18 without the tape). `context.payload_tape: false` renders every call from scratch.
-- **Hygiene only at an epoch start** (`Renderer::epoch`): head window (`memory.soak.window_turns` × 2 messages), finished tool exchanges past `context.tool_group_ttl` (8) collapsed to one line naming each call, reasoning past `context.reasoning_window` (3) dropped — the maze has it. Tool results are capped to their share of the window as they enter (`[[RESULT CUT …]]` says how to continue; `read_file` pages by `offset`/`limit`); the tool itself already bounded and counted the result before the renderer saw it (`tool_output`, `bytes_dropped` / `lines_dropped`).
-- **Retrieval is the memory.** Every finished turn is soaked to mazemaker (`auto:turn:<session>:<ts>`), reasoning the first time it is sent (`auto:reasoning:…`); tool calls and output never are, turns without an answer neither. Two fixed-slot rings feed it: `q` (agent thread to soak worker) and `out` (soak worker to engine thread), slots reused, no node per turn. Disk (`<home>/state/soak-spool.jsonl`) is the durable overflow — a job the ring could not hand goes there and is counted (`spooled`), and an entry the engine has not drained is named (`unledgered`) rather than lost; the spool is replayed one write at a time when the pod answers. One recall per turn is rendered onto the question (`memory.turn_recall`).
-- **Rebase from retrieval at the watermarks.** Pool tokens (as the server counts them, both slots) against `compression.fast_layer_tokens`: past *low* an idle sidekick slot is erased, past *high* the next epoch is prewarmed between turns (sidekick slot on a multi-slot llama-server, parked and cancellable on Strata), past *hard* main moves onto it — or rebases inline. Turn 0 of an epoch: the question, a `[rebased]` anchor naming `auto:turn:<session>:*`, `[this turn so far]` (one line per call already run), one recall, the protected tail (`compression.protect_last_n`). No summarizer.
-- **A rebase must make room.** The new epoch is sized to land under half the rebase point: the tail gives way from its front, whole tool groups at a time, never the newest group (the live state the turn continues from), and every dropped call is named in `[this turn so far]`. A rebase that still could not get under the high watermark is skipped and said once — the window runs over the fast layer rather than dropping the working state every call. The size estimate counts chars/4 scaled by the server-measured tokens-per-char of the last call (tools array included).
-- **Measured live** (Strata 0.1.37, Qwen3.8-Flash-Next IQ1_M, one slot, real config + mazemaker): 11 calls over 3 turns reused 88% of all prompt tokens — each call's cache is the previous prompt plus its completion, ±1 token; only a new question with its recall is read. With a forced 8.5k fast layer the next epoch was prewarmed while the operator read, adopted at the next turn, and that turn's first call reused 99.1%. Soaks landed as `auto:turn:dd-*` and `auto:reasoning:dd-*` rows. `DD_TAPE_LOG=<file>` writes one line per call (epoch, tape, prompt, cached, completion).
-- **Tools are discovered, not carried.** Local tools and `tool_search.always_load` stay in the array; the rest is reached through `tool_search` / `tool_describe` / `tool_call`, so the array never changes and stays in the cached prefix. On the reference pod: 38 tools (~5.8k tokens) → 11 in the window (~2.0k), 30 deferred.
-- **The endpoint is told how to behave** (`Endpoint::shape`): main pinned to slot 1 on a multi-slot llama-server (`id_slot`), `n_cache_reuse 256`, `reasoning_budget_tokens` (`agent.thinking_budget`, default 1024) with its message; `reasoning_effort` from `/effort`.
-- TUI: a `tape` panel (epoch, window vs rebase point, prefix reuse of the last call, history vs tape, tools in/deferred, maze and soak counters), `reuse` in the status row, `/context`, `/rebase`, `/clear` (new session). `DD_FAST_LAYER=N` overrides the fast layer (forces rebases for testing); `DD_NO_SOAK=1` recalls but writes nothing to the maze (no soak, and the model's own mazemaker writes answer an error), so test turns never show up in later recalls.
-
-### Bound to mazemaker (`dd/context/memory`, `maze`, `recall`)
-
-The harness forgets on purpose; mazemaker is where everything it drops lives — and where the session itself is written. One interface (`dd::context::Memory`), the pod behind it over MCP, a fake graph in the tests.
-
-- **The session is a chain in the graph.** Labels are unique per session; every soak hands its memory id back (the engine's *ledger*, lock-free from the soak worker); edges chain the nodes as they are written — turn → next turn (`session_next`), reasoning → the turn it served (`reasoned_in`), via `connections_import`. The dream cycles and later traversals see a session's shape, not loose rows.
-- **One recall per turn, the graph around it.** Measured on the pod: a recall is ~7 s and the pod serialises them; `think` 0.9 s, `get` 0.08 s, `afe_facts` 0.08 s, `classify_intent` 0.04 s. So a turn spends exactly one recall and enriches it in parallel: spreading activation from the best hit read back by id, the facts extracted from the top hits, and — for a temporal question — this session's own out-of-window turns by id. Nothing already on the tape comes back (the ledger knows which ids were written this epoch), and the block fits a budget.
-- **A rebase names ids.** Turn 0 of a new epoch lists this session's turn ids: `mazemaker_get(memory_ids=[…])` reads them back in ~0.1 s instead of a search.
-- **Skills and every other lookup are the router's** (next section): the catalogue of skills is read from `./skills` and the maze together and kept fresh, not indexed once at launch.
-- **Resume from the maze.** `/resume` lists sessions, `/resume <id>` or `/resume last` rebuilds one from its `auto:turn` chain — the maze is the session store; a resumed session continues its chain. Any session soaked under `auto:turn:<id>` resumes, the Python harness's included.
-- **The model knows the contract.** One composed system prompt (`PromptComposer`): the **workflow contract** (a plan before multi-step work, facts from running not guessing, a change is done when it was run and looked at, skills are guidelines you read), the operator's text, a short **retrieval contract** (pointers MUST be opened before acting on them; never guess a path or a name, `find` first; live state is a command, memory is history; save only distilled facts), a **catalogue map**, and `brief.md` if there is one. The pod's own protocol text ("RECALL FIRST, NO EXCEPTIONS", save every turn, `session_search`) is not pasted: `mcp_servers.<name>.instructions: harness` (the default for the maze), `verbatim` or `off`.
-
-### Knowledge: when, what and how to look something up (`dd/know`, plan in `docs/KNOWLEDGE.md`)
-
-One router decides; the engine only tells it what happened. Cards (skills, curated memory rows, deferred tools) are searched locally in microseconds; the pod's recall is the slow leg and always has a deadline.
-
-- **Catalogues.** `SkillCatalogue` merges `./skills`, `skills.external_dirs` and the maze's `skill:`/`skillsrc:` rows: the first source keeps the bare name, an identical copy collapses (sha256), the maze's older snapshot of a disk skill yields to the disk, a differing copy stays as `name@source`, notes and fragments filed under `skill:` are not skills, a card with no body borrows an identical copy's or reads its `Path:`. It refreshes in the background (every 10 min, every 15 s while a source is down), so a pod that was down at launch is picked up. `MemoryCatalogue` holds the ~3.7k curated rows (`decision: bug: invariant: ops: fact: …`) as cards cached in `cache/`, synced by id.
-- **Ranking.** BM25F (name ×8, tags ×3, group ×1.5, gist ×1, k1 2) over folded, stemmed, stopworded terms (`knowledge.stopword_languages`, default `en` and `de`); the query is *distilled* (pasted terminals and code dropped, paths reduced to the project and file they name, at most 12 of the rarest terms), and a score is the share of what the query could have reached. Calibrated on 77 real prompts against the real 568-skill catalogue (`ariadne-skills replay`): a pointer needs ≥2 matched terms, enough evidence (idf mass 6.5, scaled by ln catalogue size) and a 0.15 share — 21 offers, the right skill in the top 3 for 17 of the 33 prompts that have one, 3 false offers of 44 that have none (the old matcher: about 8 right of 23 offers, 15 wrong). At a 0.25 share the head of the skill is opened for the model.
-- **Triggers** (pure functions of a signal and the working set): *turn start* (pointers + the pod's recall, waiting `knowledge.deep_ms`, or 30 s for a question about the past), *shift* (a batch of tool calls moved to terms the turn has not covered), *failure* (what the maze knows about that error), *stall* (the same call twice, or three looks around that found nothing: a redirect notice). A late recall rides the next tool result. Notes are appended as hidden items after the tool results, so the tape only grows, and they age out with the batch they follow. Budgets: 600 tokens for a question's note, 250 mid-turn, 1500 per turn.
-- **One verb to read it all.** `read_file("skill://name")` (a page at a time: `#2`, `#all`; its own files: `skill://name/references/x.md`), `read_file("mem://id")`, `find(query)` (scores, `strong`/`weak`, how to open each hit), `skill_load` as the old alias; the local tools take an optional `intent` the router uses as a free query. Every open is remembered: after a rebase the skills the model was working from are pointed to again.
-- **Tripwires** (`rules/*.md` and the maze's `rule:` rows, oh-my-pi's TTSR as a gate): a regex on what a tool call is about to do; a matching call is not run, its result is the rule's text, and the retry passes (told once; `repeat_gap`, `once: false` for hard ones). Zero tokens until one fires. `ariadne --init --rules` installs six starters (podman-not-docker, no AI commit trailers, no `commit -a`/`--no-verify`, no force-push to main, live pods and postgres off limits, ask before heavy launches).
-- **Concurrency and speed.** No mutex, no queue, no condition variable anywhere: a hand-off is a `core::SlotRing` (fixed slots; one word carries the payload's stamp *and* its ownership, so no thread reaches a state it did not take), a `core::SnapCell<T>` snapshot (wait-free reads, epoch reclamation: `std::atomic<std::shared_ptr>` is spin-locked in libstdc++, so it is not used), or one atomic word parked on a futex (`core::park`) and never polled. A half-done catalogue sync is cancelled on quit, not waited for.
-- **SIMD and OpenMP.** `dd/know/scan.hpp` classifies bytes as AVX-512 / AVX2 / scalar kernels picked by CPUID and feeds the tokenizer; the AVX-512 set compiles but has never run (no AVX-512 hardware here). Index builds use all cores (`par_threads()` is at most 8, every region behind a size `if()`), and the parallel build is bit-identical to the serial one. Measured on a Ryzen 7 3800X: tokenizer 33 → 80 MB/s, memory index (3.7k cards) 80 → 20 ms, skills (467) 112 → 40 ms, the rest being a serial directory walk. A search is 2–5 µs and stays scalar: sparse postings, nothing to vectorize.
-- **Tools to keep it honest.** `ariadne-skills find QUERY`, `ariadne-skills skills check` (bodyless, duplicate, note-like cards), `ariadne-skills replay corpus.jsonl` (offers, hits, misses and the shipped policy's numbers against your own labeled prompts), `ariadne-skills import-daedalus`. A line per signal that said something goes to `logs/knowledge.jsonl` (what was offered, what was opened).
-
-- **It learns** (`dd/learn`, plan in `docs/LEARN.md`). A second thread beside the router folds what was offered and opened into a crash-safe journal in `learn/`, turns it into skill priors and learned query terms, and drafts a skill from a failure that got fixed (a bug card under `skills/<category>/<name>/SKILL.md`, `origin: learned`, on probation). It never touches the agent thread beyond one ring publish. Config: `learn.enabled` (default true), `learn.feedback` (priors and terms), `learn.author` (drafting skills), `learn.max_drafts_per_day` (default 3). An empty file `learn/OFF` stops it at the next launch. `ariadne-skills learn status|why SKILL|report|export` shows what it knows; `ariadne-skills learn forget SKILL` writes a tombstone and moves a learned skill to `skills/.retired/` (nothing is deleted); `/learn` in the TUI turns the recent work into a skill when the turn ends.
-
-What it wires in, all **real**:
-- `read_file` / `write_file` / `list_dir` — real filesystem I/O.
-- `run_terminal` — everything is allowed except a denylist (`sudo`, `su`, recursive `rm` on `/`·`~`·`*`, `mkfs`, `ariadne`, shutdown/reboot, curl-pipe-shell, force-push, …); extra words via config `command_denylist`. It is a guard, **not** a jail — do not treat it as sandboxing.
-- **Every enabled MCP tool, discovered live**: `ariadne` reads `mcp_servers.*` from config, speaks Streamable-HTTP MCP (JSON-RPC 2.0 over one POST, SSE `data:` responses, `Mcp-Session-Id` sent back when a server issues one), calls `tools/list`, and registers each enabled tool with its real `inputSchema`. The running mazemaker pod yields 34 tools.
-- The MCP server's `initialize` **`instructions`** are kept or dropped per server (`instructions: verbatim|harness|off`); for the maze the harness's retrieval contract replaces them (see above).
-
-Continuity across REPL turns rides on the external memory graph (the router looks up for each turn), which is the design — not a persistent in-process transcript.
-
-Verified smoke (`DD_MAX_TURNS=4`, local IQ1 model ~17s/turn + ~22s/recall → wall ≥300s): registers 34 mazemaker tools, the model answers "as required by the memory protocol", issues `mazemaker_recall`, and the round-trip returns live memory (top hit sim 0.54). See `src/tools/mcp.hpp` / `src/tools/mcp_client.cpp` for the transport.
-
-## libcurl gotcha (bit me once)
-
-libcurl **8.16+** calls the write callback with **four** args — `size_t fn(char* buffer, size_t size, size_t nitems, void* outstream)` (`curl.h:285`) — not the classic three. A 3-param sink reads `nitems` (a byte count) as the userptr → **SIGSEGV**. Correct form appends `nitems` and returns `nitems`:
-
-```cpp
-static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems, void* ud) {
-    auto* s = static_cast<std::string*>(ud);
-    s->append(buffer, nitems);
-    return nitems;                       // return != nitems => CURLE_WRITE_ERROR
-}
-```
-
-## JSON / Message API (core)
-
-`core::Json` is a hand-rolled value type: `Type{Null,Bool,Num,Str,Arr,Obj}`, `JsonSP = shared_ptr<Json>`, members `arr`/`obj`. Builders `json_parse`/`json_dump`/`json_obj`/`json_arr`/`json_str`/`json_num`; init-lists take `JsonSP` (wrap with `jsp(...)`); `arr_push`/`obj_set` take a bare `Json`; read size **before** a move. `message_to_json`/`message_from_json` marshal `core::Message` (wire `tool_calls` = `{id,type:"function",function:{name,arguments}}`; `finish_reason` is a **sibling** of `message` on `choices[0]`).
-
-- **Truncated tool arguments are salvaged per call, not fatal:** a model that runs out of output budget mid-value streams an unterminated JSON string. `core::json_parse_args(text, repaired)` closes the value stack at the last complete value and returns the longest parseable prefix with `repaired = true` (it never throws). The agent loop and the tool deck turn a cut call into a tool error — *retry with a smaller payload* — and keep the turn alive instead of killing the run; the TUI card shows the members that did arrive, suffixed `…cut`. Strict `json_parse` still guards config, MCP and model-response consumers.
+<p align="center">
+  <code>C++20</code> · <code>g++</code> · <code>Make</code> · <code>libcurl</code> · <code>llama.cpp-compatible API</code>
+</p>
 
 ---
 
-## The whole deal — context tape
+## The thesis
 
-TL;DR of how this tree got here, oldest → newest:
+Most agent stacks treat the transcript as the mind, the prompt as the architecture, and the framework as the product.
 
-1. **Seed.** One plain goal: get a *running* `int main()` agent (`build/ariadne-agent`) that drives the already-ported run loop (`src/agent/agent.cpp`) against the real llama.cpp OpenAI endpoint — libcurl transport + real filesystem tools.
-2. **Ported base, not rewritten.** The run loop, `core::Message`, `core::Json`, tool registry were already ported and green (a 64-suite base then, 86 test binaries now). Only the missing leaves got written: the HTTP transport + the FS tool handlers + the entrypoint.
-3. **Scale.** Long evolution, heavy tool churn, one hard crash (libcurl 4-arg callback SIGSEGV) burned most of the tokens — then the 4-param sink fix, clean `-Werror` rebuild, live smoke.
-4. **Proof of concept (this README).** A working binary + documented gotchas + verified smoke = the *context tape*: the ground rules of the port. Everything above this line is that PoC baseline.
+**Ariadne treats the run loop as the executable core, the context as a managed data plane, and memory as an external system with its own lifecycle.**
 
-**Where the real phun starts:** below this line is open territory — the PoC binary is the stable floor, and actual agent work (better tools, real gateway, cron, the `payload_tape`/`prompt_cache_boundary` islands, the rest of the ~200 TUs) now builds *on top* of it without disturbing it.
+The model is replaceable. The endpoint is replaceable. The terminal is replaceable. The state is not allowed to become accidental.
+
+This repository is a native C++20 port of the Daedalus agent: a real agent loop, real tools, real filesystem effects, a live OpenAI-compatible inference endpoint, a context tape designed for prefix reuse, and a TUI that renders changes rather than repainting the world.
+
+The guiding constraint is simple:
+
+> Keep the working state explicit. Keep the hot path lean. Make every important claim measurable.
+
+## Architecture at a glance
+
+```mermaid
+flowchart TB
+    OP["Operator / stdin / TUI"] --> UI["Ariadne interface"]
+    UI --> RUN["Agent::run — single execution loop"]
+    CLI["ariadne-agent — headless entrypoint"] --> RUN
+
+    RUN --> ROUTER["Knowledge router"]
+    RUN --> TAPE["ContextEngine / TapeEngine"]
+    RUN --> DECK["Tool registry"]
+    RUN --> WIRE["LLM transport"]
+
+    ROUTER --> CATALOGUE["Local catalogues\nskills + curated memories"]
+    ROUTER --> MAZE["MazeMaker memory service\nMCP"]
+    TAPE --> EPOCH["Context epochs"]
+    EPOCH --> PREFIX["Append-only payload prefix"]
+    EPOCH --> REBASE["Watermark-driven rebase"]
+    REBASE --> MAZE
+
+    DECK --> FS["Filesystem tools"]
+    DECK --> SHELL["Terminal tool\n guarded, not sandboxed"]
+    DECK --> MCP["Live MCP discovery"]
+    WIRE --> LLM["llama.cpp-compatible endpoint"]
+    LLM --> WIRE
+    WIRE --> RUN
+
+    RUN --> SOAK["Background memory soak"]
+    SOAK --> MAZE
+    MAZE --> ROUTER
+
+    style RUN fill:#241b38,stroke:#bf9cff,color:#fff
+    style TAPE fill:#172b3b,stroke:#6dd6ff,color:#fff
+    style MAZE fill:#20352b,stroke:#8be0a2,color:#fff
+```
+
+## What is real today
+
+This is not a concept deck. The following paths are implemented in the supplied tree.
+
+- **Native agent binary:** `build/ariadne-agent` runs the ported agent loop against a live OpenAI-compatible endpoint.
+- **Real tool effects:** `read_file`, `write_file`, and `list_dir` operate on the filesystem; `run_terminal` executes child processes with a denylist guard.
+- **One run loop:** the interactive TUI and headless entrypoint drive the same `Agent::run` implementation.
+- **The model knows the contract.** One composed system prompt (`PromptComposer`): the
+  **workflow contract** (`PromptComposer::workflow_contract` in `src/know/prompt.cpp:46`,
+  toggled by `agent.contract` at `src/dd_tui.cpp:941-942`) — a plan before multi-step work,
+  facts from running not guessing, a change is done when it was run and looked at, skills are
+  guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
+  before acting, never guess a path or a name, live state is a command and memory is history), a
+  catalogue map, and `brief.md` if there is one. A pod's own protocol text is not pasted: it is
+  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:646`), which reads the
+  server's instructions at `src/tools/mcp_client.cpp:304` and can be set to `harness`,
+  `verbatim` or `off`.
+- **Context tape:** requests reuse a stable prompt prefix within an epoch; rebases are explicit and watermark-driven.
+- **External memory:** finished turns and first-sent reasoning can be soaked to MazeMaker; recall feeds the next turn.
+- **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
+- **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
+- **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
+- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken.
+- **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
+
+## Execution model
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Human as Operator
+    participant UI as TUI / CLI
+    participant Agent as Agent::run
+    participant Tape as TapeEngine
+    participant Router as Knowledge Router
+    participant LLM as Inference Endpoint
+    participant Tools as Tool Deck
+    participant Maze as MazeMaker
+
+    Human->>UI: Submit task
+    UI->>Agent: Run / enqueue input
+    Agent->>Router: Resolve relevant knowledge
+    Router-->>Agent: Skills, memory, deferred-tool hints
+    Agent->>Tape: Render current epoch payload
+    Tape-->>Agent: Stable prefix + new material
+    Agent->>LLM: Chat completion / stream
+    LLM-->>Agent: Reasoning and answer deltas
+    alt Tool call requested
+        Agent->>Tools: Validate and dispatch call
+        Tools-->>Agent: Bounded result + accounting
+        Agent->>Tape: Append tool exchange
+        Agent->>LLM: Continue the same run loop
+    else Final answer
+        Agent-->>UI: Final response and call stats
+    end
+    par Background persistence
+        Agent->>Maze: Soak completed turn
+        Maze-->>Router: Memory becomes retrievable
+    end
+```
+
+The agent does not need a second orchestration framework to become agentic. The run loop already owns the cycle: model call, tool dispatch, result, continuation, completion. The architecture around it exists to control what enters that cycle and what survives it.
+
+## Context is a data plane, not a growing string
+
+The transcript is not the source of truth for every future request. The tape renders a payload once per epoch, appends new material as it arrives, and rebases deliberately when the context budget approaches its watermarks.
+
+```mermaid
+flowchart LR
+    START["New session / epoch"] --> RENDER["Render full view\nwith hygiene layers"]
+    RENDER --> PREFIX["Stable serialized prefix"]
+    PREFIX --> APPEND["Append new messages\nonce"]
+    APPEND --> CACHE["Inference KV / prefix reuse"]
+    CACHE --> CHECK{"Watermark crossed?"}
+    CHECK -- "No" --> APPEND
+    CHECK -- "Yes" --> PREWARM["Prepare next epoch"]
+    PREWARM --> REBASE["Rebase from explicit state"]
+    REBASE --> RENDER
+
+    MEM["External memory graph"] --> REBASE
+    TOOL["Tool results\nbounded before render"] --> APPEND
+    STATE["Current-turn ledger"] --> REBASE
+```
+
+### Design invariants
+
+- **Render once, append thereafter.** Within an epoch, the previous request should remain an exact prefix of the next.
+- **Rebase from named state.** The next epoch carries the current question, a rebase anchor, the current-turn ledger, one recall, and a protected tail.
+- **No summarizer required for the rebase path.** The architecture reconstructs a compact working view from explicit state and retrieval rather than depending on a generated summary.
+- **Never discard the live working group first.** When the tail must shrink, older complete tool groups yield before the newest group.
+- **Count every cut.** Tool output limits and context-window cuts report what was omitted and how to continue.
+- **Memory and live state are different things.** Commands describe the current machine; memory describes prior experience.
+
+The supplied live measurements on a Strata endpoint with Qwen3.8-Flash-Next IQ1_M showed 88% prompt-token reuse over 11 calls across three turns. In a forced-watermark test, the next epoch was prewarmed during the idle interval and its first call reused 99.1% of the prompt. These are environment-specific measurements, not universal performance guarantees.
+
+## Knowledge routing: small local decisions, slow external recall
+
+The knowledge router combines local catalogues with an external memory service. Local skill and curated-memory matching is designed to be cheap; the remote recall path is deadline-bound because it is the slower leg.
+
+```mermaid
+flowchart TD
+    SIGNAL["Turn start / shift / failure / stall"] --> DISTILL["Distill query\nremove pasted noise"]
+    DISTILL --> LOCAL["Local BM25F search"]
+    LOCAL --> CARDS["Skill + memory cards"]
+    DISTILL --> REMOTE["MazeMaker recall\nbounded by deadline"]
+    CARDS --> POLICY["Evidence / threshold policy"]
+    REMOTE --> POLICY
+    POLICY --> OFFER["Offer pointers, not entire libraries"]
+    OFFER --> OPEN["Open only relevant material"]
+    OPEN --> TRACE["Record what was offered and opened"]
+    TRACE --> PRIORS["Background learning journal"]
+    PRIORS --> LOCAL
+```
+
+- Skill catalogues merge local directories, configured external directories, and MazeMaker skill rows.
+- BM25F uses weighted fields for names, tags, groups, and gist; query terms are distilled before ranking.
+- Triggers include turn start, shifts in the tool-call working set, failures, and repeated stalls.
+- Skills and memory are opened through explicit pointers; the router does not indiscriminately paste the entire catalogue into every prompt.
+- A background learning worker records observed offers and openings, updates priors, and can draft a skill from a fixed failure.
+- Learned skills are probationary, traceable, and retire through tombstones rather than silent deletion.
+
+## Concurrency without turning every token into an event
+
+The UI separates lifecycle events from the token stream. The render thread owns scene state; producer threads publish fixed-slot events, while the streaming producer writes into its own byte buffer and publishes the committed length.
+
+```mermaid
+flowchart LR
+    AGENT["Agent thread"] -->|event stamp + ownership| RING["Fixed-slot SlotRing"]
+    AGENT -->|stream bytes, then length| BUF["Producer-owned buffer"]
+    WORKER["Background worker"] -->|fixed-slot publish| RING
+    RING --> CLAIM["Render thread claims event"]
+    BUF --> SNAP["Render thread reads published bytes"]
+    CLAIM --> SCENE["Scene state"]
+    SNAP --> SCENE
+    SCENE --> FRAME["Canvas → Frame diff"]
+    FRAME --> TERM["Only changed terminal cells"]
+```
+
+The README's recorded measurement for a 200-delta turn is zero hand-off allocations in the new path, compared with 214 in the queue it replaced. `grep -rn 'mutex\|lock_guard\|condition_variable' src include` finds those words only in comments that explain why a userspace lock would not help (`include/dd/core/fslock.hpp`, `include/dd/core/park.hpp`, `src/tools/mcp_schema_cache.cpp`, `src/agent/prompt_cache_boundary.cpp`, `include/dd/gateway/pairing.hpp`) — no lock object anywhere in the tree. Treat those as claims about this codebase and measured setup, not as a proof that lock-free designs are universally superior.
+
+The implementation uses fixed-slot rings, atomic ownership publication, producer-owned stream buffers, and snapshots. Ring overflow is counted; live-byte loss is counted; interruption is shared through an atomic flag that also aborts an in-flight libcurl call.
+
+## The terminal is a renderer, not a repaint loop
+
+The TUI uses a cell canvas and a frame diff. It owns a fixed layout, cards for messages and tool activity, live reasoning/answer streams, and explicit accounting for truncation and performance. Unchanged frames write nothing.
+
+```mermaid
+flowchart TB
+    MODEL["Reasoning / answer deltas"] --> CARDS["Message + tool cards"]
+    EVENTS["Lifecycle events"] --> SCENE["Render-thread-owned scene"]
+    CARDS --> SCENE
+    SCENE --> LAYOUT["Widget layout"]
+    LAYOUT --> CANVAS["Cell canvas"]
+    CANVAS --> DIFF["Diff against prior frame"]
+    DIFF --> SYNC["Synchronized terminal output"]
+    SYNC --> SCREEN["Alternate screen"]
+```
+
+Highlights:
+
+- Double-buffered `Frame` / `Widget` / `Scene` rendering.
+- UTF-8 line editing, history, bracketed paste, mouse wheel, key decoding, and terminal restoration.
+- Live reasoning cards and streamed answer cards without moving content below the live tail.
+- `/context`, `/rebase`, `/resume`, `/plan`, `/learn`, `/reasoning`, `/effort`, `/verbose`, and related REPL commands.
+- SIMD cell-diff and text-width kernels selected at runtime: AVX-512, AVX2, or scalar.
+- **Code colour comes off disk, not from a compiled table.** `skills/highlight.yaml` names a
+  language and which kind each word is (`skills/highlight.yaml:35-46` lists the kinds,
+  `skills/highlight.yaml:93-107` the palette), read by `src/ui_grammar.cpp:273-327`; scan order
+  is precedence — shipped defaults beside the binary, then skill roots, then `highlight.paths`,
+  so the last file to name a language wins. A skin's own `colors.code_*` outranks a language
+  file, because the skin is a claim about colour and the file is a claim about structure.
+- **Every hue is measured before it lands.** `Theme::reconcile` runs WCAG relative luminance
+  against the skin's own text colour and pushes an unreadable hue away from it while keeping the
+  hue; it runs on the shipped palette too, since defaults are colours as well, and
+  `palette_fixed` counts what moved so a reconciled palette is visible instead of silent.
+- **Patch colour is scoped to the hunk's own claim.** `hunk_contract` in `src/ui.cpp:1278-1310`
+  reads `@@ -a,b +c,d @@` and allows at most `b + c` rows of patch colour, so a `-` after a
+  spent patch block is a bullet, not a deletion (`highlight_row` in `src/ui.cpp:1353-1448`).
+- OpenMP is used for sufficiently large rendering and indexing work; small work stays serial to avoid waking threads unnecessarily.
+
+## Tooling and trust boundaries
+
+A tool-enabled agent is a system with side effects. The boundary needs to be explicit.
+
+| Surface | Current behavior |
+|---|---|
+| Filesystem | `read_file`, `write_file`, and `list_dir` perform real I/O |
+| Terminal | Executes commands with a denylist; **not a sandbox** |
+| MCP | Enabled servers are discovered live; input schemas are registered |
+| HTTP | URL safety checks run before clients connect |
+| Streaming | Response sink is capped; once deltas have been emitted, the call is not replayed |
+| Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not |
+| Tool output | Bounded at production, with omitted bytes/lines accounted for |
+| Paths | Filesystem tools reject `..` path components |
+| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
+| Learned skills | Provenance is tracked; model-edited skills are protected from blind draft overwrite |
+
+**Important:** a command denylist is not isolation. Do not expose the terminal tool to untrusted input or treat it as a security boundary. Use operating-system isolation and least privilege when running untrusted workloads.
+
+## Build and run
+
+### Requirements
+
+- GCC / `g++` with C++20 support
+- GNU Make
+- libcurl development headers and library for `ariadne-agent`
+- OpenMP support for targets that link the indexing or skill components
+- A running OpenAI-compatible inference endpoint, such as a local llama.cpp server
+
+### Build
+
+```bash
+make
+make build/ariadne-skills
+make build/ariadne-agent
+make test
+make doc-audit
+
+# Build into a separate output tree
+make BUILD=build-experiment build/ariadne-agent
+```
+
+The Makefile is the build system. Each product target compiles its translation units in one `g++` invocation; `mk/*.mk` fragments add targets. Warnings are errors.
+
+### Run the headless agent
+
+```bash
+# Read a message from stdin; config.yaml lives beside the binary
+build/ariadne-agent
+
+# Use an explicit config and pass a message
+build/ariadne-agent path/to/config.yaml -- "Explain this codebase"
+
+# Pipe a task
+printf '%s\n' 'List files in /tmp/' | build/ariadne-agent
+```
+
+### Run the full harness
+
+```bash
+build/ariadne --init
+build/ariadne
+```
+
+`--init` creates the home-owned config and the runtime directories beside the selected home. The binary's home resolution is explicit; the Python Daedalus home (`~/.daedalus`) is refused rather than silently reused.
+
+### Install
+
+```bash
+make install
+make install-all
+```
+
+The installer is a standalone C++ translation unit compiled by `g++`. It re-executes itself, builds the target, installs it, seeds the home through `ariadne --init`, and checks that the installed binary runs. It deliberately avoids duplicating configuration defaults that the application itself owns.
+
+## Configuration
+
+The following environment variables override configuration values:
+
+| Variable | Purpose |
+|---|---|
+| `DD_BASE_URL` | Override `model.base_url`; must end in `/v1` |
+| `DD_MODEL` | Override `model.name` |
+| `DD_API_KEY` | Override `model.api_key`; local llama.cpp setups may not need one |
+| `DD_WIRE_ATTEMPTS` | Number of sends per LLM call; retries only eligible failures |
+| `DD_MAX_TURNS` | Override `agent.max_turns`; cap it to avoid pathological loops |
+| `DD_TAPE_LOG` | Write per-call context-tape accounting |
+| `DD_FAST_LAYER` | Override the fast-layer token threshold for rebase testing |
+| `DD_NO_SOAK=1` | Disable memory writes while retaining recall behavior |
+| `DD_TUI_MOUSE=0` | Leave mouse input to the terminal |
+
+Configuration is resolved from the selected home and its `config.yaml`; see `examples/ariadne/config.yaml` for the shipped reference.
+
+## Measurements, not mythology
+
+The project favors repeatable checks over adjectives. The supplied README and test descriptions record the following measurements in their specific environments:
+
+| Experiment | Recorded result |
+|---|---:|
+| Context tape | 88% prompt-token reuse across 11 calls / 3 turns |
+| Prewarmed rebase | 99.1% reuse on the first call of the next epoch |
+| Tool-output envelope | 12,944 prompt tokens per call avoided in a 1,009,800-byte grep-result experiment |
+| `edit_file` tool | −22,277 net tokens on a two-place edit of a 129-line file |
+| TUI event hand-off | 0 allocations across a 200-delta turn, vs. 214 in the replaced queue path |
+| Knowledge tokenizer | 33 → 80 MB/s on the recorded Ryzen 7 3800X setup |
+| Local skill search | 2–5 µs in the recorded catalogue setup |
+| Index build | 3.7k curated memory cards: 80 → 20 ms; 467 skills: 112 → 40 ms |
+
+These numbers are not benchmark promises. They are hypotheses with provenance: machine, model, configuration, input, and test path matter. Reproduce them before comparing them.
+
+## Verification
+
+```bash
+make test
+make doc-audit
+```
+
+The test target runs every registered test binary, continues after individual failures, and fails at the end if any test failed. The documentation audit derives the wiring list and document anchors from the tree rather than trusting a manually maintained list.
+
+Useful focused checks mentioned in the project:
+
+```bash
+make build/dd_sink_handback_probe
+build/dd_sink_handback_probe <skills-root> learned <name>
+```
+
+For a live prompt-cache or edit-tool experiment, see `bench/` and `DD_TAPE_LOG`. Test coverage and a successful local smoke run do not imply production hardening or isolation.
+
+## Repository map
+
+```text
+.
+├── src/
+│   ├── agent/       # Agent run loop, wire, execution and context integration
+│   ├── context/     # Context engine, tape, epochs and rebase behavior
+│   ├── tools/       # Filesystem, terminal, MCP and tool helpers
+│   ├── know/        # Knowledge router, catalogues and ranking
+│   ├── learn/       # Learning journal and skill lifecycle
+│   ├── core/        # Paths, YAML, JSON, config, home resolution, lock-free hand-off
+│   ├── net/         # HTTP transport
+│   ├── skills/      # Skill scanning and registry
+│   ├── cron/        # Scheduling
+│   ├── gateway/     # Platform registry, pairing, sticker cache
+│   └── ui.cpp ui_simd.cpp ui_grammar.cpp   # the renderer: widgets, scene, canvas, frame diff, grammar
+├── include/dd/      # Public/internal C++ headers
+├── tests/           # Test suites
+├── bench/            # Focused measurement scripts and corpora
+├── docs/             # Architecture and behavior notes
+├── examples/         # Reference configuration
+├── installer/        # Standalone native installer
+├── mk/               # Makefile target fragments
+└── build/            # Build outputs
+```
+
+The source tree is larger than the currently wired product surface. The documentation audit distinguishes code that is ported and tested from code that actually reaches a product binary. That distinction is intentional: **present in the repository** does not mean **present in the execution path**.
+
+## Known boundaries
+
+- The AVX-512 kernels compile but have not been verified on AVX-512 hardware in the recorded environment.
+- The shell tool is guarded, not jailed.
+- Some ported translation units and headers are not wired into product binaries by design; use `make doc-audit` for the current measured list.
+- Live measurements depend on the endpoint, model, machine, corpus, and configuration.
+- The harness speaks to an OpenAI-compatible endpoint; this repository is not itself the inference engine.
+
+## Direction of travel
+
+The stable floor is a working native harness. The frontier is the work that can now evolve without replacing that floor:
+
+- Wire the next ported capabilities only when there is a concrete execution path and a test.
+- Make tool and context costs observable before optimizing them.
+- Keep the inference backend replaceable.
+- Keep long-term memory outside the volatile prompt window.
+- Make changes locally measurable, reversible, and attributable.
+- Let the architecture evolve without allowing documentation to outrun the implementation.
+
+```mermaid
+flowchart LR
+    BASE["Working C++20 baseline"] --> OBS["Observe real bottleneck"]
+    OBS --> HYP["State a falsifiable hypothesis"]
+    HYP --> CHANGE["Change one architectural variable"]
+    CHANGE --> TEST["Run focused tests"]
+    TEST --> MEASURE["Measure against baseline"]
+    MEASURE --> DECIDE{"Evidence supports it?"}
+    DECIDE -- Yes --> INTEGRATE["Integrate + document"]
+    DECIDE -- No --> REVERT["Reject or revise"]
+    INTEGRATE --> OBS
+    REVERT --> OBS
+```
+
+## Philosophy
+
+**Do not worship the frontier. Instrument it.**
+
+A benchmark is a question, not a verdict. A transcript is a representation, not a mind. A ported file is not a feature until the execution path reaches it. A retry is not safe just because the request failed. A tool is not sandboxed because its command string was inspected. A context window is not memory because it is large.
+
+The objective is not to make the README sound futuristic. It is to build systems whose behavior can be inspected, measured, and changed without losing control of the whole.
+
+---
+
+<sub>Daedalus / Ariadne · Native C++20 agent harness · Experimental systems engineering at the edge of what one person can reasonably hold in their head.</sub>
