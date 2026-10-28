@@ -10,11 +10,11 @@
 //     Streamable-HTTP; the server's instructions join the system prompt.
 //   * Esc / Ctrl-C interrupt a turn, including an LLM call in flight.
 //
-//   build/dd_tui                                 # config.yaml beside the binary, interactive
-//   build/dd_tui --init [--from FILE]            # write config.yaml + folders beside the binary
-//   build/dd_tui --home DIR                      # another home: config.yaml, skills/, rules/, state/, logs/
-//   build/dd_tui path/to/config.yaml -- "msg"    # explicit config (its folder is the home), single-shot msg
-//   build/dd_tui --help | --version
+//   build/ariadne                                 # config.yaml beside the binary, interactive
+//   build/ariadne --init [--from FILE]            # write config.yaml + folders beside the binary
+//   build/ariadne --home DIR                      # another home: config.yaml, skills/, rules/, state/, logs/
+//   build/ariadne path/to/config.yaml -- "msg"    # explicit config (its folder is the home), single-shot msg
+//   build/ariadne --help | --version
 //   env: DD_HOME, DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
 //   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full (bare toggles) /plan /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
@@ -229,9 +229,9 @@ static const char* const kVersion = "0.1.0";
 
 static void usage(FILE* f) {
     std::fputs(
-        "usage: dd_tui [--home DIR | --config FILE | FILE] [-- message words...]\n"
-        "       dd_tui --init [--from FILE] [--rules]     write config.yaml and the folders beside the binary\n"
-        "       dd_tui --help | --version\n"
+        "usage: ariadne [--home DIR | --config FILE | FILE] [-- message words...]\n"
+        "       ariadne --init [--from FILE] [--rules]     write config.yaml and the folders beside the binary\n"
+        "       ariadne --help | --version\n"
         "\n"
         "  --home DIR      run from another folder (config.yaml, skills/, rules/, state/, logs/)\n"
         "  --config FILE   an explicit config; its folder is the home (a bare path argument does the same)\n"
@@ -384,7 +384,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         auto value = [&](const char* flag) -> std::string {
             if (i + 1 >= argc) {
-                std::cerr << "dd_tui: " << flag << " needs a value\n";
+                std::cerr << "ariadne: " << flag << " needs a value\n";
                 usage(stderr);
                 std::exit(2);
             }
@@ -393,13 +393,16 @@ int main(int argc, char** argv) {
         if (after_dd) msg_words.push_back(a);
         else if (a == "--") after_dd = true;
         else if (a == "--help" || a == "-h") { usage(stdout); return 0; }
-        else if (a == "--version") { std::printf("dd_tui %s\n", kVersion); return 0; }
+        else if (a == "--version") {
+            std::printf("ariadne %s — the thread, not the labyrinth: one binary, its home beside it\n", kVersion);
+            return 0;
+        }
         else if (a == "--home") home_flag = value("--home");
         else if (a == "--config") config_flag = value("--config");
         else if (a == "--init") init = true;
         else if (a == "--rules") init_rules = true;
         else if (a == "--from") init_from = value("--from");
-        else if (a.size() > 1 && a[0] == '-') { std::cerr << "dd_tui: unknown option " << a << "\n"; usage(stderr); return 2; }
+        else if (a.size() > 1 && a[0] == '-') { std::cerr << "ariadne: unknown option " << a << "\n"; usage(stderr); return 2; }
         else config_flag = a;   // a bare path is the config, as it always was
     }
 
@@ -418,16 +421,16 @@ int main(int argc, char** argv) {
     if (init) {
         std::filesystem::create_directories(home.root, boot_ec);
     } else if (!std::filesystem::exists(config_path, boot_ec) && !std::getenv("DD_BASE_URL")) {
-        std::cerr << "dd_tui: no config at " << config_path << "\n"
+        std::cerr << "ariadne: no config at " << config_path << "\n"
                   << "  " << home.root.string() << " is the home dd picked and it has no config.yaml, so dd\n"
                   << "  has never been configured there. Start dd from the project folder that owns the\n"
-                  << "  config.yaml, name one with --config FILE / --home DIR, or run dd_tui --init to\n"
-                  << "  write one (dd_tui --init --from FILE copies an existing config, once). Nothing was\n"
+                  << "  config.yaml, name one with --config FILE / --home DIR, or run ariadne --init to\n"
+                  << "  write one (ariadne --init --from FILE copies an existing config, once). Nothing was\n"
                   << "  created.\n";
         return 2;   // the home was never configured: stop before it is built
     }
     if (!ddcore::ensure_home(home, &why)) {
-        std::cerr << "dd_tui: " << why << "\n  pass --home DIR for a folder you can write\n";
+        std::cerr << "ariadne: " << why << "\n  pass --home DIR for a folder you can write\n";
         return 2;
     }
     if (init) {
@@ -476,7 +479,7 @@ int main(int argc, char** argv) {
         errno = 0;
         const long long n = std::strtoll(v, &end, 10);
         if (errno == 0 && end && *end == '\0' && n > 0) mt = n;
-        else std::cerr << "dd_tui: DD_MAX_TURNS='" << v << "' is not a positive number: ignored\n";
+        else std::cerr << "ariadne: DD_MAX_TURNS='" << v << "' is not a positive number: ignored\n";
     }
     if (mt <= 0) {
         long long it = cfg.get_int("agent.max_iterations");
@@ -1069,7 +1072,7 @@ int main(int argc, char** argv) {
         {
             const auto& th = scene.theme();
             dd::ui::Canvas c(std::clamp(cols, 40, dd::ui::Scene::kCardMaxW), 2);
-            const int n = c.gradient(0, 0, "⟁ DAEDALUS", th.border, th.title, th.gold, dd::ui::kBold);
+            const int n = c.gradient(0, 0, "⟁ ARIADNE", th.border, th.title, th.gold, dd::ui::kBold);
             c.text(n + 1, 0, "· " + model + " · " + std::to_string(tool_count) + " tools", dd::ui::Style{th.muted});
             const std::string s = c.to_ansi(color, truecolor);
             std::fwrite(s.data(), 1, s.size(), stdout);
@@ -1114,7 +1117,7 @@ int main(int argc, char** argv) {
     const int saved_err = term::hide_stderr(home.logs().string());
     if (!term::enter(mouse)) {
         term::show_stderr(saved_err);
-        std::cerr << "dd_tui: cannot put the terminal in raw mode\n";
+        std::cerr << "ariadne: cannot put the terminal in raw mode\n";
         return 1;
     }
 

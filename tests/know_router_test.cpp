@@ -128,11 +128,11 @@ static void test_records() {
     auto held = make_record(call("run_terminal", "{\"cmd\":\"docker ps\"}"),
                             "{\"error\":\"[rule podman-not-docker · told once] This box runs podman.\\nThis call was not run. Call again once you have taken the rule into account.\"}");
     chk(held.refused && !held.failed && held.error.empty() && !held.exploring, "record: a call a rule held is refused: not failed, not blind, nothing to look up");
-    auto f = make_record(call("run_terminal", "{\"cmd\":\"make build/dd_tui\"}"),
+    auto f = make_record(call("run_terminal", "{\"cmd\":\"make build/ariadne\"}"),
                          "{\"cmd\":\"make\",\"exit\":2,\"stdout\":\"src/a.cpp:312: error: 'foo' was not declared\\nmake: *** [Makefile:67: x] Error 1\"}");
     chk(f.failed && f.exit == 2 && !f.error.empty(), "record: a nonzero exit fails, with an error");
     chk(f.error.find("312") == std::string::npos && f.error.find("#") != std::string::npos, "record: numbers are folded out of the signature: " + f.error);
-    auto g = make_record(call("run_terminal", "{\"cmd\":\"make build/dd_tui\"}"),
+    auto g = make_record(call("run_terminal", "{\"cmd\":\"make build/ariadne\"}"),
                          "{\"cmd\":\"make\",\"exit\":2,\"stdout\":\"src/b.cpp:77: error: 'foo' was not declared\\nmake: *** [Makefile:67: x] Error 1\"}");
     chk(f.error == g.error, "record: the same error on another line is the same signature");
 
@@ -148,7 +148,7 @@ static void test_records() {
     chk(error_signature("").empty(), "signature: nothing");
     chk(error_signature("all fine\nreally fine\nstill fine") == "still fine", "signature: no cue: the last line");
     chk(error_signature("ok\nerror: cannot open /a/b/c.txt:12\nok") == "error: cannot open <path>:#", "signature: " + error_signature("ok\nerror: cannot open /a/b/c.txt:12\nok"));
-    chk(error_signature("make: *** [Makefile:67: build/dd_tui] Error 1") == error_signature("make: *** [Makefile:12: build/dd_maze_tests] Error 2"), "signature: line numbers and build targets fold");
+    chk(error_signature("make: *** [Makefile:67: build/ariadne] Error 1") == error_signature("make: *** [Makefile:12: build/dd_maze_tests] Error 2"), "signature: line numbers and build targets fold");
 }
 
 // ================= the working set =================

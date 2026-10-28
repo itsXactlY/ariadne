@@ -503,7 +503,7 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
         }
     }
 
-    std::string pointer = "[rebased] This conversation was rebuilt to keep the working context inside the GPU's fast "
+    std::string pointer = "[rebased] ariadne rebuilt this conversation to keep the working context inside the GPU's fast "
                          "layer. Everything before this point is in mazemaker under auto:turn:" + session_id + ":*";
     if (!turn_ids.empty()) {   // by id: read back at once, no search
         std::string ids;

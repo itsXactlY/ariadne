@@ -130,7 +130,7 @@ static void test_starters() {
         {"no-force-push-main", "git push -f origin main", "git push --force origin feature-x"},
         {"never-touch-live-pods", "podman stop mazemaker-db", "podman ps && podman logs x"},
         {"never-touch-live-pods", "systemctl --user restart mazemaker-pod.service", "systemctl --user status mazemaker-pod.service"},
-        {"ask-before-heavy-launches", "./llama-server -m x.gguf", "make build/dd_tui"},
+        {"ask-before-heavy-launches", "./llama-server -m x.gguf", "make build/ariadne"},
         {"ask-before-heavy-launches", "make test", "echo testing"},
     };
     for (const auto& c : cases) {

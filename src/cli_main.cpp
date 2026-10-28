@@ -1,14 +1,14 @@
-// dd — daedalus-cpp harness CLI (the skill catalogue, and the tools to keep it honest).
+// ariadne-skills — daedalus-cpp harness CLI (the skill catalogue, and the tools to keep it honest).
 //
-//   dd list [--category C] [--limit N] [--names-only]   the merged catalogue: ./skills, external dirs, the maze
-//   dd view NAME [FILE] [--page N|all]                  a skill, a page at a time (or one of its files)
-//   dd resolve skill://NAME[/FILE][#PAGE]               the same, by uri
-//   dd find QUERY... [--k N]                            what the harness would offer for this text
-//   dd skills check [--strict]                          the census: bodyless, duplicate, note-like, no-gist cards
-//   dd replay FILE [--k N] [--home DIR] [--show]          prompts (jsonl {"text","want":[...]}, or one per line); the catalogue is the home's, so calibration runs against the real one
+//   ariadne-skills list [--category C] [--limit N] [--names-only]   the merged catalogue: ./skills, external dirs, the maze
+//   ariadne-skills view NAME [FILE] [--page N|all]                  a skill, a page at a time (or one of its files)
+//   ariadne-skills resolve skill://NAME[/FILE][#PAGE]               the same, by uri
+//   ariadne-skills find QUERY... [--k N]                            what the harness would offer for this text
+//   ariadne-skills skills check [--strict]                          the census: bodyless, duplicate, note-like, no-gist cards
+//   ariadne-skills replay FILE [--k N] [--home DIR] [--show]          prompts (jsonl {"text","want":[...]}, or one per line); the catalogue is the home's, so calibration runs against the real one
 //                                                       through the catalogue: offers, hits and misses per threshold
-//   dd learn status|why SKILL|report|forget SKILL|export   what the router has learned (read-only, except forget)
-//   dd import-daedalus [--from DIR] [--skills] [--skins] [--with-config]   copy from the Python Daedalus's home, once
+//   ariadne-skills learn status|why SKILL|report|forget SKILL|export   what the router has learned (read-only, except forget)
+//   ariadne-skills import-daedalus [--from DIR] [--skills] [--skins] [--with-config]   copy from the Python Daedalus's home, once
 //
 // flags: --home DIR  --config FILE  --maze URL  --no-maze  (config.yaml sits beside the binary)
 #include <algorithm>
@@ -175,7 +175,7 @@ int cmd_view(const std::string& uri_text, const Args& a) {
 }
 
 int cmd_find(const Args& a) {
-    if (a.pos.empty()) { std::cerr << "usage: dd find QUERY...\n"; return 1; }
+    if (a.pos.empty()) { std::cerr << "usage: ariadne-skills find QUERY...\n"; return 1; }
     int k = 8;
     if (!a.k.empty() && !parse_int(a.k, 1, 1000, k)) return bad_number("--k", a.k);
     Env e = open_env(a);
@@ -254,7 +254,7 @@ std::vector<Prompt> read_corpus(const std::string& path) {
 }
 
 int cmd_replay(const Args& a) {
-    if (a.pos.empty()) { std::cerr << "usage: dd replay FILE [--k N] [--home DIR] [--show]\n"; return 1; }
+    if (a.pos.empty()) { std::cerr << "usage: ariadne-skills replay FILE [--k N] [--home DIR] [--show]\n"; return 1; }
     int k = 3;
     if (!a.k.empty() && !parse_int(a.k, 1, 1000, k)) return bad_number("--k", a.k);
     Env e = open_env(a);
@@ -429,7 +429,7 @@ int cmd_import(const Args& a) {
 
 // ---- learn: the ledger beside the binary, shown or (forget) edited ----
 int cmd_learn(const Args& a) {
-    const char* usage = "usage: dd learn status | why SKILL | report | forget SKILL | export\n";
+    const char* usage = "usage: ariadne-skills learn status | why SKILL | report | forget SKILL | export\n";
     if (a.pos.empty()) { std::cerr << usage; return 1; }
     std::string why;
     const core::Home home = core::resolve_home(a.home, a.config, &why);
@@ -458,20 +458,20 @@ int cmd_learn(const Args& a) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: dd <list|view|resolve|find|skills check|replay|learn|import-daedalus> ...\n";
+        std::cerr << "usage: ariadne-skills <list|view|resolve|find|skills check|replay|learn|import-daedalus> ...\n";
         return 1;
     }
     const std::string cmd = argv[1];
     Args a = parse(argc, argv);
     if (cmd == "list") return cmd_list(a);
     if (cmd == "view" || cmd == "resolve") {
-        if (a.pos.empty()) { std::cerr << "usage: dd " << cmd << " <name|skill://...> [file]\n"; return 1; }
+        if (a.pos.empty()) { std::cerr << "usage: ariadne-skills " << cmd << " <name|skill://...> [file]\n"; return 1; }
         return cmd_view(a.pos[0], a);
     }
     if (cmd == "find") return cmd_find(a);
     if (cmd == "skills") {
         if (!a.pos.empty() && a.pos[0] == "check") { a.pos.erase(a.pos.begin()); return cmd_check(a); }
-        std::cerr << "usage: dd skills check [--strict]\n";
+        std::cerr << "usage: ariadne-skills skills check [--strict]\n";
         return 1;
     }
     if (cmd == "replay") return cmd_replay(a);

@@ -336,11 +336,11 @@ std::string result_account(const ResultFacts& f) {
     return s;
 }
 
-// The three-row DAEDALUS mark, one column of space between letters.
+// The three-row ARIADNE mark, one column of space between letters.
 const char* const kLogo[3] = {
-    "╔╦╗ ╔═╗ ╔═╗ ╔╦╗ ╔═╗ ╦   ╦ ╦ ╔═╗",
-    " ║║ ╠═╣ ║╣   ║║ ╠═╣ ║   ║ ║ ╚═╗",
-    "═╩╝ ╩ ╩ ╚═╝ ═╩╝ ╩ ╩ ╩═╝ ╚═╝ ╚═╝",
+    "╔═╗ ╔═╗ ╔═╗ ╔═╗ ╔╦╗ ╦ ╦ ╔═╗",
+    "╠═╣ ╠═╝ ║║  ╠═╣  ║║ ║╱║ ║╣ ",
+    "╩ ╩ ║ ╩ ╚═╝ ╩ ╩ ═╩╝ ╩ ╩ ╚═╝",
 };
 
 }  // namespace
@@ -1459,7 +1459,7 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
     f.box(x, y, w, h, b, true);
     f.put(x + 2, y, U'┤', b);
     f.put(x + 3, y, U' ', b);
-    const int n = f.gradient(x + 4, y, "⟁ DAEDALUS", th_.border, th_.title, th_.gold, kBold);
+    const int n = f.gradient(x + 4, y, "⟁ ARIADNE", th_.border, th_.title, th_.gold, kBold);
     f.put(x + 4 + n, y, U' ', b);
     f.put(x + 5 + n, y, U'├', b);
     f.title(x + 6 + n, y, "c++", Style{th_.muted}, b);

@@ -122,7 +122,7 @@ struct Theme {
         {"⟪◉", "◉⟫"}, {"⟪◈", "◈⟫"}, {"⟪⬡", "⬡⟫"}, {"⟪◌", "◌⟫"}, {"⟪⦿", "⦿⟫"}};
     std::vector<std::string> verbs = {"weaving synapses", "firing neurons", "mapping the maze",
                                       "consulting the archives", "following the corridor"};
-    std::string agent_name = "Daedalus", response_label = "⟁ DAEDALUS ⟁",
+    std::string agent_name = "Ariadne", response_label = "⟁ ARIADNE ⟁",
                 prompt_symbol = "◇ ❯ ", welcome = "⟁ The maze opens. The cortex remembers.",
                 goodbye = "⟁ The doors close. The maze remains.";
 

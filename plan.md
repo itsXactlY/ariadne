@@ -79,7 +79,7 @@ was one clipped row, which reads as a finished sentence, so it wraps instead.
 | 2b | verbose reconciliation row + resume offset; the card's own cap names its hidden rows | `8,000 of 1,009,800 bytes reached the model · 1,001,800 dropped`, `300 of 1,312 lines · 1,012 dropped · continue at offset 301`, `… +N rows past the verbose cap` |
 | 2c | narrow-width degradation, not clipping | at 44 cols inline the header stays `✓ done ┐` and the account wraps to `model · 1,001,800 dropped` |
 
-Live: `DD_VERBOSE=verbose build/dd_tui --home /tmp/dd_ab/a -- "grep -R TODO
+Live: `DD_VERBOSE=verbose build/ariadne --home /tmp/dd_ab/a -- "grep -R TODO
 /tmp/dd_ab/src"` printed both rows on the real card. Card height at normal
 verbosity grows by one row (16 → 17) because the cut row is real.
 
@@ -88,7 +88,7 @@ verbosity grows by one row (16 → 17) because the cut row is real.
 - `binary_extensions::has_binary_extension` vs the inline detection at
   `fs_tools.cpp:133`, and `patch_apply`'s binary refusal which is currently only
   exercised by a test. One source of truth, extension list from the module.
-- `tools::interrupt` vs the inline cancel path: `dd_tui.cpp:187-210`
+- `tools::interrupt` vs the inline cancel path: `src/dd_tui.cpp:187-210`
   (`g_cancel`, SIGINT/SIGTERM/SIGHUP) and `ui.cpp:911-917` (fills
   `{"error":"cancelled"}` for skipped calls). Move the state into the module and
   keep the same semantics.
@@ -121,8 +121,8 @@ second send instead of ending the turn.
 
 ## W5 — redact untrusted server text at the point it enters the prompt
 
-`dd_tui.cpp:646-651` puts a server's `description` and `inputSchema` into the deck
-verbatim, and server `instructions` into notes (`:622-624`); `agent::mask_token` is
+`src/dd_tui.cpp:649-654` puts a server's `description` and `inputSchema` into the deck
+verbatim, and server `instructions` into notes (`:625-627`); `agent::mask_token` is
 applied only inside `render.cpp:44-45`. Apply the existing masking to MCP description
 and instruction **strings only** — not to schema nodes (names and enums must stay
 exact, and the probes below show the schemas need no rewriting here). No capability
@@ -135,7 +135,7 @@ in the composed prompt while tool names and enum values stay byte-identical.
 **Closed.** One rule, one file: a cached manifest may be served only while the config
 still hashes to what was cached. `dd/tools/mcp_schema_cache.cpp` now holds the whole
 half — `cache_path`, `load_all`, `save_all`, `get_cached_entry`, `has_cached_entry`,
-`write_cache_entry`, `clear_cache_entry`, plus `server_fingerprint`, which folds dd's
+`write_cache_entry`, `clear_cache_entry`, plus `server_fingerprint`, which folds ariadne's
 per-name `tools: {name: {enabled}}` gate into the payload Python spells as an exclude
 list, so disabling a tool changes the key. `config_fingerprint` is unchanged and keeps
 its Python ground-truth cases.
@@ -156,12 +156,12 @@ token cost.
 | rule | where | proof |
 |---|---|---|
 | an entry is served only on a matching fingerprint | `get_cached_entry` | `build/dd_mcp_schema_cache_tests`: match served, changed key missed, absent server missed; a served entry is a copy, so mutating it cannot poison the file |
-| dd's `tools: {name: {enabled}}` gate is part of the key | `server_fingerprint` | same suite: `enabled: true` equals absent, disabling a tool changes the key, moving the url changes it, rotating a header does not |
+| ariadne's `tools: {name: {enabled}}` gate is part of the key | `server_fingerprint` | same suite: `enabled: true` equals absent, disabling a tool changes the key, moving the url changes it, rotating a header does not |
 | the write is atomic and 0600 | `save_all` | same suite: byte-equal round trip, mode 0600, no `.dd-tmp-*` left behind, parent dir created on a fresh home |
 | an unchanged manifest is not rewritten | `write_cache_entry` | same suite asserts the mtime is identical; the boot test asserts the served boot leaves the file byte-identical |
 | a corrupt or partial cache costs a live list, not a boot failure | `load_all` | same suite: empty, garbage, a truncated document, a list and a scalar all read as empty |
 | two writers do not lose a server | the lock | same suite: 8 threads write 8 servers, all 8 present and all keyed |
-| boot reads disk on a match and lists live on a miss | `dd_tui.cpp` boot loop | `build/dd_mcp_cache_boot_tests`: a server whose `tools/list` costs 400 ms — boot 1 asks and writes, boot 2 asks nothing but handshakes and is served, a url edit asks again and re-keys, the moved config is served on its next boot |
+| boot reads disk on a match and lists live on a miss | `src/dd_tui.cpp` boot loop | `build/dd_mcp_cache_boot_tests`: a server whose `tools/list` costs 400 ms — boot 1 asks and writes, boot 2 asks nothing but handshakes and is served, a url edit asks again and re-keys, the moved config is served on its next boot |
 | a cached manifest registers the same tools, masked the same way | the same registration path | boot test asserts the chat body carries the cached name, enum and `required` byte-identical, the raw key absent, the masked form present, and `schema cached`/`(cache)` in the readouts |
 
 ## W7 — mid-turn steering
@@ -180,7 +180,7 @@ meaning and stays the only mid-call action.
 
 ## W8 — calibration from measurement, not guesses
 
-**Closed.** `dd replay` now measures the offer rule against the catalogue a home actually
+**Closed.** `ariadne-skills replay` now measures the offer rule against the catalogue a home actually
 holds, and the thresholds it shipped are the numbers the measurement produced. Ground truth is
 behavioural: the corpus is 1333 real operator asks harvested from Daedalus's own session log,
 each labelled with the skill ids the harness *actually opened* after that ask — 169 opened a
@@ -210,11 +210,11 @@ moves code cannot leave a doc pointing somewhere else.
 
 | what | where | proof |
 |---|---|---|
-| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `dd` 59 TUs, `dd_agent` 18, `dd_tui` 82; closure reaches **176 files** (83 TUs, 93 headers); **33 of 116** `src/*.cpp` linked into no product binary, **49 of 142** headers reached by none, 16 of 32 header-only ports unreached |
+| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 59 TUs, `ariadne-agent` 18, `ariadne` 82; closure reaches **176 files** (83 TUs, 93 headers); **33 of 116** `src/*.cpp` linked into no product binary, **49 of 142** headers reached by none, 16 of 32 header-only ports unreached |
 | the README's unwired list is now bidirectional | `README.md` "Ported but not wired" | names every unwired TU by name or directory *and* rejects a name the closure reaches; `src/tools/mcp_schema_cache.cpp` was on the list and is **wired** since W6 (`Makefile:139-140`), so it is off it |
 | a citation must point at the thing it describes | `citations()` | 25 citations checked; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (12 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts (`brief.md`, `report.md`, `tape.jsonl`) are excluded |
-| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `524`, `787-807`, `1016-1029`, `1174`, `1335-1341`; steering `1159` → `1192`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/daedalus/config.yaml:71-79`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`dd_tui.cpp:763-768,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `527`, `790-810`, `1019-1032`, `1177`, `1338-1344`; steering `1159` → `1195`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/daedalus/config.yaml:71-79`, not the generated `default_config.cpp` |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`src/dd_tui.cpp:763-768,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
 `make doc-audit`: clean — 25 citations, 0 unresolved or drifting, 0 wiring claims.
 

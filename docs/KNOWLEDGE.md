@@ -27,9 +27,9 @@ model; we have 498 skills and a 54.6k rebase mark.
 | # | Finding | Evidence |
 |---|---|---|
 | F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:344`, `src/context/engine.cpp:405`, `src/context/engine.cpp:660` |
-| F2 | The system prompt has three voices that contradict each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). | `dd_tui.cpp:727`, `:750`, `:893`; `initialize` reply |
+| F2 | The system prompt has three voices that contradict each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). | `src/dd_tui.cpp:730`, `:753`, `:896`; `initialize` reply |
 | F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../my-project/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
-| F4 | Closed: the catalogue is not read once. `dd_tui` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:763-768,834-836,856`, `src/know/wiring.cpp` |
+| F4 | Closed: the catalogue is not read once. `ariadne` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:763-768,834-836,856`, `src/know/wiring.cpp` |
 | F5 | Catalogue quality. 611 `skill:` rows are 498 skills + 5 notes posing as skills (`fix-i3-services-not-starting` was *offered* as one) + 1 AFE fragment. 107 names exist in both `builtin` and `local` (95 identical sha, 4 differ, 8 unknown). 101 cards have no body slices (`load()` then returns the 650-char card as "the skill"). 96 legacy cards carry raw frontmatter in the text. Only 134 cards have tags. | maze census |
 | F6 | A loaded skill is a tool result: it ages out (`tool_group_ttl`, rebase) and nothing re-attaches it, so the model forgets the procedure it was following. Bodies: median 6 KB (~1.7k tokens), p90 16.8 KB (~4.7k), max 55 KB (~15k), against a rebase mark of ~54.6k. | maze census |
 | F7 | Nothing is measured: no offered-to-opened counter. | |
@@ -101,7 +101,7 @@ lists every skill. That part is ours.
 ### 5.1 Layers
 
 ```
-app      dd_tui.cpp                 composition root only: Home -> config -> catalogues -> Router -> engine
+app      src/dd_tui.cpp                 composition root only: Home -> config -> catalogues -> Router -> engine
 context  TapeEngine, Tape, Renderer consume Router::on(Signal); no retrieval logic left in the engine
 know     Router . Trigger* . Distiller . WorkingSet . Deliverer . Tripwires
          Catalogue <- SkillCatalogue <- { DiskSkills, MazeSkills }
@@ -280,7 +280,7 @@ bodies or retire them; write maze-native skills with `source: maze` and their `r
 Both together are what lifts routing without a model call at query time (omp keeps a
 `skill-descriptions.db` for the same reason: descriptions are made once, matched cheaply).
 
-`dd skills check` prints the census above (bodyless, duplicates, legacy, notes, no-gist) and exits
+`ariadne-skills skills check` prints the census above (bodyless, duplicates, legacy, notes, no-gist) and exits
 non-zero past thresholds; it runs in CI against a card snapshot.
 
 Refresh: `generation()` plus `refresh()` on pod recovery and every 10 min while idle. "Empty for
@@ -323,9 +323,9 @@ goes.
 **Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too, `DAEDALUS_HOME` stays
 as an override for the ported Python modules. The five hard-coded sites go.
 
-- `dd_tui --init` writes `config.yaml` from `examples/daedalus/config.yaml` and creates the dirs
+- `ariadne --init` writes `config.yaml` from `examples/daedalus/config.yaml` and creates the dirs
   (`--from FILE` copies an existing config once).
-- `dd import-daedalus [--skills] [--skins]` copies from `~/.daedalus` explicitly, once. Nothing is
+- `ariadne-skills import-daedalus [--skills] [--skins]` copies from `~/.daedalus` explicitly, once. Nothing is
   shared at runtime.
 - The 467-skill tree is referenced read-only through `skills.external_dirs`, or copied by the import.
 - Not writable (`/usr/bin`) and no `--home`: say so in one line and exit.
@@ -348,7 +348,7 @@ ladder thresholds and what tells the curator which skills are dead.
 | Phase | Scope | Acceptance |
 |---|---|---|
 | **P0 Home** | `Home`, `--init`, `--home`, `import-daedalus`, state under `<home>/state`; dead knobs wired | HOME-clean test; existing suites green; the live `~/.daedalus/config.yaml` copied once with `--init --from` |
-| **P1 Catalogue + ranking** | `Catalogue`, `SkillCatalogue` (Disk + Maze), `Bm25f`, `Distiller`, sha collapse, refresh; replaces `SkillIndex`; `dd find`, `dd skills check` | On the labeled corpus: top-3 recall >= 85% on prompts that have a skill; false offers <= 10% on prompts that have none; `search` p99 <= 1 ms; umlaut and hub cases pass; started with the pod down it still serves >= 460 skills from disk; a pod that comes up later bumps `generation` |
+| **P1 Catalogue + ranking** | `Catalogue`, `SkillCatalogue` (Disk + Maze), `Bm25f`, `Distiller`, sha collapse, refresh; replaces `SkillIndex`; `ariadne-skills find`, `ariadne-skills skills check` | On the labeled corpus: top-3 recall >= 85% on prompts that have a skill; false offers <= 10% on prompts that have none; `search` p99 <= 1 ms; umlaut and hub cases pass; started with the pod down it still serves >= 460 skills from disk; a pod that comes up later bumps `generation` |
 | **P2 Router + working set** | `Router`, `WorkingSet`, `Deliverer`, `PromptComposer`, turn-start path with deadline, rebase `reattach`, `read_file("skill://...")`, `find` | `DD_TAPE_LOG` cached/prompt ratio unchanged (>= 95%); first model call <= local + 1.5 s even with the pod at 12 s; notes <= 1,500 tokens/turn; `opened/offered` visible |
 | **P3 Mid-turn** | shift / failure / stall triggers, `intent` argument | fake-Strata scenarios (the server built for the window fix, moved under `tests/`): failure -> bug card after the second failure; identical call x2 -> redirect once; a shift -> one note, none for the next 2 rounds; byte-identical prompt prefix with and without notes |
 | **P4 Tripwires** | `Tripwires`, `ToolGate` hook in `Agent::execute_tool_calls`, rules from `<home>/rules` and maze `rule:` rows | `docker run` vetoed once and retried with podman; `once` honored; zero tokens added when nothing matches (prompt bytes identical) |
@@ -392,14 +392,14 @@ All read-only; no engine or harness was started for any of it.
 
 | Phase | State | Where |
 |---|---|---|
-| P0 home | done | `core/home*`, `dd_tui --init/--home`, `dd import-daedalus`; HOME-clean verified end to end with the real binary |
-| P1 catalogue + ranking | done | `know/{types,text,bm25,catalogue,skills,wiring}`, `dd find/skills check/replay` |
-| P2 router | done | `know/{router,working_set,deliver,prompt,resolver,memory_catalogue,tool_catalogue,policy}`, engine and `dd_tui` wired, `SkillIndex` removed |
+| P0 home | done | `core/home*`, `ariadne --init/--home`, `ariadne-skills import-daedalus`; HOME-clean verified end to end with the real binary |
+| P1 catalogue + ranking | done | `know/{types,text,bm25,catalogue,skills,wiring}`, `ariadne-skills find/skills check/replay` |
+| P2 router | done | `know/{router,working_set,deliver,prompt,resolver,memory_catalogue,tool_catalogue,policy}`, engine and `ariadne` wired, `SkillIndex` removed |
 | P3 mid-turn | done | `know/{signal,trigger}`, `Item::note`, `intent` on the local tools |
 | P4 tripwires | done | `know/tripwire`, `agent::ToolGate`, starter rules via `--init --rules` |
 | P5 learn | not started | needs a different architecture |
 
-**Measured acceptance (real prompts, real catalogue, `dd replay`).** The P1 target in section 12 (recall >= 85% at <= 10%
+**Measured acceptance (real prompts, real catalogue, `ariadne-skills replay`).** The P1 target in section 12 (recall >= 85% at <= 10%
 false offers) was a guess before there was data, and the data does not support it for a lexical leg on terse, project-specific
 prompts. 77 real prompts (33 with a fitting skill, labeled by me) against the live 568-skill catalogue:
 
@@ -448,7 +448,7 @@ that survived the first audit are gone, each for a different reason: the retry j
 (`src/agent/retry.cpp:17`) because the tick was the only value the counter ever held, so there was no invariant a lock
 could protect; the prompt-cache registry is `thread_local` (`src/agent/prompt_cache_boundary.cpp:20`) because a prefix is
 registered and matched on the same thread, so the state never crosses a thread; and pairing takes the kernel's file lock
-for its whole read-modify-write (`include/dd/gateway/pairing.hpp:55`) because a userspace mutex cannot cover a second dd
+for its whole read-modify-write (`include/dd/gateway/pairing.hpp:55`) because a userspace mutex cannot cover a second ariadne
 on the same home. Every `std::deque` left in a header names the one thread that owns it; the rest are hand-offs and
 arrived through a ring.
 
@@ -486,7 +486,7 @@ published into a slot the scan already walked belongs to the *next* claim, at a 
 order across two racing claimers is measured rather than promised: 2 inversions over 4,905 one-at-a-time claims against
 a writer publishing 20,000, and none inside any single drain. The turn boundary drains once per round, so it never reads
 that limit. A full ring refuses the payload instead of evicting one, and the caller's backpressure decides what that
-means: `dd_tui` holds overflow in a list the key handler owns alone and, once anything is held, holds everything typed
+means: `ariadne` holds overflow in a list the key handler owns alone and, once anything is held, holds everything typed
 after it too — a held prompt waits for the turn rather than entering it behind prompts typed later. A refusal is
 counted on the ring (`refused()`) and every site reads it: `dropped_events()` and `dropped_live_bytes()` on the scene,
 `opened_lost` on the router (a refused open still goes to the sink), `unledgered` on the soak, `dropped()` on the learn
@@ -569,7 +569,7 @@ beats a vector loop that wins nothing. The directory walk is syscalls in a gener
   claimer with nothing lost and nothing claimed twice, two claimers taking each payload exactly once at 8,000, and what a
   race leaves behind draining in publish order) reports nothing under ThreadSanitizer, which `make tsan` builds.
   Steering end to end: `test_steering_in_loop` (two prompts typed mid-turn enter the engine at the round boundary and the
-  model sees them) and `build/dd` in a tmux pane, where a prompt typed while an answer streams prints
+  model sees them) and `build/ariadne-skills` in a tmux pane, where a prompt typed while an answer streams prints
   `◈ steered · 1 prompt entered this turn` and the answer repeats it.
 
 **Not run.** The AVX-512 kernels (`classify_avx512`, `classify32_avx512`, and the ones in `ui_simd`) are written and compile, and

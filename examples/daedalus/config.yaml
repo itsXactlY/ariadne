@@ -1,14 +1,14 @@
-# config.yaml — all dd_tui / dd_agent need. It lives BESIDE the binary:
+# config.yaml — all ariadne / ariadne-agent need. It lives BESIDE the binary:
 #
-#   dd_tui --init                    # writes this file and the folders next to the binary
-#   dd_tui --init --from FILE        # ... starting from an existing config
-#   dd_tui --home DIR                # run from another folder (config.yaml, skills/, rules/, state/ ...)
+#   ariadne --init                    # writes this file and the folders next to the binary
+#   ariadne --init --from FILE        # ... starting from an existing config
+#   ariadne --home DIR                # run from another folder (config.yaml, skills/, rules/, state/ ...)
 #
 # Nothing is read from ~/.daedalus (the Python Daedalus's home). `dd import-daedalus`
 # copies skills and skins over once, on request.
 #
 # Env overrides: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.
-# logs/ is optional: dd_tui writes stderr there while the screen is up.
+# logs/ is optional: ariadne writes stderr there while the screen is up.
 # The values below are the reference box's (daedalus doctor on :8080, the
 # mazemaker pod on :8765); the comments say what to change on another one.
 

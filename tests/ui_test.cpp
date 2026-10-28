@@ -283,7 +283,7 @@ int main() {
         info.max_turns = 10;
         s.set_info(info);
         s.present(120, 30, true);
-        chk(s.row_text(0).rfind("╭─┤ ⟁ DAEDALUS ├┤ c++ ├", 0) == 0, "transcript title");
+        chk(s.row_text(0).rfind("╭─┤ ⟁ ARIADNE ├┤ c++ ├", 0) == 0, "transcript title");
         chk(s.row_text(0).find("session") != std::string::npos, "sidebar at 120 cols");
         chk(s.row_text(26).rfind("╭─┤ you ├", 0) == 0 && s.row_text(28).rfind("╰", 0) == 0, "prompt box rows");
         chk(s.row_text(29).find("ready") != std::string::npos, "status row");
@@ -604,7 +604,7 @@ int main() {
             chk(out[0].find("◈ thought") != std::string::npos && out[0].find("40 tok") != std::string::npos, "reason header");
             chk(out[R].find("step 39") != std::string::npos && out[1].find("step 34") != std::string::npos, "tail = newest lines");
             chk(out[R + 2].find("↑ 34 lines") != std::string::npos, "hidden-lines marker under the border");
-            chk(out[R + 3].find("DAEDALUS") != std::string::npos && out[R + 3].find("1.2s") != std::string::npos &&
+            chk(out[R + 3].find("ARIADNE") != std::string::npos && out[R + 3].find("1.2s") != std::string::npos &&
                     out[R + 4].find("The answer.") != std::string::npos, "streamed answer card");
         }
     }

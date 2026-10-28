@@ -1,9 +1,9 @@
 BUILD ?= build
-.DEFAULT_GOAL := $(BUILD)/dd_tui
+.DEFAULT_GOAL := $(BUILD)/ariadne
 .PHONY: all test clean install install-all doc-audit tsan
-all: $(BUILD)/dd_tui
-# The install is the folder the operator runs dd from, the one that owns
-# config.yaml; build/ is make's output and never a home (dd refuses it).
+all: $(BUILD)/ariadne
+# The install is the folder the operator runs ariadne from, the one that owns
+# config.yaml; build/ is make's output and never a home (ariadne refuses it).
 INSTALL_DIR ?= $(HOME)/projects/daedalus
 
 # Single-invocation, whole-target builds: intentionally no per-TU object files.
@@ -16,7 +16,7 @@ MOLD_FLAG := $(shell command -v mold >/dev/null 2>&1 && printf '%s' '-fuse-ld=mo
 CXXFLAGS += $(MOLD_FLAG)
 
 # Every executable rule writes into build/. Create it while parsing the Makefile,
-# so even direct goals such as `make $(BUILD)/dd_tui` work from a clean checkout.
+# so even direct goals such as `make $(BUILD)/ariadne` work from a clean checkout.
 $(shell mkdir -p $(BUILD))
 CORE := src/core/path.cpp src/core/yaml.cpp src/core/json.cpp src/core/message.cpp
 SKILLS := src/skills/scanner.cpp src/skills/registry.cpp
@@ -125,31 +125,31 @@ $(BUILD)/dd_know_router_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/
 $(BUILD)/dd_know_rules_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT) $(wildcard include/dd/know/*.hpp) tests/know_rules_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT)) tests/know_rules_test.cpp -pthread -lcurl -o $(BUILD)/dd_know_rules_tests
 
-$(BUILD)/dd: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/dd
+$(BUILD)/ariadne-skills: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/ariadne-skills
 
-$(BUILD)/dd_agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
-	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/dd_agent
+$(BUILD)/ariadne-agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/ariadne-agent
 
 # The sidegag: built first and built alone — one translation unit, bare $(CXX), no other
 # target in the tree — then it compiles the harness and installs it. `make install`
 # proves the toolchain by exercising it, not by asserting it. No suite gate and no probes:
 # a missing libcurl or OpenMP is `make`'s own failure, in the language that matters.
-$(BUILD)/dd_install: installer/dd_install.cpp
+$(BUILD)/ariadne-install: installer/ariadne_install.cpp
 	@$(CXX) $(CXXFLAGS) -Wshadow -o $@ $<
 
-# The harness only: dd_tui, plus the config its home owns. dd_tui is always the target
-# because it is the only binary that can write dd's reference config, and --init seeds
-# from dd's own copy rather than one an installer invented.
-install: $(BUILD)/dd_install
+# The harness only: ariadne, plus the config its home owns. ariadne is always the target
+# because it is the only binary that can write the reference config, and --init seeds
+# from its own copy rather than one an installer invented.
+install: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR)
 
-# The same sidegag, wider: also dd_agent (the running agent) and dd (the skill catalogue).
-install-all: $(BUILD)/dd_install
+# The same sidegag, wider: also ariadne-agent (the running agent) and ariadne-skills (the skill catalogue).
+install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/dd_tui: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/dd_tui
+$(BUILD)/ariadne: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/ariadne
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
@@ -331,14 +331,14 @@ $(BUILD)/dd_retry_tests: $(RU) tests/agent_retry_utils_test.cpp
 $(BUILD)/dd_wire_retry_tests: $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM) include/dd/agent/retry.hpp include/dd/agent/http_llm.hpp tests/agent_wire_retry_test.cpp
 	$(CXX) $(CXXFLAGS) $(sort $(CORE) src/agent/chat_stream.cpp $(RETRY) $(NET) $(HTTPLLM)) tests/agent_wire_retry_test.cpp -pthread -lcurl -o $(BUILD)/dd_wire_retry_tests
 
-# W5's proof is the bytes dd_tui sends, so it boots dd_tui against a fake MCP server
+# W5's proof is the bytes ariadne sends, so it boots ariadne against a fake MCP server
 # and a fake endpoint on one loopback box. The binary itself is the thing under test.
-$(BUILD)/dd_mcp_prose_mask_tests: include/dd/agent/redact.hpp tests/mcp_prose_mask_test.cpp tests/fake_mcp_box.hpp $(BUILD)/dd_tui
+$(BUILD)/dd_mcp_prose_mask_tests: include/dd/agent/redact.hpp tests/mcp_prose_mask_test.cpp tests/fake_mcp_box.hpp $(BUILD)/ariadne
 	$(CXX) $(CXXFLAGS) tests/mcp_prose_mask_test.cpp -pthread -o $(BUILD)/dd_mcp_prose_mask_tests
 
 # W6's boot proof: three boots of the same home against a server whose tools/list costs
 # real milliseconds. It runs the shipped binary, so it depends on it.
-$(BUILD)/dd_mcp_cache_boot_tests: tests/mcp_cache_boot_test.cpp tests/fake_mcp_box.hpp $(BUILD)/dd_tui
+$(BUILD)/dd_mcp_cache_boot_tests: tests/mcp_cache_boot_test.cpp tests/fake_mcp_box.hpp $(BUILD)/ariadne
 	$(CXX) $(CXXFLAGS) tests/mcp_cache_boot_test.cpp -pthread -o $(BUILD)/dd_mcp_cache_boot_tests
 
 

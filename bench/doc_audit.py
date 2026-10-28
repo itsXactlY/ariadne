@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Doc honesty, measured. Two checks over the tree, run after every wave.
 
-1. WIRING. Expand the Makefile's product recipes (dd, dd_agent, dd_tui), take the
+1. WIRING. Expand the Makefile's product recipes (ariadne, ariadne-agent, ariadne-skills), take the
    transitive `#include "..."` closure from those TUs, and derive every `src/*.cpp`
    linked into no product binary and every `include/dd/**/*.hpp` reached by none.
    Compare that against what README lists under "Ported but not wired": a module the
@@ -64,8 +64,8 @@ def rel(p):
 def product_tus(vars_):
     text = pathlib.Path(ROOT / "Makefile").read_text()
     out = {}
-    for m in re.finditer(r"\$\(CXX\)(.*?)-o\s+\$?\(?(?:BUILD|OUT)\)?/(\w+)", text):
-        if m.group(2) not in ("dd", "dd_agent", "dd_tui"):
+    for m in re.finditer(r"\$\(CXX\)(.*?)-o\s+\$?\(?(?:BUILD|OUT)\)?/([\w-]+)", text):
+        if m.group(2) not in ("ariadne", "ariadne-agent", "ariadne-skills"):
             continue
         out.setdefault(m.group(2), set()).update(rel(w) for w in expand(m.group(1), vars_).split() if w.endswith(".cpp"))
     return out

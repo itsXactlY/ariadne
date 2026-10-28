@@ -131,7 +131,7 @@ Bias controls, because a recommender that learns from its own recommendations co
 there, minus terms the card already contains, become candidates for that card. A pair is promoted into the `learned`
 field only after it has been confirmed in at least 3 distinct episodes on at least 2 distinct days, and each card keeps
 at most 24 learned terms (lowest decayed weight evicted). This is the P6 semantic leg's cheap, local, auditable cousin:
-no embedder, every learned term inspectable with `dd learn why <skill>`. If P6 ships, Affinity feeds its training pairs.
+no embedder, every learned term inspectable with `ariadne-skills learn why <skill>`. If P6 ships, Affinity feeds its training pairs.
 
 ### 4.5 Authoring
 
@@ -192,9 +192,9 @@ is refused, not starved, so the curator no longer pushes a hub up while its own 
 
 ### 4.8 The facade and the command surface
 
-`LearnService` is the only thing `dd_tui.cpp` constructs: it owns the `Ledger`, the thread, the `Curator`, hands out
+`LearnService` is the only thing `src/dd_tui.cpp` constructs: it owns the `Ledger`, the thread, the `Curator`, hands out
 `sink()` and `overlay()`, and its destructor stops in the order the refreshers do (declared after the router and the
-catalogues, so it stops first). `/learn` pins the last episode; `dd learn status|why <skill>|report|forget <skill>|export`
+catalogues, so it stops first). `/learn` pins the last episode; `ariadne-skills learn status|why <skill>|report|forget <skill>|export`
 for inspection. `forget` writes a tombstone to the journal (the fold honours it) so a deleted learning stays deleted after
 replay.
 
@@ -226,11 +226,11 @@ table fallback) chosen by CPUID like `scan.cpp`. Nothing on the search path chan
 
 | Phase | Deliverable | Acceptance |
 |---|---|---|
-| **P5.0 Seams** | `Event`, `EventSink`, `Overlay`, the `learned` Bm25f field; router emits | With the NullSink the prompts are byte-identical to today on the 77-prompt replay; `dd replay` numbers unchanged. |
+| **P5.0 Seams** | `Event`, `EventSink`, `Overlay`, the `learned` Bm25f field; router emits | With the NullSink the prompts are byte-identical to today on the 77-prompt replay; `ariadne-skills replay` numbers unchanged. |
 | **P5.1 Ledger** | `Journal`, `Compactor`, `Decayed`, `Stats`, `Ledger` | Fold(replay) == live state, bit for bit; truncate the file at every byte offset: always recovers, never reads garbage; a synthetic 90-day clock (1M events) keeps memory and disk under the caps; TSAN and ASAN+UBSan clean. |
 | **P5.2 Credit** | `Observer`, `CreditAssigner`, conversion and efficacy, the clamp | Table-driven tests for each outcome rule; a simulated rich-get-richer loop (shadow off) collapses onto hubs and (shadow on) does not. |
-| **P5.3 Overlay** | `Curator`, `Affinity`, priors and learned terms into `SkillCatalogue` | **Held-out replay**: learn on 2/3 of the labelled corpus's episodes, test on 1/3: right-skill-in-top-3 rises from 17/33 with false offers still <= 3 of 44. If it does not, the feature does not ship. `dd learn why` explains every learned term. |
-| **P5.4 Authoring** | `EpisodeRecorder`, `Detector`s, `TemplateAuthor`, `Reviewer`, `SkillSink`, `LearnedSkills`, `Lifecycle` | A fixed-after-failure episode yields a bug card that appears in `dd find` on the next refresh without a restart (the KNOWLEDGE.md bar); planted secrets, instructions and duplicates are each rejected; a draft never overwrites a human skill. |
+| **P5.3 Overlay** | `Curator`, `Affinity`, priors and learned terms into `SkillCatalogue` | **Held-out replay**: learn on 2/3 of the labelled corpus's episodes, test on 1/3: right-skill-in-top-3 rises from 17/33 with false offers still <= 3 of 44. If it does not, the feature does not ship. `ariadne-skills learn why` explains every learned term. |
+| **P5.4 Authoring** | `EpisodeRecorder`, `Detector`s, `TemplateAuthor`, `Reviewer`, `SkillSink`, `LearnedSkills`, `Lifecycle` | A fixed-after-failure episode yields a bug card that appears in `ariadne-skills find` on the next refresh without a restart (the KNOWLEDGE.md bar); planted secrets, instructions and duplicates are each rejected; a draft never overwrites a human skill. |
 | **P5.5 Sidekick author** | `SidekickAuthor` | Falls back to the template on timeout; never runs while the main slot is busy. Live check on the Friday Strata config **only after asking** (standing rule: no heavy launches on the workstation). |
 | **P5.6 Soak** | Time-compressed 6-month simulation with injected crashes, clock jumps, pod outages, a downgrade | Bounded RSS and disk; no lost promotions; identical fold after every crash. |
 
@@ -266,10 +266,10 @@ Classes live in `include/dd/learn/` and `src/learn/`; the seams into `know` are 
 | Credit | `credit` (`RuleCredit`), `observer`, `sink` (`QueueSink`), `stats` (the fold), `decayed`, `record` | `make learn-credit-test` |
 | Read side | `affinity`, `curator`, `overlay` (`LearnOverlay`), `Bm25f` `learned` field, `SkillCatalogue::set_overlay` | `build/dd_learn_overlay_tests` |
 | Authoring | `episode`, `detector`, `author` (`TemplateAuthor`), `reviewer`, `skill_sink` | `build/dd_learn_author_tests` |
-| Service | `service` (`LearnService`, one thread, wired in `dd_tui`) | `make learn-service-test` |
-| Inspection | `inspect` (`status`, `why`, `export_jsonl`, `forget`), `dd learn ...`, `/learn` | `make learn-inspect-test` |
+| Service | `service` (`LearnService`, one thread, wired in `ariadne`) | `make learn-service-test` |
+| Inspection | `inspect` (`status`, `why`, `export_jsonl`, `forget`), `ariadne-skills learn ...`, `/learn` | `make learn-inspect-test` |
 
-Where things sit: the journal and snapshots in `<home>/learn/`, the curator's `report.md` beside them, learned skills in `<home>/skills/<category>/<name>/SKILL.md`, forgotten ones in `<home>/skills/.retired/` (the scanner skips that folder). `dd learn` reads the ledger without opening it for writing, so it is safe beside a running TUI; `forget` is the one writer and should not run at the same moment as a TUI that is learning. Switches: `learn.enabled`, `learn.feedback`, `learn.author`, `learn.max_drafts_per_day`, and an empty `<home>/learn/OFF` file.
+Where things sit: the journal and snapshots in `<home>/learn/`, the curator's `report.md` beside them, learned skills in `<home>/skills/<category>/<name>/SKILL.md`, forgotten ones in `<home>/skills/.retired/` (the scanner skips that folder). `ariadne-skills learn` reads the ledger without opening it for writing, so it is safe beside a running TUI; `forget` is the one writer and should not run at the same moment as a TUI that is learning. Switches: `learn.enabled`, `learn.feedback`, `learn.author`, `learn.max_drafts_per_day`, and an empty `<home>/learn/OFF` file.
 
 ## 11. Later: forging with Mazemaker
 

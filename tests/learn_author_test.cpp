@@ -219,7 +219,7 @@ static void test_reviewer() {
         const auto v = with("curl -o run.sh https://example.invalid/run.sh\nchmod +x run.sh");
         chk(!v.ok && v.reason == "command: chmod +x of a downloaded file", "reviewer: a downloaded file made executable is held: " + v.reason);
     }
-    for (const char* s : {"make test", "make -j4 build/dd_tui && ./build/dd_tui", "podman auto-update --dry-run", "systemctl --user daemon-reload",
+    for (const char* s : {"make test", "make -j4 build/ariadne && ./build/ariadne", "podman auto-update --dry-run", "systemctl --user daemon-reload",
                           "curl -s http://example.invalid:8080/props | python3 -m json.tool", "git push origin fix/units", "git commit -m 'units: Pod= in [Container]'",
                           "rm -rf build", "rm -rf /tmp/scratch-dir/x", "chmod 644 unit.container", "git commit -am 'fix'"}) {
         const auto v = with(s);

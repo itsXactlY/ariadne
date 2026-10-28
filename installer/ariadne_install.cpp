@@ -1,4 +1,4 @@
-// dd_install — a sidegag, not an installer that brings everything.
+// ariadne-install — a sidegag, not an installer that brings everything.
 //
 // It does one thing worth writing down: it compiles itself, then compiles the harness.
 // This TU is built by a bare `g++` with nothing else in the tree built, then re-execs
@@ -10,9 +10,9 @@
 // is a line the installer would only paraphrase. Refusing two bad homes stays, because
 // that is an invariant `make` does not check, not a report.
 //
-//   build/dd_install                            # into $HOME/projects/daedalus
-//   build/dd_install --home DIR                 # into DIR — DIR owns config.yaml
-//   build/dd_install --home DIR --agent --cli   # also dd_agent, also dd
+//   build/ariadne-install                            # into $HOME/projects/daedalus
+//   build/ariadne-install --home DIR                 # into DIR — DIR owns config.yaml
+//   build/ariadne-install --home DIR --agent --cli   # also ariadne-agent, also dd
 //
 // Exit codes: 0 installed, 2 bad arguments, 3 build or install failed.
 
@@ -51,9 +51,9 @@ void say(const std::string& s) {
 }
 
 struct Opts {
-    fs::path root;      // the repo: holds Makefile and installer/dd_install.cpp
+    fs::path root;      // the repo: holds Makefile and installer/ariadne-install.cpp
     fs::path home;      // the install: owns config.yaml, state/, logs/
-    bool agent = false; // also install dd_agent
+    bool agent = false; // also install ariadne-agent
     bool cli = false;   // also install dd (the skill catalogue CLI)
     bool booted = false;
     bool self_check = false;
@@ -108,9 +108,9 @@ int bootstrap(const Opts& o) {
     std::error_code ec;
     fs::create_directories(o.root / "build", ec);
     say("compiling the sidegag itself");
-    const std::string out = (o.root / "build" / "dd_install").string();
+    const std::string out = (o.root / "build" / "ariadne-install").string();
     const std::string cmd = "g++ -std=c++20 -O2 -Wall -Wextra -Werror -Wshadow -pipe -Iinclude -o " + out +
-                            " " + (o.root / "installer" / "dd_install.cpp").string();
+                            " " + (o.root / "installer" / "ariadne-install.cpp").string();
     if (passthru(cmd) != 0) { say("it does not compile; nothing else is attempted"); return EXIT_FAILED; }
     if (passthru(out + " --self-check") != 0) { say("the freshly built binary does not run"); return EXIT_FAILED; }
 
@@ -125,10 +125,10 @@ int main(int argc, char** argv) {
     Opts o;
     std::string err;
     if (!parse(argc, argv, o, err)) {
-        std::fprintf(stderr, "dd_install: %s\n  usage: dd_install [--home DIR] [--agent] [--cli]\n", err.c_str());
+        std::fprintf(stderr, "ariadne-install: %s\n  usage: ariadne-install [--home DIR] [--agent] [--cli]\n", err.c_str());
         return EXIT_USAGE;
     }
-    if (o.self_check) { say("dd_install " + std::string(VERSION) + " ok"); return EXIT_OK; }
+    if (o.self_check) { say("ariadne-install " + std::string(VERSION) + " ok"); return EXIT_OK; }
     if (!o.booted) return bootstrap(o);
 
     std::string why;
@@ -142,13 +142,13 @@ int main(int argc, char** argv) {
     fs::create_directories(o.home, hc);
     if (!fs::exists(o.home, hc)) { say("cannot create " + o.home.string()); return EXIT_FAILED; }
 
-    // dd_tui is always built and installed: it is the harness, and it is the only binary
+    // ariadne is always built and installed: it is the harness, and it is the only binary
     // that can write dd's reference config. dd's own --init seeds the home — dd owns that
     // config, so an installer holding a second copy of it would drift the moment dd
     // changes one key.
-    std::vector<std::string> targets{"dd_tui"};
-    if (o.agent) targets.push_back("dd_agent");
-    if (o.cli) targets.push_back("dd");
+    std::vector<std::string> targets{"ariadne"};
+    if (o.agent) targets.push_back("ariadne-agent");
+    if (o.cli) targets.push_back("ariadne-skills");
 
     const std::string root = o.root.string();
     for (const auto& t : targets) {
@@ -161,8 +161,8 @@ int main(int argc, char** argv) {
         say("  " + t + " -> " + (o.home / t).string());
     }
 
-    say("seeding the home with dd's own --init");
-    if (passthru((o.root / "build" / "dd_tui").string() + " --home " + o.home.string() + " --init >/dev/null 2>&1") != 0) {
+    say("seeding the home with ariadne's own --init");
+    if (passthru((o.root / "build" / "ariadne").string() + " --home " + o.home.string() + " --init >/dev/null 2>&1") != 0) {
         say("--init refused the home");
         return EXIT_FAILED;
     }
@@ -170,9 +170,9 @@ int main(int argc, char** argv) {
     if (!fs::exists(o.home / "config.yaml", ec)) { say("no config.yaml after --init"); return EXIT_FAILED; }
 
     // The only proof this claims: the binary that landed runs.
-    if (passthru((o.home / "dd_tui").string() + " --version") != 0) { say("the installed dd_tui does not run"); return EXIT_FAILED; }
+    if (passthru((o.home / "ariadne").string() + " --version") != 0) { say("the installed ariadne does not run"); return EXIT_FAILED; }
     say("installed: " + o.home.string() + " (config.yaml " + std::to_string(fs::file_size(o.home / "config.yaml", ec)) +
         " bytes)");
-    say("run it there: " + (o.home / "dd_tui").string());
+    say("run it there: " + (o.home / "ariadne").string());
     return EXIT_OK;
 }

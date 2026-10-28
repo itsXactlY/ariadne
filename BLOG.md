@@ -1,4 +1,4 @@
-# dd_tui — a harness in pure C++ that got tired of arguing
+# ariadne — a harness in pure C++ that got tired of arguing
 
 **TL;DR:** the agent harness lives in `src/agent/agent.cpp`. Every feature anyone
 thought was missing from it ended up as a paragraph of prose about how it works
@@ -33,12 +33,12 @@ without disturbing it.
 
 ## Prompt 2 — "make it a real harness, not a toy."
 
-So it became a harness. `dd_tui` drives the **same** `Agent::run` loop —
+So it became a harness. `ariadne` drives the **same** `Agent::run` loop —
 one `step_hook` added, no fork. What it wires in is all real, not simulated:
 
 - `read_file` / `write_file` / `list_dir` — real filesystem I/O.
 - `run_terminal` — denylist-based (`sudo`, recursive `rm` on `/`·`~`·`*`,
-  `mkfs`, `dd`, shutdown/reboot, curl-pipe-shell, force-push …). It's a
+  `mkfs`, `ariadne`, shutdown/reboot, curl-pipe-shell, force-push …). It's a
   guard, **not** a jail — the README says so, in bold.
 - **Every enabled MCP tool, discovered live**: reads `mcp_servers.*` from
   config, speaks Streamable-HTTP MCP (JSON-RPC 2.0 over one POST, SSE
@@ -135,17 +135,17 @@ and the MPSC header is deleted. The proof is a grep, not a memory.
   registry is `thread_local`, because a prefix is registered while a prompt is built and
   matched while the next prompt on that same thread is built, so the state never crosses
   a thread; gateway pairing takes the kernel's file lock for its whole read-modify-write,
-  because a userspace mutex cannot cover a second dd on the same home. Every `std::deque`
+  because a userspace mutex cannot cover a second ariadne on the same home. Every `std::deque`
   left in a header names the one thread that owns it.
 - `make tsan` runs the ring, `Scene`, `QueueSink` and `Soaker`: **no race reported**.
   `make test`: **1025 checks, 0 test binaries failed**.
 
 ## Prompt 6 — "compile ur own installer first. use that installer, to compile the rest." … then: "i do NOT want the fat installer, who brings all and everything. just: for this harness. as sidegag."
 
-The old `make install` was two lines: `install -m 0755 build/dd_tui $(INSTALL_DIR)/dd_tui`,
+The old `make install` was two lines: `install -m 0755 build/ariadne $(INSTALL_DIR)/dd_tui`,
 then an `echo` asserting the folder owns the config. A claim, not a proof.
 
-The first version of `installer/dd_install.cpp` proved too much: it probed g++ and the
+The first version of `installer/ariadne_install.cpp` proved too much: it probed g++ and the
 standard by compiling, linked libcurl, counted OpenMP threads, ran `make test`, audited the
 docs, seeded three dogfood skills and smoke-tested three binaries. 446 lines of preflight
 for a harness whose build already reports every one of those facts in the language of the
@@ -153,33 +153,33 @@ failure that matters. A probe that paraphrases `make` in advance is not evidence
 noise with an exit code. So it is now 130 lines, and the order is the only thing kept:
 
 ```
-g++ -std=c++20 -O2 -Wall -Wextra -Werror -Wshadow -pipe -Iinclude -o build/dd_install installer/dd_install.cpp
+g++ -std=c++20 -O2 -Wall -Wextra -Werror -Wshadow -pipe -Iinclude -o build/dd_install installer/ariadne_install.cpp
 build/dd_install --self-check      # the binary that just compiled itself answers
-build/dd_install --booted …        # the same binary builds dd_tui, installs, seeds, verifies
+build/dd_install --booted …        # the same binary builds ariadne, installs, seeds, verifies
 ```
 
 What survives is the bootstrap plus two checks `make` does not make: `build/` `out/` `obj/`
 are make's output and are refused as a home, and `~/.daedalus` belongs to the Python
 harness. Both exit 3 before anything compiles. Nothing else is pre-created — `skills/`
-appears when dd's learn loop writes a learned card, which calls
+appears when ariadne's learn loop writes a learned card, which calls
 `create_directories(target.parent_path())` itself (`src/learn/skill_sink.cpp:112`); an
-installer that pre-creates it is guessing about a decision dd owns.
+installer that pre-creates it is guessing about a decision ariadne owns.
 
 ```
-fresh home            → dd_tui + the embedded reference config.yaml (7412 bytes), exit 0
+fresh home            → ariadne + the embedded reference config.yaml (7412 bytes), exit 0
 live home             → the operator's config.yaml kept, not clobbered (10292 bytes), exit 0
-make install-all      → same sidegag, plus dd_agent + dd, exit 0
+make install-all      → same sidegag, plus ariadne-agent + ariadne, exit 0
 --home build/         → refused before anything compiles, exit 3
 HOME=$(mktemp -d)     → nothing created under HOME, exit 0
 ```
 
-`dd_tui --init` reports which of the two happened — `wrote …` or `kept …` — so the installer
+`ariadne --init` reports which of the two happened — `wrote …` or `kept …` — so the installer
 never has to know. `ensure_home` (`src/core/home.cpp:152`) fills `state/`, `cache/`, `logs/`;
 the installer creates only the folder the binary is copied into.
 
 Three bugs surfaced while verifying, all real:
 
-- `dd_agent` **aborted** on a transport failure. `HttpLLMClient::chat` throws
+- `ariadne-agent` **aborted** on a transport failure. `HttpLLMClient::chat` throws
   `std::runtime_error`, nothing caught it, so a refused endpoint died with `SIGABRT` and the
   caller read `134` — indistinguishable from "the binary is broken". It now prints
   `agent: curl: Could not connect to server` and exits `1`.
@@ -225,14 +225,14 @@ the learn loop and a `run_terminal` that is a guard, not a sandbox.
 src/            port TUs (agent · core · tools · ui · ui_simd)
 include/dd/     headers
 tests/          92 test binaries — `make test`; 4 tsan binaries — `make tsan`
-installer/      dd_install.cpp — the sidegag: compiles itself, then compiles the harness
-build/          dd · dd_agent · dd_tui · dd_install · dd_ui_tests · dd_slot_ring_tsan
+installer/      ariadne-install.cpp — the sidegag: compiles itself, then compiles the harness
+build/          ariadne · ariadne-agent · ariadne · ariadne-install · dd_ui_tests · dd_slot_ring_tsan
 ```
 
 ```sh
-make build/dd_tui
-build/dd_tui                                # interactive REPL
-build/dd_tui -- "list files in /tmp using list_dir"   # single-shot, same cards
+make build/ariadne
+build/ariadne                                # interactive REPL
+build/ariadne -- "list files in /tmp using list_dir"   # single-shot, same cards
 ```
 
 ---

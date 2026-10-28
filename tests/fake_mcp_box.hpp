@@ -257,7 +257,7 @@ inline long run_dd_tui(const std::string& home, const std::string& base, const s
         setenv("DD_NO_SOAK", "1", 1);       // nothing is written to the maze; the cache file is not the maze
         setenv("DD_MAX_TURNS", "1", 1);
         const std::string homearg = "--home";
-        const std::vector<const char*> argv = {"build/dd_tui", homearg.c_str(), home.c_str(), "--", "hi", nullptr};
+        const std::vector<const char*> argv = {"build/ariadne", homearg.c_str(), home.c_str(), "--", "hi", nullptr};
         ::execv(argv[0], const_cast<char* const*>(argv.data()));
         ::_exit(127);
     }

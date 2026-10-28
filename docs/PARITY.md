@@ -16,7 +16,7 @@ on branch `fix/audit-20261024`, not read out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:524`, `src/dd_tui.cpp:787-807`, `src/dd_tui.cpp:1016-1029`, `src/dd_tui.cpp:1335-1341`, `src/dd_agent_main.cpp:197-218` |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt` (never the tape), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:527`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1019-1032`, `src/dd_tui.cpp:1338-1344`, `src/dd_agent_main.cpp:197-218` |
 
 ## What is missing — measured, not assumed
 
@@ -62,7 +62,7 @@ render cannot be read as a whole result. Where the header has no room for the
 number it moves to the wrapped accounting rows instead of being clipped: a
 clipped `✓ done · …` is not a degraded datum, it is a lie with an ellipsis.
 Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
-`DD_VERBOSE=verbose dd_tui` on the same 1,009,800-byte grep.
+`DD_VERBOSE=verbose ariadne` on the same 1,009,800-byte grep.
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
@@ -108,7 +108,7 @@ None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:101`, applied at 
 delegated calls the harness cannot execute: they are recorded, never run.
 
 ### Calibration — closed: the thresholds are measured, and they moved
-`dd replay FILE [--home DIR]` (`src/cli_main.cpp`) now sweeps the offer rule's own levers
+`ariadne-skills replay FILE [--home DIR]` (`src/cli_main.cpp`) now sweeps the offer rule's own levers
 against the catalogue a home actually holds, and reports precision at rank 1 alongside
 offers and misses. Run it against the live catalogue of **502 skills** with a corpus of
 **1333 real operator asks** harvested from Daedalus's own session log (`bench/replay_corpus.py`):
