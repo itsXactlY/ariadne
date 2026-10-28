@@ -768,6 +768,28 @@ int main(int argc, char** argv) {
     if (skill_cfg.enabled) skill_cat = dd::know::make_skill_catalogue(skill_cfg, maze);
     if (maze->configured()) memory_cat = std::make_shared<dd::know::MemoryCatalogue>(maze, home.cache() / "memory-cards.jsonl", skill_cfg.page_bytes);
     auto tool_cat = std::make_shared<dd::know::ToolCatalogue>(deck);
+    // The languages a fence in the transcript may name come off disk, from the same roots the
+    // skill tree is scanned: a language the operator or the model writes into a skill file
+    // colours the next run, and a tag no file defines colours nothing. They are measured against
+    // the skin before anything is drawn, so a hue this terminal cannot show never reaches a cell.
+    std::vector<std::filesystem::path> gram_roots;
+    {
+        // Defaults ship as data beside the binary, never as a table compiled into it. The operator's
+        // tree is scanned after them and `highlight.paths` after that, because the last file to
+        // name a language wins: a highlight.yaml under ~/.daedalus/skills corrects a shipped
+        // language instead of colliding with it.
+        std::error_code ec;
+        const std::filesystem::path exe = std::filesystem::canonical("/proc/self/exe", ec);
+        if (!ec && !exe.empty()) {
+            gram_roots.push_back(exe.parent_path() / "skills");
+            gram_roots.push_back(exe.parent_path().parent_path() / "skills");
+        }
+        for (const auto& r : skill_cfg.roots) gram_roots.push_back(r);
+        if (const Json* extra = cfg.get_list("highlight.paths"))
+            for (const auto& d : extra->arr)
+                if (d && d->type == Json::Str && !d->str.empty()) gram_roots.push_back(dd::know::expand_home(d->str));
+    }
+    scene.set_grammars(dd::ui::GrammarSet::load(gram_roots));
     dd::know::Router router({skill_cat, memory_cat, tool_cat}, dd::know::Policy::from(cfg), maze);
     dd::know::Resolver resolver(router);
     g_resolver = &resolver;

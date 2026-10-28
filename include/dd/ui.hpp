@@ -21,6 +21,7 @@
 // counted, never dropped quietly: dropped_events()/dropped_live_bytes().
 
 #include <array>
+#include <filesystem>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -110,6 +111,10 @@ private:
 
 using core::SlotRing;
 
+// A code token's kind. The name is a colouring question, not a parse: the harness never decides
+// what a word means, it asks the language's file which kind that word is (see Grammar).
+enum class CodeTok { Keyword, Type, Builtin, Func, String, Number, Comment };
+
 struct Theme {
     uint32_t border = rgb(0xB026FF), title = rgb(0xF000FF), accent = rgb(0xDA70D6),
              dim = rgb(0x7200A8), text = rgb(0xF2E9FF), hot = rgb(0xFF4DFF),
@@ -126,6 +131,19 @@ struct Theme {
              diff_add = rgb(0x45F5B0), diff_del = rgb(0xFF5C7E), diff_hunk = rgb(0xFFE66D),
              diff_add_bg = rgb(0x123024), diff_del_bg = rgb(0x2E1022),
              diff_hunk_bg = rgb(0x241C10);
+    // Which code token kinds the skin set explicitly (colors.code_*). A skin's own line outranks
+    // a language file — the skin is the operator's claim about colour, the file is a claim about
+    // structure — and a struct default outranks neither. The values live in the theme's code_*
+    // fields, moved only if this screen cannot show them.
+    std::vector<CodeTok> skin_codes;
+    bool skin_set(CodeTok tok) const;
+    // The palette's own hue for a token kind -- the fallback a grammar file or an achromatic skin
+    // claim drops back to when this terminal cannot show what was declared. Builtin shares the type
+    // hue, exactly as paint_row passes it as that kind's default.
+    uint32_t code_hue(CodeTok tok) const;
+    // How many hues the palette had to move at load because this skin made them unreadable —
+    // white on white is a colour choice, and an unreadable one is not a fact worth painting.
+    int palette_fixed = 0;
     std::vector<std::pair<std::string, std::string>> wings = {
         {"⟪◉", "◉⟫"}, {"⟪◈", "◈⟫"}, {"⟪⬡", "⬡⟫"}, {"⟪◌", "◌⟫"}, {"⟪⦿", "⦿⟫"}};
     std::vector<std::string> verbs = {"weaving synapses", "firing neurons", "mapping the maze",
@@ -137,13 +155,92 @@ struct Theme {
     // Built-in neural palette overlaid by the skin file; a missing or
     // unreadable file leaves the defaults.
     static Theme load(const std::string& skin_yaml);
+    // The contrast pass, separate from parsing: a palette is measured whether it came from a skin
+    // file or from the struct's own defaults, because the defaults are colours too and a shipped
+    // hue this screen cannot show is the same defect as a skin that asks for one. Idempotent —
+    // a palette already clear moves nothing and reports 0 fixed.
+    void reconcile();
+
+    // WCAG relative luminance and contrast ratio, over the theme's own 0xRRGGBB-tagged colours.
+    static double luminance(uint32_t c);
+    static double contrast(uint32_t a, uint32_t b);
+
+    // Push a hue away from the body text until it is distinguishable from it, keeping the hue.
+    // The terminal's background is not the theme's property, so the skin's own text colour is
+    // the claim about what is readable there — and a token that cannot be read is not painted.
+    uint32_t readable(uint32_t fg) const;
+};
+
+// A language's colouring rules, read off disk as data. The harness ships no language table:
+// which word is a keyword is a fact about the language, and a fact the operator and the model
+// can edit in the skill file without a rebuild.
+struct Grammar {
+    std::string name;
+    std::vector<std::string> aliases;                       // py -> python, c++ -> cpp
+    std::vector<std::string> keywords, types, builtins;     // sorted and deduped at load
+    std::vector<std::string> line_comment;                  // "//", "#", "--"
+    std::vector<std::pair<std::string, std::string>> block_comment;   // /* */ pairs
+    std::vector<std::string> preproc;                       // "#": a word after it reads as a keyword
+    std::vector<std::string> quotes;                        // "\"", "'" — one line only
+    bool numbers = true;
+    bool keys_are_types = false;   // json/toml/yaml: a quoted word before ':' is a key
+    bool capital_is_type = true;   // a Capitalized word reads as a type; false where that lies (js, python)
+    // The body this language describes is a patch: +/- are additions and deletions, @@ is a hunk.
+    // A fence that names it colours by those rules; every other fence leaves a '-' as punctuation,
+    // because a minus inside python is a subtraction. Declared in the grammar file, never here.
+    bool diff_rules = false;
+    std::vector<std::pair<CodeTok, uint32_t>> colors;
+    uint32_t color(CodeTok t, uint32_t fallback) const;
+};
+
+// A fence with no language tag, and a body that is not a fence at all: strings, numbers and
+// comments are facts in every language. No keyword is claimed for any of them.
+const Grammar& generic_grammar();
+
+// Which hue a token kind gets: the skin's own line first, then the language file, then the
+// palette default. kNone from a file means it pinned nothing.
+uint32_t code_color(const Theme& th, const Grammar& g, CodeTok t, uint32_t def);
+
+// The languages a fence may name. Loaded once at boot from every highlight.yaml under the skill
+// roots, so a language the model adds with edit_file colours the next run's transcript.
+class GrammarSet {
+public:
+    void add(Grammar g);
+    const Grammar* find(const std::string& lang) const;   // normalized; nullptr on no match
+    size_t languages() const { return langs_.size(); }
+    std::vector<std::string> names() const;
+    const std::vector<std::string>& sources() const { return sources_; }
+    // How many of this set's hues the contrast pass moved against the skin's ground. Reported on
+    // the status row, not swallowed: a palette that had to move is a fact the operator is owed.
+    int moved_hues() const { return fixed_; }
+    static GrammarSet from_yaml(const std::string& text, const std::string& origin);
+    static GrammarSet load(const std::vector<std::filesystem::path>& roots);  // walks for highlight.yaml
+    // Move a hue no terminal can show on this skin's ground. Counted, because a palette that had
+    // to move is a fact worth saying rather than a bug worth hiding.
+    void reconcile(const Theme& th);
+private:
+    std::vector<Grammar> langs_;
+    // How many hues the contrast pass moved across all the loaded grammars — the same honesty
+    // rule the theme's palette follows, counted separately because a skin and a grammar are two
+    // different authors of the same screen.
+    int fixed_ = 0;
+    std::vector<std::string> sources_;
 };
 
 // A body's colouring state, carried across the rows of one card. A fence toggles on a ```
 // row; a diff body colours +/- rows instead of leaving them the body's grey. Both are facts
 // about the body, not guesses about the row: a '-' that opens a prose bullet is a bullet, and
 // calling it a deletion is the lie this state machine exists to refuse.
-struct CodeCtx { bool diff_body = false; bool fence = false; };
+struct CodeCtx {
+    bool diff_body = false;
+    bool fence = false;
+    // Rows an open hunk header still claims. `@@ -a,b +c,d @@` promises at most b + c rows
+    // (a context line is counted on both sides), so a header is a contract on the rows after it,
+    // not evidence about the whole body: a '-' past the contract is nobody's deletion.
+    int hunk_rows = 0;
+    const GrammarSet* set = nullptr;   // the languages a fence tag can name
+    const Grammar* lang = nullptr;     // the language the open fence declared
+};
 struct Span { std::string text; Style st; };
 
 // One row -> styled runs. The runs concatenate back to the row exactly (tests hold that), so
@@ -223,6 +320,7 @@ struct PlanView {
 struct Info {
     std::string model, endpoint, effort = "default";
     int tools = 0, max_turns = 0;
+    int langs = 0;   // languages the transcript's fences can name, from the skill tree
     long n_ctx = 0;
     std::vector<std::string> sources;  // "mazemaker 34", "local 4"
 };
@@ -230,6 +328,10 @@ struct Info {
 class Scene {
 public:
     explicit Scene(Theme th);
+
+    // The languages the transcript's fences may name; loaded from the skill tree at boot.
+    void set_grammars(GrammarSet g);
+    const GrammarSet& grammars() const { return grammars_; }
 
     // ---- feed side: posts an event, any thread ----
     void set_info(const Info& info);
@@ -314,6 +416,9 @@ private:
 
     // ---- feed side: any thread ----
     const Theme th_;
+    // The languages this screen's fences may name. Empty until boot loads them, which is why the
+    // status row says so out loud rather than painting an untagged fence as some language.
+    GrammarSet grammars_;
 
     // A lifecycle event, in a fixed slot. kEventSlots is sized for a turn's worth of tool
     // cards and notes with room to spare; a full ring refuses and counts.

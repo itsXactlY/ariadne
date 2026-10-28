@@ -8,6 +8,8 @@
 #endif
 
 #include <atomic>
+#include <algorithm>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -271,6 +273,23 @@ int main() {
         chk(t.border == rgb(0x123456) && t.status_bg == rgb(0x010203) && t.verbs.size() == 2 && t.prompt_symbol == "> ",
             "theme from skin");
         chk(Theme::load("build/no-such-skin.yaml").border == Theme{}.border, "theme defaults");
+        // The shipped palette is a palette too: nobody typed it, but it paints this screen. Its
+        // separator hue #7200A8 on the shipped bar #10051C measures 2.15:1 -- a glyph nobody can
+        // read is the same defect a skin would have been fixed for, so the default path measures
+        // itself against its own ground instead of being exempt from the pass.
+        const Theme d = Theme::load("build/no-such-skin.yaml");
+        chk(Theme::contrast(d.dim, d.status_bg) >= 3.0, "the default palette's separator glyph clears the floor");
+        chk(Theme::contrast(d.text, d.status_bg) >= 3.0 && Theme::contrast(d.muted, d.status_bg) >= 3.0,
+            "the default palette's body hues clear the floor");
+        chk(Theme::contrast(d.ok, d.status_bg) >= 3.0, "the status dot is legible on the bar it sits on");
+        chk(d.border == Theme{}.border && d.session_border == Theme{}.session_border &&
+            d.response == Theme{}.response && d.input_rule == Theme{}.input_rule,
+            "a rule keeps the skin's quiet line: the floor is for text, not for borders");
+        chk(d.palette_fixed >= 1, "the shipped palette had hues to move, and says so");
+        Theme twice = d;
+        twice.reconcile();
+        chk(twice.palette_fixed == d.palette_fixed && twice.dim == d.dim && twice.text == d.text,
+            "reconcile is idempotent: a palette already clear moves nothing");
     }
 
     // ---- layout ----
@@ -907,7 +926,53 @@ int main() {
             bullet[0].st == Style{th.text}, "a prose bullet is not coloured as a deletion");
 
         // A real diff body does colour: the marker first, then the row's own code.
-        chk(looks_like_diff("--- a/src/ui.cpp\n+++ b/src/ui.cpp\n@@ -1,3 +1,4 @@"), "a diff body is recognised");
+        chk(looks_like_diff("--- a/src/ui.cpp\\n+++ b/src/ui.cpp\\n@@ -1,3 +1,4 @@"), "a diff body is recognised");
+        // Evidence inside a fence belongs to that fence. A message whose ```diff block carries a
+        // hunk header must still read its prose after the block as prose — otherwise the fence
+        // paints the whole message, which is the lie this heuristic exists to refuse. A patch
+        // pasted with no fence at all keeps colouring, because there nothing claimed the rows.
+        const std::string fenced_mixed =
+            "```diff\\n@@ -1,3 +1,4 @@ reconcile\\n+added line\\n```\\n- a prose dash\\n+ a prose plus\\n";
+        chk(!looks_like_diff(fenced_mixed), "a hunk header inside a fence is not body-wide evidence");
+        CodeCtx fm;
+        fm.diff_body = looks_like_diff(fenced_mixed);
+        const auto dash = highlight_row("- a prose dash is not a deletion", th, fm);
+        chk(dash.size() == 1 && dash[0].st == Style{th.text}, "prose after a closed fence stays prose");
+        chk(looks_like_diff("--- a/src/ui.cpp\\n+++ b/src/ui.cpp\\n@@ -1,3 +1,4 @@\\n-int x;\\n+int y;"),
+            "an unfenced patch is still recognised");
+        // A hunk header claims a fixed number of rows, and inside that claim a row colours even
+        // when its head is not code — a deleted `old value` is still a deletion. Past the claim
+        // the same marker is prose: the contract is what scopes the colour, not the body.
+        CodeCtx hc;
+        hc.diff_body = true;
+        highlight_row("@@ -1,2 +1,2 @@ context", th, hc);
+        chk(hc.hunk_rows == 4, "a hunk header claims b + c rows");
+        const auto claimed = highlight_row("-old value", th, hc);
+        chk(claimed.size() >= 1 && claimed[0].st.bg == th.diff_del_bg,
+            "a row inside the hunk's claim colours without a code head");
+        chk(hc.hunk_rows == 3, "a claimed row spends one row of the contract");
+        highlight_row(" uncontextual line", th, hc);
+        chk(hc.hunk_rows == 2, "a context row belongs to the hunk and stays plain text");
+        highlight_row("-second value", th, hc);
+        highlight_row("+third value", th, hc);
+        chk(hc.hunk_rows == 0, "the claim is spent");
+        const auto after = highlight_row("- a prose dash after the patch", th, hc);
+        chk(after.size() == 1 && after[0].st == Style{th.text},
+            "prose past the hunk's claim stays prose");
+        CodeCtx bad;
+        bad.diff_body = true;
+        highlight_row("@ -1 +1 @", th, bad);
+        chk(bad.hunk_rows == 0, "a malformed hunk header claims nothing");
+        CodeCtx nf;
+        nf.diff_body = true;
+        highlight_row("@@ -0,0 +1,3 @@ new file", th, nf);
+        chk(nf.hunk_rows == 3, "a new-file hunk claims its added rows and nothing else");
+        CodeCtx huge;
+        huge.diff_body = true;
+        highlight_row("@@ -1,999999 +1,999999 @@ inflated", th, huge);
+        chk(huge.hunk_rows <= 8192, "an inflated claim is capped, not trusted");
+        const std::string re_opened = "```diff\\n@@ -1,3 +1,4 @@\\n```\\n```diff\\n+int z = 1;\\n";
+        chk(!looks_like_diff(re_opened), "a re-opened fence still owns its rows");
         CodeCtx d;
         d.diff_body = true;
         const auto add = highlight_row("+int x = 42;", th, d);
@@ -948,6 +1013,316 @@ int main() {
         q.diff_body = true;
         paint_row(narrow, 1, 1, "+long row that does not fit", th, q, Style{th.text}, 10);
         chk(narrow.row_text(1).find("+") == 1, "a clamped row still starts with its marker");
+    }
+
+    // ---- the fence and the patch are one state machine, not two ----
+    {
+        const Theme th;
+        const GrammarSet set = GrammarSet::load({std::filesystem::path("skills")});
+        chk(set.find("diff") != nullptr, "patch rows are a language a file defines");
+
+        // A patch body that carries a fenced block: inside the fence the named language owns the
+        // row, so a python '-' is punctuation and `def` is python's keyword — a diff heuristic
+        // cannot swallow the block it sits in.
+        CodeCtx m;
+        m.set = &set;
+        m.diff_body = true;
+        highlight_row("```python", th, m);
+        chk(m.fence && m.lang && m.lang->name == "python", "a fence opens inside a diff body");
+        const auto minus = highlight_row("- value = 1", th, m);
+        chk(std::all_of(minus.begin(), minus.end(),
+                        [&](const Span& s) { return s.st.bg == kNone; }),
+            "a minus inside another language paints no deletion ground");
+        chk(std::any_of(minus.begin(), minus.end(),
+                        [&](const Span& s) { return s.text == "def" || s.text == "value"; }),
+            "a row inside a fence is split by the fence's language, not read as a patch row");
+        const auto defrow = highlight_row("def reconcile(self, skin):", th, m);
+        chk(std::any_of(defrow.begin(), defrow.end(),
+                        [&](const Span& s) { return s.text == "def" && s.st.fg != th.text; }),
+            "the fenced language's keywords are coloured, not the diff's");
+
+        // A ```diff fence colours patch rows even where the body never looked like a patch: the
+        // fence is the authority, and it says so in the file, not in a table compiled into C++.
+        CodeCtx d;
+        d.set = &set;
+        highlight_row("```diff", th, d);
+        chk(d.fence && d.lang && d.lang->diff_rules, "a patch fence declares itself through the file");
+        const auto add = highlight_row("+int x = 42;", th, d);
+        chk(add.size() >= 1 && add.front().st.fg == th.diff_add && add.front().st.bg == th.diff_add_bg,
+            "a patch fence colours an addition");
+        const auto del = highlight_row("-int x = 41;", th, d);
+        chk(del.size() >= 1 && del.front().st.bg == th.diff_del_bg, "a patch fence colours a deletion");
+        const auto hunk = highlight_row("@@ -1,3 +1,4 @@ reconcile", th, d);
+        chk(hunk.size() == 1 && hunk[0].st.bg == th.diff_hunk_bg, "a patch fence colours a hunk");
+        highlight_row("```", th, d);
+        chk(!d.fence, "the closing fence closes a patch fence");
+
+        // A tagged fence re-opens. A model that forgets to close one cannot hold the block open
+        // and colour every following row as code — the fence's identity must survive the reply.
+        CodeCtx r;
+        r.set = &set;
+        highlight_row("```cpp", th, r);
+        highlight_row("int x = 1;", th, r);
+        highlight_row("```python", th, r);
+        chk(r.fence && r.lang && r.lang->name == "python", "a tagged fence re-opens with its own language");
+        const auto py = highlight_row("def load(path):  # read it", th, r);
+        chk(std::any_of(py.begin(), py.end(),
+                        [&](const Span& s) { return s.text == "def" && s.st.fg != th.text; }),
+            "the reopened fence colours the language it names");
+        std::string back;
+        for (const auto& s : py) back += s.text;
+        chk(back == "def load(path):  # read it", "re-opening still never rewrites the row");
+
+        // paint_row takes the stripe ground from what the row was painted as: an uncoloured row
+        // gets no ground at all, and a coloured marker gets exactly its own hue.
+        Canvas c1(40, 2);
+        CodeCtx p1;
+        p1.set = &set;
+        p1.diff_body = true;
+        highlight_row("```python", th, p1);
+        paint_row(c1, 1, 1, "- value = 1", th, p1, Style{th.text}, 38);
+        chk(c1.row_text(1) == " - value = 1", "a painted minus inside python reads back exactly");
+        chk(c1.at(1, 1).st.bg == kNone, "no ground is painted under an uncoloured marker");
+        Canvas c2(40, 2);
+        CodeCtx p2;
+        p2.set = &set;
+        highlight_row("```diff", th, p2);
+        paint_row(c2, 1, 1, "-int x = 41;", th, p2, Style{th.text}, 38);
+        chk(c2.at(1, 1).st.bg == th.diff_del_bg, "the painted marker carries its own ground");
+    }
+
+    // ---- a heuristic may only fire on a row nobody claimed ----
+    {
+        const Theme th;
+        const GrammarSet set = GrammarSet::load({std::filesystem::path("skills")});
+        CodeCtx c;
+        c.set = &set;
+        chk(!looks_like_diff("```python"), "a fence is not a patch row");
+        chk(!looks_like_diff("- item one"), "a bare minus bullet is not a patch row");
+        chk(!looks_like_diff("+ def load"), "an identifier alone is prose, not a patch row");
+        chk(looks_like_diff("+def load(path):"), "a plus with code at its head is a patch row");
+        chk(looks_like_diff("@@ -12,7 +12,9 @@ void reconcile()"), "a hunk header is a patch row");
+    }
+
+    // ---- code colouring from data: a fence names a language, a file defines it ----
+    {
+        const Theme th;
+        const GrammarSet set = GrammarSet::from_yaml(
+            "language: fizz\nkeywords: [widget]\nline_comment: [\"@\"]\n"
+            "colors: {keyword: \"#00FF00\"}\n", "test");
+        chk(set.find("fizz") != nullptr, "a defined language is found by name");
+        chk(set.find(" FIZZ ") != nullptr, "a fence tag is matched case-insensitively");
+        chk(set.find("fizzbuzz") == nullptr, "a tag no file defines resolves to nothing");
+
+        // Colour may never rewrite what the model wrote: the runs, joined with no separator, are
+        // the row byte for byte — fence row, body row, mid-line comment marker, closing fence.
+        CodeCtx c;
+        c.set = &set;
+        std::vector<Span> all;
+        for (const std::string& row : {std::string("```fizz"), std::string("widget = 3 @ note"),
+                                       std::string("```")}) {
+            const auto spans = highlight_row(row, th, c);
+            std::string back;
+            for (const auto& s : spans) back += s.text;
+            chk(back == row, "spans concatenate back to the row exactly");
+            all.insert(all.end(), spans.begin(), spans.end());
+        }
+        chk(std::any_of(all.begin(), all.end(),
+                        [&](const Span& s) { return s.text == "widget" && s.st.fg != th.text; }),
+            "a keyword a file declares is coloured");
+        chk(std::any_of(all.begin(), all.end(),
+                        [&](const Span& s) {
+                            return s.text.find("@ note") != std::string::npos && s.st.fg != th.text;
+                        }),
+            "a comment marker a file declares is coloured");
+
+        // An unknown tag keeps the shared facts and claims nothing: `widget` is a keyword in no
+        // language the harness knows, so it reads as body text, not as this file's keyword.
+        CodeCtx u;
+        u.set = &set;
+        highlight_row("```fizzbuzz", th, u);
+        const auto unknown = highlight_row("widget = 3", th, u);
+        // Numbers stay coloured under an unknown tag — they are facts in every language. Only the
+        // claim no file made is refused: `widget` reads as body text, not as fizz's keyword.
+        const auto kw = std::find_if(unknown.begin(), unknown.end(),
+                                     [&](const Span& s) { return s.text == "widget"; });
+        chk(kw != unknown.end() && kw->st.fg == th.text, "an unknown tag colours no keyword");
+        chk(std::any_of(unknown.begin(), unknown.end(),
+                        [&](const Span& s) { return s.text == "3" && s.st.fg != th.text; }),
+            "an unknown tag still colours the facts every language shares");
+        chk(u.fence == true, "an open fence stays open until its own marker");
+        highlight_row("```", th, u);
+        chk(u.fence == false && c.fence == false, "the fence state closes on its own marker");
+
+        // Order of authority: skin, then language file, then palette default.
+        const std::string dir = "/tmp/dd_ui_test_colors";
+        std::filesystem::create_directories(dir);
+        auto write = [&](const std::string& name, const std::string& body) {
+            const std::string p = dir + "/" + name;
+            std::ofstream f(p);
+            f << body;
+            f.close();
+            return p;
+        };
+        const std::string skin_path = write("orange.yaml",
+                                            "colors:\n  code_keyword: \"#FF7A00\"\n  status_bar_bg: \"#0B0714\"\n");
+        const Theme sk = Theme::load(skin_path);
+        chk(sk.skin_set(CodeTok::Keyword), "the skin's own code line is recorded as the skin's");
+        chk(sk.code_kw == rgb(0xFF7A00), "a readable skin hue survives the contrast pass");
+        // A ground is not a foreground: the pass moves hues painted *on* a ground, never the ground
+        // itself. Only the defaults this ground cannot show move — and the count says how many.
+        chk(sk.status_bg == rgb(0x0B0714), "the skin's ground is never moved");
+        chk(sk.palette_fixed == 0 || Theme::contrast(sk.text, sk.status_bg) >= 3.0,
+            "whatever moved, moved to something readable");
+        const Grammar* fizz = set.find("fizz");
+        chk(fizz && code_color(sk, *fizz, CodeTok::Keyword, sk.code_kw) == rgb(0xFF7A00),
+            "a skin's hue outranks a language file's hue");
+        chk(code_color(Theme{}, *fizz, CodeTok::Keyword, Theme{}.code_kw) == rgb(0x00FF00),
+            "with no skin line the language file's hue wins");
+        chk(generic_grammar().keywords.empty(), "the untagged grammar claims no keyword");
+
+        // white on white: a hue and a ground that are the same colour paint nothing. The skin
+        // asked for those colours; it did not ask for the code to be invisible.
+        const std::string white_path = write("white-on-white.yaml",
+                                             "colors:\n  banner_text: \"#FFFFFF\"\n  status_bar_bg: \"#FFFFFF\"\n"
+                                             "  code_keyword: \"#FFFFFF\"\n  diff_add: \"#FFFFFF\"\n  diff_add_bg: \"#FFFFFF\"\n");
+        const Theme w = Theme::load(white_path);
+        chk(Theme::contrast(rgb(0xFFFFFF), rgb(0xFFFFFF)) == 1.0, "identical colours contrast at 1");
+        chk(w.palette_fixed > 0, "an unreadable palette is reconciled, and the count says so");
+        chk(Theme::contrast(w.code_kw, w.status_bg) >= 3.0, "a moved hue reads on the skin's ground");
+        chk(w.code_kw != rgb(0xFFFFFF), "white on white stops being white");
+        chk(w.diff_add_bg == kNone || Theme::contrast(w.diff_add, w.diff_add_bg) >= 4.5,
+            "a stripe keeps a readable colour or drops its ground");
+        chk(w.luminance(w.code_kw) < w.luminance(w.status_bg), "a hue moved on a light ground went dark");
+        // Kinds stay distinguishable. A hue with no chroma nudged toward the ground's pole lands on
+        // one grey for every kind that cannot be shown, so the block colours as a single run -- the
+        // thing highlighting exists to prevent. An achromatic claim therefore falls back to the
+        // palette's hue for that kind; a chromatic claim keeps its hue and loses only luminance.
+        chk(w.code_kw != w.code_ty && w.code_ty != w.code_cmt,
+            "an achromatic skin still paints keyword, type and comment as different hues");
+        chk(Theme::contrast(w.code_cmt, w.status_bg) >= 3.0, "the fallback hue reads on the ground too");
+        // The status bar paints a ground of its own, so the hues drawn on it are measured against it:
+        // a dot this skin cannot show is not a status.
+        chk(Theme::contrast(w.ok, w.status_bg) >= 3.0, "a status-bar hue a white ground hides is moved");
+        chk(w.diff_add_bg == kNone, "a stripe whose fill is the colour of the ground is dropped");
+
+        // A grammar file can make the same mistake a skin makes. Its hues are measured against the
+        // ground the skin paints, before any of them is ever drawn — and the move is counted.
+        GrammarSet bright = GrammarSet::from_yaml(
+            "language: fizz\nkeywords: [widget]\ncolors: {keyword: \"#FFFFFF\"}\n", "test");
+        chk(bright.languages() == 1, "one file, one language");
+        bright.reconcile(w);
+        chk(bright.moved_hues() == 1, "a hue a skin cannot show is moved, and counted");
+        chk(Theme::contrast(bright.find("fizz")->color(CodeTok::Keyword, 0), w.status_bg) >= 3.0,
+            "a moved grammar hue reads on the skin's ground");
+        chk(bright.find("fizz")->keywords.size() == 1, "moving a hue does not touch the rules");
+        chk(bright.find("fizz")->color(CodeTok::Keyword, 0) == w.code_kw,
+            "an achromatic grammar hue falls back to the theme's hue for that kind");
+        // A hue with chroma keeps it: the ladder moves toward the ground's opposite pole, so the
+        // channels stay in proportion and only luminance gives way.
+        GrammarSet warm = GrammarSet::from_yaml(
+            "language: fizz\nkeywords: [widget]\ncolors: {keyword: \"#FF7A00\"}\n", "test");
+        warm.reconcile(w);
+        const uint32_t moved = warm.find("fizz")->color(CodeTok::Keyword, 0);
+        chk(Theme::contrast(moved, w.status_bg) >= 3.0, "a chromatic grammar hue reads after the move");
+        chk(((moved >> 16) & 0xFF) > ((moved >> 8) & 0xFF), "a chromatic hue moves by losing luminance, not hue");
+
+        // The disk path, not just the string path. A skill directory under a root is walked and
+        // indexed, in the shapes this YAML subset actually parses: `languages:` as a map keyed by
+        // language name, a list on one line and as a block list, an inline map, a declared-none
+        // list, and a language named only by its key. A block list of inline maps is not one of
+        // them (`- language: x` parses as the string "language: x"), and a wrapped inline list
+        // swallows the lines after it, so neither is a shape a skill file may write.
+        const std::string root = dir + "/skills/demo";
+        std::filesystem::create_directories(root);
+        std::ofstream(root + "/highlight.yaml")
+            << "languages:\n"
+               "  grox:\n"
+               "    keywords: [glorp, frint]\n"
+               "    line_comment: [\"//\"]\n"
+               "    block_comment: {open: \"/*\", close: \"*/\"}\n"
+               "  plum:\n"
+               "    keywords:\n"
+               "      - plum\n"
+               "      - prune\n"
+               "    quotes: ['\"']\n"
+               "    line_comment: []\n"
+               "  moss:\n"
+               "    types:\n"
+               "      - Frond\n";
+        const GrammarSet disk = GrammarSet::load({std::filesystem::path(root)});
+        chk(disk.languages() == 3, "one file may define several languages");
+        chk(disk.find("grox") != nullptr, "a file under a root is found by walking, not by name");
+        chk(disk.find("grox")->keywords.size() == 2, "a keyword list on one line is a list");
+        chk(disk.find("grox")->block_comment.size() == 1, "a block comment pair written inline is a pair");
+        chk(disk.find("plum")->line_comment.empty(), "a declared-none line comment is none, not a prefix that matches every row");
+        chk(disk.find("plum")->keywords.size() == 2, "a keyword list written as a block list is a list");
+        chk(disk.find("moss") != nullptr && disk.find("moss")->types.size() == 1,
+            "a language named by its key alone is still a language");
+        chk(disk.sources().size() == 1, "every file that was read is named");
+
+    }
+
+    // ---- the grammar file this repo ships is read by the same loader as any operator's ----
+    // A shipped default is data, not a table compiled in: the loader that reads an operator's
+    // highlight.yaml is the only one that reads this one, so the file is exercised end to end and
+    // its edge cases (a declared-none comment, one quote delimiter, an alias) are the file's own.
+    {
+        const Theme th;
+        const GrammarSet shipped = GrammarSet::load({"skills"});
+        chk(shipped.languages() >= 9,
+            "the repo's own highlight.yaml loads (" + std::to_string(shipped.languages()) + " languages)");
+        chk(shipped.find("cpp") != nullptr && shipped.find("c++") != nullptr, "a fence tag and its alias resolve");
+        chk(shipped.find("cpp")->quotes.size() == 2, "an undeclared quote list is the pair every language shares");
+        chk(shipped.find("json")->quotes.size() == 1, "json declares one delimiter");
+        chk(shipped.find("html")->line_comment.empty(),
+            "a declared-none line comment is none, not a prefix that matches every row");
+
+        CodeCtx h;
+        h.set = &shipped;
+        h.lang = shipped.find("html");
+        h.fence = true;
+        const auto hspans = highlight_row("# not a comment in html", th, h);
+        chk(!std::any_of(hspans.begin(), hspans.end(), [&](const Span& s) { return s.st.fg == th.code_cmt; }),
+            "a row starting with # under html is not a comment");
+
+        CodeCtx j;
+        j.set = &shipped;
+        j.lang = shipped.find("json");
+        j.fence = true;
+        const auto jspans = highlight_row("\"tone\": \"amber\"", th, j);
+        chk(std::any_of(jspans.begin(), jspans.end(),
+                        [&](const Span& s) { return s.text == "\"tone\"" && s.st.fg == th.code_ty; }),
+            "a json key colours as a member name, not as a value");
+
+        CodeCtx py;
+        py.set = &shipped;
+        py.lang = shipped.find("python");
+        py.fence = true;
+        const auto pyspans = highlight_row("def load(path):  # read it", th, py);
+        std::string back;
+        for (const auto& s : pyspans) back += s.text;
+        chk(back == "def load(path):  # read it", "colouring rewrites nothing, even from a shipped file");
+        chk(std::any_of(pyspans.begin(), pyspans.end(),
+                        [&](const Span& s) { return s.text == "def" && s.st.fg == th.code_kw; }),
+            "a keyword the file declares colours");
+        chk(std::any_of(pyspans.begin(), pyspans.end(),
+                        [&](const Span& s) { return s.st.fg == th.code_cmt; }),
+            "the file's comment marker colours the tail");
+
+        // A language with no file behind it keeps the shared facts and claims no keyword: the
+        // shipped file is what makes a keyword a keyword, not this binary.
+        CodeCtx g;
+        g.set = &shipped;
+        highlight_row("```nosuchlang", th, g);
+        chk(g.lang == nullptr, "an unknown tag names no language");
+        const auto gspans = highlight_row("widget = \"x\" # note", th, g);
+        chk(std::any_of(gspans.begin(), gspans.end(), [&](const Span& s) { return s.st.fg == th.code_str; }),
+            "under an unknown tag a string is still a string");
+        chk(std::any_of(gspans.begin(), gspans.end(), [&](const Span& s) { return s.st.fg == th.code_cmt; }),
+            "under an unknown tag a comment is still a comment");
+        const auto w = std::find_if(gspans.begin(), gspans.end(), [&](const Span& s) { return s.text == "widget"; });
+        chk(w != gspans.end() && w->st.fg == th.text, "under an unknown tag no word is claimed as a keyword");
     }
 
     if (g_fail) std::printf("%d FAILED\n", g_fail);

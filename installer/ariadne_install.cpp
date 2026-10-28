@@ -169,6 +169,24 @@ int main(int argc, char** argv) {
     std::error_code ec;
     if (!fs::exists(o.home / "config.yaml", ec)) { say("no config.yaml after --init"); return EXIT_FAILED; }
 
+    // The shipped language defaults are shipped data, not operator content: a home holding no
+    // grammar file colours code only with the facts every language shares, and the harness ships
+    // its languages as data rather than as a table compiled into it. The copy lands only when the
+    // home has none, so the operator's own file still outranks it -- the last file to name a
+    // language is the one that wins.
+    {
+        std::error_code gc;
+        const fs::path shipped = o.root / "skills" / "highlight.yaml";
+        const fs::path dst = o.home / "skills" / "highlight.yaml";
+        if (fs::exists(shipped, gc) && !fs::exists(dst, gc)) {
+            fs::create_directories(o.home / "skills", gc);
+            if (!gc) {
+                fs::copy_file(shipped, dst, fs::copy_options::overwrite_existing, gc);
+                if (!gc) say("  highlight.yaml -> " + dst.string());
+            }
+        }
+    }
+
     // The only proof this claims: the binary that landed runs.
     if (passthru((o.home / "ariadne").string() + " --version") != 0) { say("the installed ariadne does not run"); return EXIT_FAILED; }
     say("installed: " + o.home.string() + " (config.yaml " + std::to_string(fs::file_size(o.home / "config.yaml", ec)) +

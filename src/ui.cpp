@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <ctime>
 #include <limits>
 
@@ -716,12 +718,54 @@ std::string Frame::present(bool truecolor) {
 
 // ---------------- Theme ----------------
 
+// ---------------- Palette contrast ----------------
+//
+// A skin is data, and data can be wrong in a way the harness has no excuse for: #FFFFFF text on
+// #FFFFFF ground paints nothing. The theme's own filled background is the only colour a skin
+// claims about the terminal, so it is the ground every foreground is measured against. Hues are
+// pushed away from that ground rather than replaced — the skin keeps its palette, it only stops
+// being invisible. Counting what moved is the point: a reconciled palette is a fact worth saying.
+double Theme::luminance(uint32_t c) {
+    auto chan = [&](unsigned v) {
+        const double s = v / 255.0;
+        return s <= 0.03928 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * chan((c >> 16) & 0xFF) + 0.7152 * chan((c >> 8) & 0xFF) + 0.0722 * chan(c & 0xFF);
+}
+
+double Theme::contrast(uint32_t a, uint32_t b) {
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// Push a hue away from `ground` until it clears `floor`. The ladder moves toward whichever pole
+// the ground is not, and stops at the first rung that reads — the hue survives, only its luminance
+// gives way. Defined over the two measured quantities so the text floor and the stripe floor share
+// one ladder instead of two copies that can drift apart.
+uint32_t lift(uint32_t fg, uint32_t ground, double floor) {
+    if (fg == kNone || Theme::contrast(fg, ground) >= floor) return fg;
+    const uint32_t toward = Theme::luminance(ground) < 0.25 ? rgb(0xFFFFFF) : rgb(0x000000);
+    for (int step = 1; step <= 24; ++step) {
+        const uint32_t cand = mix(fg, toward, step / 24.0);
+        if (Theme::contrast(cand, ground) >= floor) return cand;
+    }
+    return toward;
+}
+
+uint32_t Theme::readable(uint32_t fg) const {
+    const uint32_t ground = status_bg == kNone ? rgb(0x10051C) : status_bg;
+    return lift(fg, ground, 3.0);
+}
+
 Theme Theme::load(const std::string& path) {
     Theme t;
     core::Config c{core::Json{}};
     try {
         c = core::load_config(path);
     } catch (...) {
+        // No skin file is still a palette: the struct's defaults paint this screen, and they are
+        // measured against the ground they sit on exactly like a skin's claims are.
+        t.reconcile();
         return t;
     }
     auto col = [&](const char* key, uint32_t& dst) {
@@ -785,12 +829,100 @@ Theme Theme::load(const std::string& path) {
     str("welcome", t.welcome);
     str("goodbye", t.goodbye);
     if (const std::string sym = c.get_string("branding.prompt_symbol"); !sym.empty()) t.prompt_symbol = sym;
+
+    // Which code hues the skin set itself. Presence is what matters, not value: a skin's own line
+    // outranks a language file, a struct default outranks neither, and the contrast pass below
+    // moves only the hues this screen is not able to show.
+    static const std::pair<CodeTok, const char*> code_keys[] = {
+        {CodeTok::Keyword, "code_keyword"}, {CodeTok::Type, "code_type"},
+        {CodeTok::String, "code_string"},   {CodeTok::Number, "code_number"},
+        {CodeTok::Comment, "code_comment"}, {CodeTok::Func, "code_function"},
+    };
+    for (const auto& [tok, key] : code_keys) {
+        const std::string v = c.get_string(std::string("colors.") + key);
+        if (v.size() == 7 && v[0] == '#') t.skin_codes.push_back(tok);
+    }
+
+    t.reconcile();
     return t;
+}
+
+// The struct's own palette is the token vocabulary: keyword, type, string, number, comment and
+// function are distinctions a screen has to show, not colours a skin owns. A hue with no chroma
+// has nothing left to preserve — nudging #FFFFFF toward black lands on #7F7F7F, and every kind
+// a skin declared white lands on that same grey, so the block reads as one grey run, which is
+// precisely what highlighting exists to prevent. An achromatic claim is therefore replaced by
+// the shipped hue for that kind, reconciled against this ground; a chromatic claim keeps its
+// hue and only loses luminance.
+void Theme::reconcile() {
+    const Theme shipped{};
+    auto achromatic = [](uint32_t c) {
+        return c != kNone && ((c >> 16) & 0xFF) == ((c >> 8) & 0xFF) && ((c >> 8) & 0xFF) == (c & 0xFF);
+    };
+    auto fix = [&](uint32_t& dst, uint32_t fallback) {
+        const uint32_t got = readable(dst);
+        if (got == dst) return;
+        dst = achromatic(dst) ? readable(fallback) : got;
+        ++palette_fixed;
+    };
+    fix(code_kw, shipped.code_kw); fix(code_ty, shipped.code_ty); fix(code_str, shipped.code_str);
+    fix(code_num, shipped.code_num); fix(code_cmt, shipped.code_cmt); fix(code_fn, shipped.code_fn);
+    fix(text, shipped.text); fix(dim, shipped.dim); fix(muted, shipped.muted);
+    fix(title, shipped.title); fix(accent, shipped.accent);
+    // Every hue that carries glyphs is measured, not just the body colours. The status bar paints
+    // its own filled ground (`status_bar_bg`), so a skin that fills it white and asks for white
+    // `ui_ok` draws a dot no terminal can show: the reconciliation that covers `text` alone leaves
+    // that one run invisible. Borders stay exempt -- a rule is not text (see fix_pair below).
+    fix(hot, shipped.hot); fix(label, shipped.label); fix(ok, shipped.ok);
+    fix(error, shipped.error); fix(warn, shipped.warn); fix(gold, shipped.gold);
+    fix(prompt, shipped.prompt); fix(session_label, shipped.session_label);
+    // A border draws a rule, not a character. A quiet line against a dark ground is the skin's
+    // design, and moving it buys no readability — the floor exists for text that cannot be read.
+    // A stripe has a foreground AND a filled ground of the skin's own making. When they cannot
+    // both be shown, the ground is dropped before the colour is: the row still reads, in the
+    // colour the skin asked for, instead of being erased by a background it chose.
+    auto fix_pair = [&](uint32_t& fg, uint32_t& bg, uint32_t fallback) {
+        // A stripe whose ground is the colour of the ground it sits on fills nothing, so the fill is
+        // dropped and the row keeps its colour: an invisible fill is a claim about the terminal that
+        // the terminal cannot honour. The colour then lifts against whatever ground remains.
+        if (bg != kNone && contrast(bg, status_bg) < 1.05) { bg = kNone; ++palette_fixed; }
+        if (bg == kNone) { fix(fg, fallback); return; }
+        if (contrast(fg, bg) >= 4.5) return;
+        ++palette_fixed;
+        fg = achromatic(fg) ? lift(fallback, bg, 4.5) : lift(fg, bg, 4.5);
+    };
+    fix_pair(diff_add, diff_add_bg, shipped.diff_add);
+    fix_pair(diff_del, diff_del_bg, shipped.diff_del);
+    fix_pair(diff_hunk, diff_hunk_bg, shipped.diff_hunk);
 }
 
 // ---------------- Scene: feed side (any thread) ----------------
 
 Scene::Scene(Theme th) : th_(std::move(th)) {}
+
+bool Theme::skin_set(CodeTok tok) const {
+    return std::find(skin_codes.begin(), skin_codes.end(), tok) != skin_codes.end();
+}
+
+uint32_t Theme::code_hue(CodeTok tok) const {
+    switch (tok) {
+    case CodeTok::Keyword: return code_kw;
+    case CodeTok::Type:    return code_ty;
+    case CodeTok::Builtin: return code_ty;
+    case CodeTok::Func:    return code_fn;
+    case CodeTok::String:  return code_str;
+    case CodeTok::Number:  return code_num;
+    case CodeTok::Comment: return code_cmt;
+    }
+    return code_kw;
+}
+
+// The languages a fence may name, measured against the ground this skin paints before any of
+// them is ever drawn: rules are data, and a hue that cannot be shown colours nothing.
+void Scene::set_grammars(GrammarSet set) {
+    set.reconcile(th_);
+    grammars_ = std::move(set);
+}
 
 // A lifecycle event, published into a fixed slot: one release store, claimed by whoever renders.
 // The stamp is taken here, not inside the ring, so it shares the counter with the stream buffers.
@@ -963,42 +1095,23 @@ bool ascii_hex(char c) {
 bool ascii_ident_char(char c) { return ascii_letter(c) || ascii_digit(c); }
 bool ascii_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
-bool is_keyword(const std::string& w) {
-    static const char* const kw[] = {
-        "auto", "break", "case", "catch", "class", "const", "constexpr", "continue",
-        "default", "delete", "do", "else", "enum", "explicit", "extern", "for",
-        "friend", "goto", "if", "inline", "namespace", "new", "operator",
-        "private", "protected", "public", "return", "sizeof", "static", "struct",
-        "switch", "template", "this", "throw", "try", "typedef", "typename",
-        "union", "using", "virtual", "volatile", "while",
-        "def", "elif", "except", "lambda", "None", "True", "False", "import",
-        "from", "pass", "raise", "with", "as", "async", "await", "yield",
-        "fn", "let", "mut", "pub", "impl", "match", "unsafe", "trait", "dyn", "crate",
-        "function", "var", "null", "undefined", "export",
-        "static_cast", "reinterpret_cast", "dynamic_cast", "const_cast",
-    };
-    for (const char* s : kw) if (w == s) return true;
-    return false;
+// Membership in a language's sorted table, against a view of the row: a lookup costs no
+// allocation, because colouring runs per row per frame and the row is the model's bytes.
+bool has(const std::vector<std::string>& sorted, std::string_view w) {
+    return std::binary_search(sorted.begin(), sorted.end(), w, std::less<>{});
 }
-
-bool is_type(const std::string& w) {
-    static const char* const ty[] = {
-        "bool", "char", "int", "unsigned", "signed", "float", "double", "void",
-        "long", "short", "string", "vector", "array", "map", "set", "pair",
-        "Json", "Config", "Canvas", "Frame", "Theme", "Style", "Cell", "Scene",
-        "Entry", "CodeCtx", "Span", "uint32_t", "size_t",
-    };
-    for (const char* s : ty) if (w == s) return true;
-    if (w.size() > 2 && w.compare(w.size() - 2, 2, "_t") == 0) return true;
-    if (w.size() > 1 && w[0] >= 'A' && w[0] <= 'Z') return true;
-    return false;
-}
-
-size_t highlight_code(const std::string& row, size_t start, const Theme& th, std::vector<Span>& out) {
+size_t highlight_code(const std::string& row, size_t start, const Theme& th, std::vector<Span>& out,
+                      const Grammar& g) {
     size_t pos = start;
     auto push = [&](size_t a, size_t b, Style st) {
         if (b > a) out.emplace_back(row.substr(a, b - a), st);
     };
+    // Quote characters come from the language's own list: json has one, python and C have two,
+    // and a row alone cannot tell them apart. Fixed storage, so this allocates nothing per row.
+    char qv[8];
+    size_t nq = 0;
+    for (const std::string& s : g.quotes)
+        if (!s.empty() && nq < 8) qv[nq++] = s[0];
     while (pos < row.size()) {
         const unsigned char ch = static_cast<unsigned char>(row[pos]);
         if (ascii_space(row[pos])) {
@@ -1008,47 +1121,71 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
             pos = p;
             continue;
         }
-        if (ch == '/' && pos + 1 < row.size()) {
-            if (row[pos + 1] == '/') {
-                push(pos, row.size(), Style{th.code_cmt});
-                break;
+        // Comments and directives are the language's rules, not two hardcoded shapes. `#` is a
+        // comment in python and a directive in C, and the row alone cannot tell them apart — the
+        // grammar is what does. A marker counts only at the start of a token, so `a // b` is a
+        // division followed by a comment and `a//b` stays a division.
+        const bool token_start = pos == start || pos == 0 || ascii_space(row[pos - 1]);
+        if (token_start) {
+            const uint32_t cmt = code_color(th, g, CodeTok::Comment, th.code_cmt);
+            bool handled = false;
+            for (const std::string& p : g.preproc) {
+                if (row.compare(pos, p.size(), p) != 0) continue;
+                const size_t np = pos + p.size();
+                if (np < row.size() && (row[np] == '!' || row[np] == ' ' || row[np] == '\t')) {
+                    push(pos, row.size(), Style{cmt});           // shebang, or a bare directive line
+                    handled = true;
+                    break;
+                }
+                if (np < row.size() && ascii_letter(row[np])) {   // #include, #define, #pragma
+                    size_t e = np;
+                    while (e < row.size() && ascii_ident_char(row[e])) ++e;
+                    push(pos, e, Style{code_color(th, g, CodeTok::Keyword, th.code_kw), kNone, kBold});
+                    pos = e;
+                    handled = true;
+                    break;
+                }
             }
-            if (row[pos + 1] == '*') {
-                const size_t end = row.find("*/", pos + 2);
-                const size_t p = end == std::string::npos ? row.size() : end + 2;
-                push(pos, p, Style{th.code_cmt});
+            if (handled) continue;
+            for (const std::string& p : g.line_comment) {
+                if (row.compare(pos, p.size(), p) == 0) {
+                    push(pos, row.size(), Style{cmt});
+                    return row.size();   // the rest of the row is comment
+                }
+            }
+            for (const auto& bc : g.block_comment) {
+                if (row.compare(pos, bc.first.size(), bc.first) != 0) continue;
+                const size_t end = row.find(bc.second, pos + bc.first.size());
+                const size_t p = end == std::string::npos ? row.size() : end + bc.second.size();
+                push(pos, p, Style{cmt});
                 pos = p;
-                continue;
-            }
-        }
-        if (ch == '#' && (pos == start || pos == 0 || ascii_space(row[pos - 1]))) {
-            if (pos + 1 < row.size() && (row[pos + 1] == '!' || row[pos + 1] == ' ' || row[pos + 1] == '\t')) {
-                push(pos, row.size(), Style{th.code_cmt});
+                handled = true;
                 break;
             }
-            if (pos + 1 < row.size() && ascii_letter(row[pos + 1])) {
-                size_t e = pos + 1;
-                while (e < row.size() && ascii_ident_char(row[e])) ++e;
-                push(pos, e, Style{th.code_kw, kNone, kBold});
-                pos = e;
-                continue;
-            }
-            push(pos, row.size(), Style{th.code_cmt});
-            break;
+            if (handled) continue;
         }
-        if (ch == '"' || ch == '\'') {
+        char quote = 0;
+        for (size_t i = 0; i < nq; ++i)
+            if (row[pos] == qv[i]) { quote = qv[i]; break; }
+        if (quote) {
             size_t p = pos + 1;
             while (p < row.size()) {
                 if (row[p] == '\\' && p + 1 < row.size()) { p += 2; continue; }
                 if (row[p] == '\n') break;
-                if (row[p] == static_cast<char>(ch)) { ++p; break; }
+                if (row[p] == quote) { ++p; break; }
                 ++p;
             }
-            push(pos, p, Style{th.code_str});
+            // In json, yaml and toml the quoted word in front of a ':' is a key. Colouring it
+            // like a value would claim the document has no structure, which is the bigger lie.
+            size_t after = p;
+            while (after < row.size() && ascii_space(row[after])) ++after;
+            const bool key = g.keys_are_types && after < row.size() && row[after] == ':';
+            push(pos, p, Style{code_color(th, g, key ? CodeTok::Type : CodeTok::String,
+                                           key ? th.code_ty : th.code_str)});
             pos = p;
             continue;
         }
-        if (ascii_digit(row[pos])) {
+        if (g.numbers && ascii_digit(row[pos])) {
             size_t p = pos + 1;
             if (p < row.size() && (row[p] == 'x' || row[p] == 'X')) {
                 ++p;
@@ -1072,14 +1209,22 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
         if (ch < 0x80 && ascii_letter(static_cast<char>(ch))) {
             size_t e = pos + 1;
             while (e < row.size() && ascii_ident_char(row[e])) ++e;
-            const std::string word = row.substr(pos, e - pos);
             size_t after = e;
             while (after < row.size() && ascii_space(row[after])) ++after;
             const bool call = after < row.size() && row[after] == '(';
             Style st{th.text};
-            if (is_type(word)) st = Style{th.code_ty, kNone, kBold};
-            else if (is_keyword(word)) st = Style{th.code_kw, kNone, kBold};
-            else if (call) st = Style{th.code_fn, kNone, kBold};
+            const std::string_view w(row.data() + pos, e - pos);
+            const bool key = g.keys_are_types && after < row.size() &&
+                             (row[after] == ':' || row[after] == '=');
+            if (has(g.keywords, w)) st = Style{code_color(th, g, CodeTok::Keyword, th.code_kw), kNone, kBold};
+            else if (key) st = Style{code_color(th, g, CodeTok::Type, th.code_ty), kNone, kBold};
+            else if (has(g.builtins, w)) st = Style{code_color(th, g, CodeTok::Builtin, th.code_ty), kNone, kBold};
+            else if (has(g.types, w)) st = Style{code_color(th, g, CodeTok::Type, th.code_ty), kNone, kBold};
+            else if (call) st = Style{code_color(th, g, CodeTok::Func, th.code_fn), kNone, kBold};
+            else if (g.capital_is_type && e - pos > 1 && row[pos] >= 'A' && row[pos] <= 'Z')
+                st = Style{code_color(th, g, CodeTok::Type, th.code_ty), kNone, kBold};
+            else if (e - pos > 2 && row.compare(e - 2, 2, "_t") == 0)
+                st = Style{code_color(th, g, CodeTok::Type, th.code_ty), kNone, kBold};
             push(pos, e, st);
             pos = e;
             continue;
@@ -1099,14 +1244,107 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
 
 }  // namespace
 
+namespace {
+// Declared ahead of use: the gate below needs them, the definitions sit with the tokenizer.
+bool ascii_letter(char c);
+bool ascii_digit(char c);
+bool ascii_space(char c);
+// Whether a row's head is code rather than prose: an identifier or a number, or a line that opens
+// with brackets or quotes. A model quoting a bullet list writes "- item" and "+ item"; those are
+// prose, and painting them as a deletion and an addition claims a patch the reply never contained.
+// Evidence that a +/- row carries code rather than prose: its head is an identifier, a number, or
+// a bracket/quote, AND the row holds structural punctuation a sentence does not (`=`, `(`, `;`,
+// `{`, `/`, …). "- a bullet" has neither, so a quoted bullet list stays body text; "+def load(path):"
+// has both, so it reads as a patch row. The fence is the authority where it exists — this gate only
+// fires on rows nobody claimed, and it is a guess that is allowed to be wrong only one way: it may
+// miss a patch row, it must not invent a patch that the reply never wrote.
+bool code_head(const std::string& body) {
+    if (body.empty()) return false;
+    const char c0 = body[0];
+    const bool head_is_code = ascii_letter(c0) || ascii_digit(c0) || c0 == '{' || c0 == '(' ||
+        c0 == '[' || c0 == '"' || c0 == '\'' || c0 == '#' || c0 == '@';
+    if (!head_is_code) return false;
+    for (char c : body) {
+        if (c == '=' || c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == '[' ||
+            c == ']' || c == '/' || c == '<' || c == '>' || c == ':' || c == '"' || c == '\'' ||
+            c == '#' || c == '$') return true;
+    }
+    return false;
+}
+
+// How many rows a hunk header claims: `@@ -a,b +c,d @@` deletes up to b lines and adds up to d,
+// and a context line sits in both counts, so b + c is the ceiling on the rows that follow. A
+// malformed header claims nothing rather than painting whatever comes after it.
+int hunk_contract(const std::string& row) {
+    size_t pos = 2;
+    auto skip = [&](size_t& p) { while (p < row.size() && ascii_space(row[p])) ++p; };
+    // The count is a number, not a digit count: `@@ -1,3 +1,4 @@` claims three rows and four. A
+    // side with no digits at all is malformed; `-0,0` is a real new file and claims zero.
+    auto number = [&](size_t& p, size_t& v) {
+        if (p >= row.size() || !ascii_digit(row[p])) return false;
+        v = 0;
+        while (p < row.size() && ascii_digit(row[p])) {
+            v = v * 10 + static_cast<size_t>(row[p] - '0');
+            if (v > 4096) v = 4096;   // a claim past a card's worth of rows is capped, not trusted
+            ++p;
+        }
+        return true;
+    };
+    // `@@ -start[,count] +start[,count] @@ [section]`: an omitted count is one line, and the
+    // numbers sit between separators, so the separators are parsed rather than assumed.
+    skip(pos);
+    if (pos >= row.size() || row[pos] != '-') return 0;
+    ++pos;
+    size_t start = 0;
+    if (!number(pos, start)) return 0;
+    size_t del = 1;
+    if (pos < row.size() && row[pos] == ',') { ++pos; if (!number(pos, del)) return 0; }
+    skip(pos);
+    if (pos >= row.size() || row[pos] != '+') return 0;
+    ++pos;
+    if (!number(pos, start)) return 0;
+    size_t add = 1;
+    if (pos < row.size() && row[pos] == ',') { ++pos; if (!number(pos, add)) return 0; }
+    skip(pos);
+    if (pos + 1 >= row.size() || row[pos] != '@' || row[pos + 1] != '@') return 0;
+    return static_cast<int>(del + add);
+}
+}  // namespace
+
+// The body-side heuristic: a row nobody claimed is read as a patch row only on evidence — a hunk
+// header, a file header, a V4A marker, or a +/- whose head is code. A fence that names a patch
+// language bypasses this entirely (see highlight_row): the fence is the authority, this is a guess.
 bool looks_like_diff(const std::string& body) {
     size_t pos = 0;
+    bool fenced = false;
     while (pos < body.size()) {
         size_t end = body.find('\n', pos);
         if (end == std::string::npos) end = body.size();
         if (end > pos && body[end - 1] == '\r') --end;
+        // A fence claims its rows. Evidence gathered inside one belongs to that language, so a
+        // hunk header in a ```diff block is not evidence that the prose after the block is a
+        // patch: painting `- a prose dash` red is exactly the lie this heuristic exists to avoid.
+        size_t lead = pos;
+        while (lead < end && (body[lead] == ' ' || body[lead] == '\t')) ++lead;
+        if (lead + 3 <= end && body.compare(lead, 3, "```") == 0) {
+            size_t t = lead + 3;
+            while (t < end && (body[t] == ' ' || body[t] == '\t')) ++t;
+            // Same rule highlight_row uses: a tag opens the block, a bare ``` closes it.
+            fenced = t < end && body[t] != '`';
+            pos = end + 1;
+            continue;
+        }
+        if (fenced) {
+            pos = end + 1;
+            continue;
+        }
         const DiffKind k = diff_kind_at(body, pos, end);
         if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) return true;
+        if (k == DiffKind::Add || k == DiffKind::Del) {
+            size_t head = pos + 1;
+            while (head < end && ascii_space(body[head])) ++head;
+            if (code_head(body.substr(head, end - head))) return true;
+        }
         pos = end + 1;
     }
     return false;
@@ -1119,36 +1357,90 @@ std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx
     };
     size_t lead = 0;
     while (lead < row.size() && (row[lead] == ' ' || row[lead] == '\t')) ++lead;
-    if (!ctx.diff_body && lead + 3 <= row.size() && row.compare(lead, 3, "```") == 0) {
-        ctx.fence = !ctx.fence;
+    if (lead + 3 <= row.size() && row.compare(lead, 3, "```") == 0) {
+        // A fence names a language, and it is a fence whether or not the body also looks like a
+        // patch: a python block pasted inside a diff is python, and a `-` inside it is a
+        // subtraction. A tag re-opens the block (a model that forgets to close one does not get
+        // to hold the screen open forever); a bare ``` closes it. A name no file defines colours
+        // nothing at all, because guessing a language is the same lie as calling a prose '-' a
+        // deletion.
+        size_t t = lead + 3;
+        while (t < row.size() && (row[t] == ' ' || row[t] == '\t')) ++t;
+        size_t z = t;
+        while (z < row.size() && row[z] != ' ' && row[z] != '\t' && row[z] != '`' && row[z] != ':')
+            ++z;
+        const std::string tag = row.substr(t, z - t);
+        if (tag.empty()) {
+            ctx.fence = false;
+            ctx.lang = nullptr;
+            ctx.hunk_rows = 0;
+        } else {
+            ctx.fence = true;
+            ctx.lang = ctx.set ? ctx.set->find(tag) : nullptr;
+            ctx.hunk_rows = 0;
+        }
         push(0, row.size(), Style{th.code_fn, kNone, kBold});
         return out;
     }
-    if (ctx.diff_body) {
-        const DiffKind k = diff_kind(row);
-        if (k == DiffKind::Add) {
-            push(0, 1, Style{th.diff_add, th.diff_add_bg, kBold});
-            highlight_code(row, 1, th, out);
-            return out;
+    const Grammar& g = ctx.lang ? *ctx.lang : generic_grammar();
+    if (ctx.fence) {
+        // Inside a fence the language owns the row. A language declared as a patch format colours
+        // +/-/@@ by its own rules; every other language colour its tokens and leaves a '-' alone.
+        if (g.diff_rules) {
+            const DiffKind k = diff_kind(row);
+            if (k == DiffKind::Add) {
+                push(0, 1, Style{th.diff_add, th.diff_add_bg, kBold});
+                highlight_code(row, 1, th, out, g);
+                return out;
+            }
+            if (k == DiffKind::Del) {
+                push(0, 1, Style{th.diff_del, th.diff_del_bg, kBold});
+                highlight_code(row, 1, th, out, g);
+                return out;
+            }
+            if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) {
+                push(0, row.size(), Style{th.diff_hunk, th.diff_hunk_bg, kBold});
+                return out;
+            }
         }
-        if (k == DiffKind::Del) {
-            push(0, 1, Style{th.diff_del, th.diff_del_bg, kBold});
-            highlight_code(row, 1, th, out);
-            return out;
-        }
-        if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) {
-            push(0, row.size(), Style{th.diff_hunk, th.diff_hunk_bg, kBold});
-            return out;
-        }
-        if (ctx.fence) {
-            highlight_code(row, 0, th, out);
-            return out;
-        }
-        push(0, row.size(), Style{th.text});
+        highlight_code(row, 0, th, out, g);
         return out;
     }
-    if (ctx.fence) {
-        highlight_code(row, 0, th, out);
+    // Outside a fence, patch colouring is scoped to evidence, never to the body. A hunk header
+    // claims a fixed number of rows and a +/- outside that claim only counts when its own head
+    // reads as code, so `- a prose dash` after a patch block is prose whatever the block held —
+    // a body-wide flag is the coarse version of this rule and painted bullets as deletions.
+    const DiffKind k = diff_kind(row);
+    auto patch_code = [&](size_t from) {
+        const Grammar* diff = ctx.set ? ctx.set->find("diff") : nullptr;
+        highlight_code(row, from, th, out, diff ? *diff : g);
+    };
+    if (ctx.hunk_rows > 0) {
+        if (k == DiffKind::Add || k == DiffKind::Del) {
+            --ctx.hunk_rows;
+            push(0, 1, k == DiffKind::Add ? Style{th.diff_add, th.diff_add_bg, kBold}
+                                          : Style{th.diff_del, th.diff_del_bg, kBold});
+            patch_code(1);
+            return out;
+        }
+        // A context row belongs to the hunk and reads as plain text. Anything else spends the
+        // claim early rather than borrowing patch colour from a row the header never promised.
+        if (k == DiffKind::None && !row.empty() && ascii_space(row[0])) {
+            --ctx.hunk_rows;
+            push(0, row.size(), Style{th.text});
+            return out;
+        }
+        ctx.hunk_rows = 0;
+    }
+    if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) {
+        if (k == DiffKind::Hunk) ctx.hunk_rows = hunk_contract(row);
+        push(0, row.size(), Style{th.diff_hunk, th.diff_hunk_bg, kBold});
+        return out;
+    }
+    if ((k == DiffKind::Add || k == DiffKind::Del) && code_head(row.substr(1))) {
+        push(0, 1, k == DiffKind::Add ? Style{th.diff_add, th.diff_add_bg, kBold}
+                                      : Style{th.diff_del, th.diff_del_bg, kBold});
+        patch_code(1);
         return out;
     }
     push(0, row.size(), Style{th.text});
@@ -1169,11 +1461,10 @@ int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, 
         used += n;
         if (n < text_width(s.text)) break;
     }
-    uint32_t bg = kNone;
-    const DiffKind k = diff_kind(row);
-    if (k == DiffKind::Add) bg = th.diff_add_bg;
-    else if (k == DiffKind::Del) bg = th.diff_del_bg;
-    else if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) bg = th.diff_hunk_bg;
+    // The stripe's ground comes from the spans, not from re-reading the row: highlight_row has
+    // already decided whether this row is a deletion, and a `-` inside a fence of another language
+    // is not one. Re-classifying here would paint a ground the colouring refused to claim.
+    const uint32_t bg = spans.empty() ? kNone : spans.front().st.bg;
     if (bg != kNone && used < clamped) c.fill(x + used, y, clamped - used, 1, Style{base.fg, bg, kNone});
     return used;
 }
@@ -1501,6 +1792,7 @@ Canvas Scene::render(const Entry& e, int w) const {
         if (e.ms > 0) c.title_right(w - 2, 0, fmt_ms(e.ms), Style{th_.muted}, b);
         CodeCtx ctx;
         ctx.diff_body = looks_like_diff(e.text);
+        ctx.set = &grammars_;
         const bool code = ctx.diff_body || e.text.find("```") != std::string::npos;
         const Style base{th_.text};
         for (size_t k = 0; k < lines.size(); ++k) {
@@ -1674,6 +1966,7 @@ Canvas Scene::render(const Entry& e, int w) const {
         if (first > 0) c.title_right(w - 2, rows + 2, "↑ " + std::to_string(first) + " lines · /reasoning full", Style{th_.muted}, dim);
         CodeCtx ctx;
         ctx.diff_body = looks_like_diff(e.text);
+        ctx.set = &grammars_;
         const bool code = ctx.diff_body || e.text.find("```") != std::string::npos;
         for (size_t k = 0; k < lines.size(); ++k) {
             if (code) paint_row(c, 2, 1 + static_cast<int>(k), lines[k], th_, ctx, txt, w - 4);
@@ -1986,6 +2279,12 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         // graph, only this session's ledger view missed it, so the number is shown, never hidden.
         if (tape_.unledgered) mz += " · " + std::to_string(tape_.unledgered) + " unledgered";
         row(py + 5, "maze", mz, tape_.maze ? Style{th_.ok} : Style{th_.error});
+        // What colours a fence, and what the skin forced us to move. A palette that had to be
+        // reconciled is reported rather than quietly corrected: the operator chose those colours.
+        std::string lg = std::to_string(grammars_.languages()) + " grammars";
+        if (grammars_.moved_hues() + th_.palette_fixed > 0)
+            lg += " · " + std::to_string(grammars_.moved_hues() + th_.palette_fixed) + " hues moved";
+        row(py + 6, "code", lg, grammars_.languages() ? Style{th_.ok} : Style{th_.warn});
     }
 
     if (th < 3) return;

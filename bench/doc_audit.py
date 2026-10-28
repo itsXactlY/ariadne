@@ -147,6 +147,10 @@ def citations():
               # path, so it has to be in the citable tree or the gate calls a real file
               # "NO SUCH FILE" and pushes the doc toward wording that hides a dependency.
               + glob.glob(str(ROOT / "installer/*.cpp"))
+              # The shipped grammar is the same case: checked-in source the product binary
+              # reads at runtime. Excluding it makes the gate call a real file "NO SUCH FILE"
+              # and pushes the doc toward wording that hides where the grammar lives.
+              + glob.glob(str(ROOT / "skills/*.yaml"))
               + glob.glob(str(ROOT / "tests/*.cpp"))
               + glob.glob(str(ROOT / "docs/*.md"))
               + glob.glob(str(ROOT / "mk/*.md"))

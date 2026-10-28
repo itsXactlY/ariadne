@@ -17,6 +17,8 @@ on branch `fix/audit-20261024`, not read out of a README.
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
 | Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:527`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1020-1033`, `src/dd_tui.cpp:1339-1345`, `src/dd_agent_main.cpp:197-218` |
+| Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1353-1448`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1278-1310`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:776-792`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
+| Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2283-2288`, asserted in `tests/ui_test.cpp:1160-1230` |
 
 ## What is missing — measured, not assumed
 
@@ -152,7 +154,7 @@ each step built, tested, then looked at:
    cards re-block only when it changes; render kernels and the scene feed stayed
    untouched.
 2. **Workflow contract.** `PromptComposer::workflow_contract()`, toggled by
-   `agent.contract`. `README.md:130` now names it; its old "built-in tool
+   `agent.contract`. `README.md:136` now names it; its old "built-in tool
    preamble" claim was drift — no such string ever existed.
 3. **Plan lifecycle.** `todo` registered in both binaries; the ledger rides
    `ephemeral_system_prompt`, never the tape, so the cached prefix stays

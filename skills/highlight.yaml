@@ -1,0 +1,292 @@
+# The language rules this screen colours code with. Nothing here is compiled into the harness: a
+# file dropped anywhere under a skill root (~/.daedalus/skills/, or this repo's skills/) adds a
+# language, corrects one, or retints one, and the C++ carries no table of languages at all. Which
+# word is a keyword is a fact about a language, so it lives in a file a language's owner can edit —
+# the same refusal that makes a prose '-' a bullet instead of a deletion.
+#
+# `languages:` is a map keyed by the fence tag. Keys per language:
+#   language          name; defaults to the key
+#   aliases           other fence tags this answers to
+#   keywords          words that are control flow
+#   types             words that are types
+#   builtins          words that are std/core names
+#   preproc           directive words, spelled without the hash (cpp `#include` matches `include`)
+#   line_comment      prefixes, longest first; `[]` declares the language has none
+#   block_comment     {open: "...", close: "..."}
+#   block_comments    list of {open, close} — one language, several comment styles
+#   quotes            quote characters; omit for the two every language shares
+#   numbers           omit for true
+#   keys_are_types    an identifier before ':' or '=' is a member name (json, yaml, toml)
+#   capital_is_type   a Capitalised word is a type; false where that lies (js, python)
+#   diff              true when the rows this language describes are patch rows: +/- are added and
+#                     deleted lines, @@ is a hunk. Only a fence that names it colours a '-' as a
+#                     deletion; inside any other language a minus is punctuation.
+#   colors            per-token hues, overruled by the skin's own colors.code_*
+#
+# Words match as whole identifiers and are lowercased, so a macro written `println!` colours by its
+# identifier body and the `!` is punctuation. Lists are one line (`keywords: [a, b]`) or a block
+# list of `- a` lines: this YAML subset has no wrapped inline list, and a wrapped one swallows the
+# lines after it, so a file that wraps one silently loses every language written below it.
+#
+# Every hue here is measured against the ground the skin paints before it is ever drawn. A hue that
+# cannot be shown on that ground is moved down the ladder toward the pole the ground is not, so it
+# keeps its hue and only loses luminance; a hue with no hue at all -- `#FFFFFF`, `#808080` -- has
+# nothing left to preserve and falls back to the skin's own hue for that token kind, because two
+# greys colour a block as one run, which is the thing a grammar file exists to prevent. What moved
+# is counted and printed on the status row (`N hues moved`), not swallowed: a palette that had to
+# move is a fact the operator is owed. A skin that already separates its colours moves nothing.
+languages:
+  cpp:
+    aliases: [c++, cxx, cc, c]
+    keywords:
+      - if
+      - else
+      - for
+      - while
+      - do
+      - return
+      - break
+      - continue
+      - switch
+      - case
+      - default
+      - static
+      - const
+      - constexpr
+      - inline
+      - virtual
+      - override
+      - template
+      - typename
+      - class
+      - struct
+      - enum
+      - namespace
+      - using
+      - public
+      - private
+      - protected
+      - friend
+      - new
+      - delete
+      - throw
+      - try
+      - catch
+      - noexcept
+      - sizeof
+    # The primitive spellings are types, not control flow. Painted as keywords they read as the
+    # same kind of word `return` and `if` are, which is a claim about the language the language
+    # does not make: `int` names what a value is, `return` names what happens.
+    types: [int, unsigned, char, bool, void, auto, decltype, size_t, string, vector, array, map, unordered_map, set, pair, tuple, shared_ptr, unique_ptr, optional, variant, span]
+    builtins: [make_shared, make_unique, move, forward, assert, printf, fprintf]
+    preproc: [include, define, ifdef, ifndef, endif, pragma]
+    line_comment: ["//"]
+    block_comment: {open: "/*", close: "*/"}
+    capital_is_type: true
+
+  python:
+    aliases: [py, python3]
+    keywords:
+      - def
+      - class
+      - return
+      - yield
+      - lambda
+      - if
+      - elif
+      - else
+      - for
+      - while
+      - break
+      - continue
+      - pass
+      - import
+      - from
+      - as
+      - with
+      - try
+      - except
+      - finally
+      - raise
+      - global
+      - nonlocal
+      - assert
+      - del
+      - in
+      - not
+      - and
+      - or
+      - is
+      - None
+      - True
+      - False
+      - async
+      - await
+    types: [int, float, str, bytes, bool, list, tuple, dict, set, frozenset, object, type]
+    builtins: [print, len, range, enumerate, zip, map, filter, min, max, sum, sorted, reversed, open, isinstance, super, abs, repr, format]
+    line_comment: ["#"]
+    capital_is_type: false
+
+  rust:
+    aliases: [rs]
+    keywords:
+      - fn
+      - let
+      - mut
+      - const
+      - static
+      - struct
+      - enum
+      - impl
+      - trait
+      - type
+      - use
+      - pub
+      - crate
+      - mod
+      - self
+      - match
+      - if
+      - else
+      - for
+      - while
+      - loop
+      - return
+      - break
+      - continue
+      - move
+      - where
+      - dyn
+      - unsafe
+      - async
+      - await
+      - ref
+      - in
+      - as
+      - box
+      - super
+    types: [Vec, Option, Result, Box, String, str, HashMap, HashSet, BTreeMap, Cow, Rc, Arc, usize, isize, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool, char]
+    builtins: [println, print, eprintln, format, todo, unimplemented, assert, assert_eq, Some, None, Ok, Err]
+    line_comment: ["//"]
+    block_comment: {open: "/*", close: "*/"}
+    capital_is_type: true
+
+  javascript:
+    aliases: [js, jsx, node, typescript, ts, tsx]
+    keywords:
+      - function
+      - return
+      - const
+      - let
+      - var
+      - if
+      - else
+      - for
+      - while
+      - do
+      - break
+      - continue
+      - switch
+      - case
+      - default
+      - class
+      - extends
+      - new
+      - this
+      - super
+      - typeof
+      - instanceof
+      - delete
+      - void
+      - yield
+      - await
+      - async
+      - try
+      - catch
+      - finally
+      - throw
+      - import
+      - export
+      - from
+      - null
+      - undefined
+      - true
+      - false
+    types: [number, string, boolean, object, any, unknown, never, interface, enum, namespace]
+    builtins: [console, Math, JSON, Object, Array, Number, String, Promise, fetch, require, parseInt, parseFloat]
+    line_comment: ["//"]
+    block_comment: {open: "/*", close: "*/"}
+    capital_is_type: false
+
+  go:
+    aliases: [golang]
+    keywords:
+      - func
+      - var
+      - const
+      - type
+      - struct
+      - interface
+      - map
+      - chan
+      - go
+      - defer
+      - if
+      - else
+      - for
+      - range
+      - return
+      - package
+      - import
+      - select
+      - switch
+      - case
+      - default
+      - break
+      - continue
+      - fallthrough
+      - nil
+      - true
+      - false
+    types: [int, uint, string, bool, byte, rune, error, any, float64]
+    builtins: [make, append, len, cap, panic, print, println, copy, close, new]
+    line_comment: ["//"]
+    capital_is_type: true
+
+  bash:
+    aliases: [sh, shell, zsh, posix]
+    keywords: [if, then, elif, else, fi, for, in, do, done, while, until, case, esac, function, return, break, continue, export, local, unset, set, shift, trap, exit]
+    builtins: [echo, printf, cd, read, test, true, false, sleep, wait, source]
+    line_comment: ["#"]
+    capital_is_type: false
+
+  json:
+    aliases: [jsonc]
+    keys_are_types: true
+    capital_is_type: false
+    quotes: ['"']
+
+  yaml:
+    aliases: [yml]
+    keys_are_types: true
+    capital_is_type: false
+    line_comment: ["#"]
+
+  # html has no line comment: `line_comment: []` says so, and the screen then colours no comment
+  # at all rather than treating an empty prefix as a comment that matches every row.
+  html:
+    aliases: [xml]
+    keywords: [html, head, body, script, style]
+    line_comment: []
+    block_comment: {open: "<!--", close: "-->"}
+    numbers: false
+    capital_is_type: false
+
+  # A pasted patch is a language too: the fence names it, so a `-` inside ```diff is a deletion and
+  # a `-` inside ```python is a minus. No comment prefix: a `#` line in a patch is content, not a
+  # comment, and no capitalised word in it is a type — most of them are paths.
+  diff:
+    aliases: [patch, unified, qudiff]
+    diff: true
+    line_comment: []
+    capital_is_type: false
