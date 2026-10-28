@@ -46,7 +46,8 @@ std::string PromptComposer::retrieval_contract(const Contract& c) {
 std::string PromptComposer::workflow_contract(const Contract& c) {
     std::string s =
         "## Workflow\n"
-        "- A task with more than one step gets a plan first: a few lines saying what will change, then work it in order.\n"
+        "- A task with more than one step gets a plan first: write it with `todo`, a few items saying what will change, then work it in order.\n"
+        "- The ledger travels as tool output, not as a standing block: you see it in the `todo` result, and after a rebase it comes back in the anchor above the working context. Re-read it there; re-write it if it is gone.\n"
         "- Facts come from running, not guessing. Read the file, run the command, look at what it actually returned.\n"
         "- A change is not done when it compiles; it is done when the thing that changed was run and its result was looked at.\n"
         "- Fix the cause. Suppressing an error or special-casing an input to make a symptom disappear is not a fix.\n"
