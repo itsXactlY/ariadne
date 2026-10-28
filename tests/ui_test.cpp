@@ -601,12 +601,72 @@ int main() {
         const size_t R = Scene::kReasonRows;
         chk(out.size() == R + 3 + 4, "reason tail (capped) + answer heights");
         if (out.size() == R + 3 + 4) {
-            chk(out[0].find("◈ thought") != std::string::npos && out[0].find("40 tok") != std::string::npos, "reason header");
+            // 40 deltas of "step N of the plan" are five word-runs each, so the estimate is ~200
+            // tokens. "40" was the old count of SSE hand-offs, which is not a token count.
+            chk(out[0].find("◈ thought") != std::string::npos && out[0].find("200 tok") != std::string::npos, "reason header");
             chk(out[R].find("step 39") != std::string::npos && out[1].find("step 34") != std::string::npos, "tail = newest lines");
             chk(out[R + 2].find("↑ 34 lines") != std::string::npos, "hidden-lines marker under the border");
             chk(out[R + 3].find("ARIADNE") != std::string::npos && out[R + 3].find("1.2s") != std::string::npos &&
                     out[R + 4].find("The answer.") != std::string::npos, "streamed answer card");
         }
+    }
+
+    // ---- the token number keeps growing: a run boundary never restarts it, a new call adds ----
+    // Measured on the shape that broke: the counter counted SSE hand-offs, so a server that
+    // batches tokens showed "3 tok" for a long answer, and every run boundary — which happens
+    // whenever the render thread claims everything pending — reset the number back to 1.
+    {
+        auto tok_on_row = [&](const Scene& s, const std::string& needle) -> long {
+            for (int y = 0; y < 30; ++y) {
+                const std::string t = s.row_text(y);
+                const size_t p = t.find(needle);
+                if (p == std::string::npos) continue;
+                size_t i = p + needle.size();
+                if (t.compare(i, 3, "≈") == 0) i += 3;   // U+2248 is three bytes; a char cannot hold it
+                long v = 0;
+                while (i < t.size() && t[i] >= '0' && t[i] <= '9') { v = v * 10 + (t[i] - '0'); ++i; }
+                // "508 tok" puts the unit at the cursor; "1.0k tok" leaves ".0k" between the
+                // digits and it, since fmt_tok stops emitting digits at the decimal point.
+                for (size_t off = 0; off <= 4; ++off)
+                    if (t.compare(i + off, 4, " tok") == 0) return v;
+            }
+            return -1;
+        };
+        Scene s{Theme{}};
+        s.set_verbosity(Verbosity::Verbose);
+        Info info;
+        info.model = "m";
+        info.endpoint = "http://127.0.0.1:9/v1";
+        info.tools = 4;
+        info.max_turns = 10;
+        s.set_info(info);
+        s.turn_begin();
+        s.llm_begin();
+        long prev = 0;
+        bool grew = true;
+        for (int i = 0; i < 4; ++i) {   // four deltas, each claimed before the next: four run boundaries
+            s.llm_content("many words in this chunk of streamed answer text");
+            s.present(120, 30, true);
+            const long cur = tok_on_row(s, "✎ answering · ");
+            grew = grew && cur > prev;   // never a reset
+            prev = cur;
+        }
+        chk(grew && prev > 4, "streaming: the answer's token number grows past the hand-off count (" + std::to_string(prev) + ")");
+        LlmStats st;
+        st.completion_tokens = 500;
+        s.llm_end(st);
+        s.llm_begin();
+        s.llm_content("second call, first chunk");
+        s.present(120, 30, true);
+        const long on_row = tok_on_row(s, "✎ answering · ");
+        chk(on_row > 500, "the second call ADDS to the turn's output instead of resetting it (" + std::to_string(on_row) + ")");
+        s.llm_end(st);
+        s.turn_end();
+        s.present(120, 30, true);
+        bool acct = false;
+        for (int y = 0; y < 30; ++y)
+            acct = acct || s.row_text(y).find("out 1.0k") != std::string::npos;
+        chk(acct, "the verbose row reports the turn's total output, not the last call's");
     }
     {   // the tail is fixed height even for one line; hide = one row; full = every line
         auto run = [](ReasonView v, int lines) {

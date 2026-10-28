@@ -162,7 +162,7 @@ struct Entry {
     double ms = 0;           // tool runtime / llm latency
     std::string clock;       // HH:MM:SS
     uint64_t token = 0;      // tool_begin token
-    long n = 0;              // streamed deltas (≈ tokens)
+    long n = 0;              // tokens on this card: every run's estimate added, then the endpoint's real number
     unsigned ver = 0;
     std::shared_ptr<const RecallView> recall;   // memory card
 };
@@ -316,7 +316,8 @@ private:
         // render thread sees a run's bytes, its feed order, its clock and its token count together.
         std::atomic<uint64_t> run_start{0};         // order_ stamp of this run's first byte
         std::atomic<uint64_t> run_end{0};           // order_ stamp of this run's last byte
-        std::atomic<uint64_t> deltas{0};            // deltas in this run — what the card counts as tokens
+        std::atomic<uint64_t> run_tokens{0};        // estimated tokens in this run; a card ADDS each run's
+                                                    // count, so a run boundary never restarts the number
         std::atomic<uint64_t> first_ns{0};          // when this run's first byte landed, ns from the steady epoch
     };
     LiveBuf reason_, say_;
@@ -335,6 +336,7 @@ private:
     std::deque<double> tps_hist_;   // render thread: the last 24 measured rates, oldest first
     long calls_total_ = 0;
     int turn_calls_ = 0, turns_ = 0, tools_turn_ = 0;
+    long turn_out_ = 0;      // output tokens this turn: each call's completion_tokens added
     Phase phase_ = Phase::Idle;
     bool busy_ = false;
     std::string running_tool_;

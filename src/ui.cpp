@@ -142,6 +142,24 @@ std::string fmt_tok(long n) {
     return b;
 }
 
+// Tokens in one streamed delta. A delta is whatever bytes the endpoint handed over in one SSE
+// chunk, so counting deltas is not counting tokens: a server that batches five tokens into one
+// chunk would show 1. The estimate is the usual ~4 characters per token, charged per word-run so
+// a punctuation-heavy run is not billed a token per mark. An estimate, never shown as a fact:
+// `≈` while the call runs, and the endpoint's own number replaces it the moment the call ends.
+static long approx_tokens(const std::string& s) {
+    long t = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\n' || s[i] == '\t' || s[i] == '\r')) ++i;
+        size_t j = i;
+        while (j < s.size() && s[j] != ' ' && s[j] != '\n' && s[j] != '\t' && s[j] != '\r') ++j;
+        if (j > i) t += static_cast<long>((j - i + 3) / 4);
+        i = j;
+    }
+    return t;
+}
+
 std::string group(long n) {   // 1009800 -> "1,009,800"; integers, no locale involved
     const std::string d = std::to_string(n < 0 ? 0 : n);
     std::string o;
@@ -788,13 +806,13 @@ void Scene::stream(LiveBuf& b, const std::string& delta) {
         b.run_start.store(stamp, std::memory_order_relaxed);
         b.first_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch()).count(),
                          std::memory_order_relaxed);
-        b.deltas.store(0, std::memory_order_relaxed);   // tokens are per run, which is per call
+        b.run_tokens.store(0, std::memory_order_relaxed);   // the count is per run; the card adds runs
     }
     const size_t head = static_cast<size_t>(len % b.kCap);
     const size_t first = std::min(delta.size(), b.kCap - head);
     std::memcpy(b.bytes.data() + head, delta.data(), first);
     if (first < delta.size()) std::memcpy(b.bytes.data(), delta.data() + first, delta.size() - first);
-    b.deltas.fetch_add(1, std::memory_order_relaxed);
+    b.run_tokens.fetch_add(approx_tokens(delta), std::memory_order_relaxed);
     b.run_end.store(stamp, std::memory_order_relaxed);
     b.len.store(len + delta.size(), std::memory_order_release);   // publishes the bytes, the stamps, the clock, the count
 }
@@ -970,7 +988,7 @@ void Scene::flush_run(LiveBuf& b, Kind kind, Entry*& live) {
         }
         live->text += text;
         cap_live(live->text);
-        live->n = static_cast<int>(b.deltas.load(std::memory_order_relaxed));
+        live->n += static_cast<long>(b.run_tokens.load(std::memory_order_relaxed));
         ++live->ver;
         phase_ = Phase::Reasoning;
     } else {
@@ -982,7 +1000,7 @@ void Scene::flush_run(LiveBuf& b, Kind kind, Entry*& live) {
         if (!live) live = &push(Kind::Say, "");
         live->text += text;
         cap_live(live->text);
-        live->n = static_cast<int>(b.deltas.load(std::memory_order_relaxed));
+        live->n += static_cast<long>(b.run_tokens.load(std::memory_order_relaxed));
         ++live->ver;
         phase_ = Phase::Writing;
     }
@@ -1093,6 +1111,10 @@ void Scene::apply(Event& e) {
         running_tool_.clear();
         break;
     case Ev::LlmEnd:
+        // The endpoint's number is the fact: it replaces the estimate on the card this call wrote,
+        // and the turn keeps a running output total so a later call adds to it instead of resetting.
+        if (live_say_ && e.llm.completion_tokens > 0) live_say_->n = e.llm.completion_tokens;
+        turn_out_ += e.llm.completion_tokens;
         close_live(e.at, e.llm.latency_ms);
         last_ = e.llm;
         ++calls_total_;
@@ -1106,6 +1128,7 @@ void Scene::apply(Event& e) {
         busy_ = true;
         ++turns_;
         turn_calls_ = tools_turn_ = 0;
+        turn_out_ = 0;
         turn_t0_ = phase_t0_ = e.at;
         phase_ = Phase::Thinking;
         scroll_ = 0;
@@ -1334,7 +1357,7 @@ Canvas Scene::render(const Entry& e, int w) const {
         // dashed, dim: thought, not output. Tail = fixed height, so a live
         // stream never moves the cards below it.
         const std::string head = e.resolved ? "◈ thought" : "◈ thinking";
-        std::string meta = std::to_string(e.n) + " tok";
+        std::string meta = (e.resolved ? "" : "≈") + fmt_tok(e.n) + " tok";   // estimated until the call ends
         if (e.ms > 0) meta += " · " + fmt_ms(e.ms);
         const Style dim{th_.dim}, txt{th_.muted, kNone, kItalic};
         if (view_ == ReasonView::Hide || verb_ == Verbosity::Minimal) {
@@ -1786,10 +1809,10 @@ void Scene::paint_status(Frame& f, int y, int w) const {
         ls = Style{th_.accent, bg, kItalic};
     } else if (busy_ && phase_ == Phase::Reasoning) {
         const auto& wing = th_.wings[static_cast<size_t>(tick_ / 4) % th_.wings.size()];
-        left = wing.first + " reasoning · " + std::to_string(live_reason_ ? live_reason_->n : 0) + " tok " + wing.second;
+        left = wing.first + " reasoning · ≈" + fmt_tok(live_reason_ ? live_reason_->n : 0) + " tok " + wing.second;
         ls = Style{th_.accent, bg, kItalic};
     } else if (busy_ && phase_ == Phase::Writing) {
-        left = "✎ answering · " + std::to_string(live_say_ ? live_say_->n : 0) + " tok";
+        left = "✎ answering · " + fmt_tok(turn_out_ + (live_say_ ? live_say_->n : 0)) + " tok";
         ls = Style{th_.hot, bg, kBold};
     } else if (busy_) {
         const long secs = static_cast<long>(std::chrono::duration<double>(clock::now() - phase_t0_).count());
@@ -1815,7 +1838,10 @@ void Scene::paint_status(Frame& f, int y, int w) const {
     segs.push_back({"", std::to_string(info_.tools) + " tools"});
     if (verb_ == Verbosity::Verbose) {   // accounting only verbose asks for; a narrow row drops these first
         segs.push_back({"calls ", std::to_string(calls_total_)});
-        if (last_.completion_tokens > 0) segs.push_back({"out ", fmt_tok(last_.completion_tokens)});
+        // The turn's running output, not the newest call's: a turn is several calls, and a row
+        // that shows only the last one resets the number every call.
+        const long turn_out = turn_out_ + (live_say_ ? live_say_->n : 0) + (live_reason_ ? live_reason_->n : 0);
+        if (turn_out > 0) segs.push_back({"out ", fmt_tok(turn_out)});
         if (last_.cached_tokens > 0) segs.push_back({"cache ", fmt_tok(last_.cached_tokens)});
         if (last_.attempts > 1) segs.push_back({"sent ", std::to_string(last_.attempts)});
         if (tape_.on) segs.push_back({"epoch ", std::to_string(tape_.epoch) + " · " + fmt_tok(tape_.tokens)});
@@ -1823,7 +1849,7 @@ void Scene::paint_status(Frame& f, int y, int w) const {
         if (plan_.total > 0) segs.push_back({"plan ", std::to_string(plan_.open) + "/" + std::to_string(plan_.total)});
         segs.push_back({"mode ", "verbose"});
     }
-    const std::string brand = "⟁ daedalus-cpp";
+    const std::string brand = "⟁ " + th_.agent_name;   // the skin's name, not the repo's folder
 
     auto width_of = [&](size_t n, bool with_brand) {
         int t = 1 + text_width(left);
