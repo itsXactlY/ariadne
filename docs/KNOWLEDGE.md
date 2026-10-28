@@ -104,16 +104,78 @@ lists every skill. That part is ours.
 app      src/dd_tui.cpp                 composition root only: Home -> config -> catalogues -> Router -> engine
 context  TapeEngine, Tape, Renderer consume Router::on(Signal); no retrieval logic left in the engine
 know     Router . Trigger* . Distiller . WorkingSet . Deliverer . Tripwires
-         Catalogue <- SkillCatalogue <- { DiskSkills, MazeSkills }
+         Catalogue <- SkillCatalogue <- { DiskSkills, MazeSkills }   (Composite, precedence order)
                    <- MemoryCatalogue   (cards cached locally; deep() is the pod)
                    <- ToolCatalogue     (adapter over ToolDeck)
-                   <- SessionCatalogue  (the soak ledger)
+                   <- SessionCatalogue  (planned, never built: section 15)
 mem      Memory (interface, header-only) <- Maze (pod over MCP) ; Soaker (writes)
 core     Home, json, yaml, path
 ```
 
 Dependency rule: `context -> know -> mem -> core`. `context/memory.hpp` is the seam and moves to
 `mem/` untouched.
+
+The same graph as types, with ownership drawn. `Catalogue` is the seam
+(`include/dd/know/catalogue.hpp:22-34`); the composite fans out over `SkillSource` implementations in
+precedence order (`include/dd/know/skills.hpp:32`), and `ToolCatalogue` sits behind the deck
+(`include/dd/know/tool_catalogue.hpp:21`). Nothing below `Router` decides what is offered; `Refresher`
+owns the clock, not the turn (`include/dd/know/catalogue.hpp:42`).
+
+```mermaid
+classDiagram
+    direction LR
+
+    class Catalogue {
+        <<interface>>
+        +kind()* Kind
+        +ready()* bool
+        +healthy() bool
+        +wait_ready(ms) bool
+        +generation()* uint64
+        +size()* size_t
+        +search(q, k)* Hits
+        +open(uri, sec)* Body
+        +map()* string
+    }
+    class SkillSource {
+        <<interface>>
+        +name()* string
+        +cards()* Cards
+        +body(card)* Body
+    }
+    class DiskSkills
+    class MazeSkills
+    class SkillCatalogue {
+        -sources_
+        -index_
+    }
+    class MemoryCatalogue {
+        -store_
+        -index_
+    }
+    class ToolCatalogue
+    class ToolDeck {
+        <<interface>>
+    }
+    class Maze {
+        <<interface>>
+    }
+    class Router {
+        <<facade>>
+    }
+    class Refresher
+
+    Catalogue <|.. SkillCatalogue
+    Catalogue <|.. MemoryCatalogue
+    Catalogue <|.. ToolCatalogue
+    SkillSource <|.. DiskSkills
+    SkillSource <|.. MazeSkills
+    SkillCatalogue o-- SkillSource : composite, precedence order
+    ToolCatalogue o-- ToolDeck : adapter over the deferred catalog
+    MemoryCatalogue o-- Maze : local cards cached, deep() is the pod
+    Router o-- Catalogue : reads, never refreshes
+    Refresher o-- Catalogue : owns the clock, not the turn
+```
 
 ### 5.2 Value types
 
@@ -156,10 +218,10 @@ public:
 | `MazeSkills` (a `SkillSource`) | cards from `skill:*`, bodies from `skillsrc:*`; filters notes, AFE fragments, legacy cards (parses their inner frontmatter) | `SkillIndex::publish/load` |
 | `MemoryCatalogue` | curated rows (`decision: bug: invariant: ops: fact: status: signal: feedback: user: reference:` ~3.7k) as cards cached in `<home>/cache`, delta-synced by id; `search` is local lexical; `deep()` is the pod recall | `Recaller::run` becomes `deep()` |
 | `ToolCatalogue` | adapter over `ToolDeck`'s deferred catalog | `ToolDeck::search` |
-| `SessionCatalogue` | this session's soaked turns by id | `ledger_`, `turn_ids()` |
+| `SessionCatalogue` | *not built* — the soak ledger stayed in the engine (section 15) | — |
 | `Bm25f` | inverted index, field weights, normalized score | `tools::rank_documents` for skills |
 | `Distiller` | `Signal -> Query` (section 7) | the raw-text query |
-| `Trigger` (x6) | pure `plan(signal, working_set)` | scattered calls in `engine.cpp` |
+| `Trigger` (x4) | pure `plan(Signal, PlanContext, Plan&)`; `default_triggers()` builds exactly `TurnStartTrigger`, `ShiftTrigger`, `FailureTrigger`, `StallTrigger` (`src/know/trigger.cpp:130-137`) | scattered calls in `engine.cpp` |
 | `WorkingSet` | what is offered / opened / pinned in which epoch; repeat policy; `reattach()` | `in_window()` |
 | `Deliverer` | renders a `Delivery` for a `Placement` within a token budget | the string building in `Recaller::run` |
 | `Router` | facade: `Delivery on(Signal)`; owns the deep-leg worker and telemetry | `recaller_` + `skills_` in the engine |
@@ -168,16 +230,21 @@ public:
 | `Home` | beside-the-binary paths (section 10) | five hard-coded `~/.daedalus` sites |
 
 Patterns, because they were chosen and not sprinkled: Strategy (`Ranker`, `Trigger`, `SkillSource`),
-Facade (`Router`), Composite (`SkillCatalogue` over sources), Adapter (`ToolCatalogue`), Null Object
-(`NoMemory` when the pod is not configured), Value Objects (`Uri`, `Card`, `Hit`).
+There is no `Ranker` class: ranking is `Bm25f` behind the `Catalogue` interface, so the strategy set is
+`Trigger`, `SkillSource`, and the learn side's `CreditAssigner`, `Author`, `Detector`
+(`include/dd/know/trigger.hpp:32`, `include/dd/know/skills.hpp:32`). Facade (`Router`), Composite
+(`SkillCatalogue` over sources), Adapter (`ToolCatalogue`), Null Object (a null `memory` in
+`Router::Catalogues`, `include/dd/know/router.hpp:53`), Value Objects (`Uri`, `Card`, `Hit`, `Plan`).
 
 ### 5.4 Signals and the engine seam
 
 ```cpp
 using Signal = std::variant<SessionStarted, TurnStarted /*text, anchor*/, CallsFinished /*CallRecord[]*/,
                             Rebased /*epoch*/, Asked /*query, kinds*/>;
-struct CallRecord { std::string tool, args_digest, intent; std::vector<std::string> paths, binaries;
-                    int exit = 0; std::string error_sig; size_t bytes = 0; };
+struct CallRecord { std::string tool, intent, args, digest; std::vector<std::string> paths, binaries;
+                    bool failed, refused, exploring, empty; int exit = 0; std::string error; size_t bytes = 0; };
+// shipped fields (`include/dd/know/signal.hpp:34-47`): `refused` is a gate that held the call, so it is
+// neither an error nor a blind look; `exploring` and `empty` are what the stall trigger counts.
 ```
 
 | Engine hook (exists today) | Router call |
@@ -194,6 +261,102 @@ passes a hidden user item through unchanged (rendered once, byte-stable afterwar
 it. The rebase anchor already proves such an item survives the chat template. One gap: the
 epoch-start collapse pass (`render.cpp`, aged tool groups) knows groups, not notes, so P3 adds
 `Item::note` and collapses a note together with the group it follows.
+
+The seam, as types. `know` hands over through two interfaces only: `agent::ContextEngine` on the loop
+side (`include/dd/agent/agent.hpp:44`, implemented by `TapeEngine`, `include/dd/context/engine.hpp:72`)
+and `EventSink` / `Overlay` to whoever wants feedback (`include/dd/know/event.hpp:45`,
+`include/dd/know/event.hpp:63`), so `learn` can be absent without `know` knowing it is. A refusal is a
+gate, not a branch: `TripwireGate` implements `agent::ToolGate` (`include/dd/know/tripwire.hpp:77`,
+`include/dd/agent/agent.hpp:66-72`) and the loop asks it before a call runs.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class Signal {
+        <<variant>>
+        +SessionStarted
+        +TurnStarted
+        +CallsFinished
+        +Rebased
+        +Asked
+    }
+    class CallRecord {
+        <<value>>
+        +digest
+        +paths
+        +binaries
+        +failed
+        +refused
+        +exploring
+        +empty
+    }
+    class Plan {
+        <<value>>
+        +intents
+    }
+    class Delivery {
+        <<value>>
+        +text
+        +placement
+        +tokens
+    }
+    class Trigger {
+        <<interface>>
+        +name()* string
+        +plan(s, ctx, out)* void
+    }
+    class TurnStartTrigger
+    class ShiftTrigger
+    class FailureTrigger
+    class StallTrigger
+    class Router {
+        <<facade>>
+        -triggers_
+        -ws_
+        -pod_
+    }
+    class WorkingSet {
+        <<value>>
+    }
+    class ContextEngine {
+        <<interface>>
+        +on_steering(notes)* void
+        +after_tools()* void
+    }
+    class TapeEngine
+    class ToolGate {
+        <<interface>>
+        +veto(call)* optional~string~
+    }
+    class TripwireGate
+    class EventSink {
+        <<interface>>
+        +emit(e)* void
+    }
+    class Overlay {
+        <<interface>>
+        +prior(uri) double
+        +learned_terms(uri, out) void
+        +version() uint64
+    }
+
+    Signal o-- CallRecord : CallsFinished carries one per call
+    Trigger <|-- TurnStartTrigger
+    Trigger <|-- ShiftTrigger
+    Trigger <|-- FailureTrigger
+    Trigger <|-- StallTrigger
+    Router o-- Trigger : four, built once
+    Router o-- WorkingSet : what is offered and opened in this epoch
+    Router ..> Signal : on(Signal)
+    Router ..> Plan : triggers fill it
+    Router ..> Delivery : a budgeted note
+    ContextEngine <|.. TapeEngine
+    ToolGate <|.. TripwireGate
+    TapeEngine ..> Router : the retrieval seam, no retrieval logic here
+    Router ..> EventSink : feedback, when someone listens
+    Router ..> Overlay : priors and demand, read every turn
+```
 
 ## 6. When, what, how
 

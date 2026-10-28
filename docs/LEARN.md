@@ -60,6 +60,83 @@ They share the ledger and the lifecycle, and nothing else, so either can be swit
 All in `namespace dd::learn`, `include/dd/learn/`, `src/learn/`. Depends on `know` and `core`; `know` depends only on the
 `EventSink` and `Overlay` interfaces, never on `learn` (dependency rule `learn -> know -> mem -> core`).
 
+The graph as shipped. `LearnService` is the only object the composition root constructs
+(`include/dd/learn/service.hpp:52`, `src/dd_tui.cpp:845`); everything else is private to it, and the two
+interfaces it implements are `know`'s, not its own (`include/dd/learn/sink.hpp:24`,
+`include/dd/learn/overlay.hpp:27`).
+
+```mermaid
+classDiagram
+    direction LR
+
+    class LearnService {
+        <<facade>>
+        +curate() void
+        +author_now(turn) void
+        +sink() EventSink
+        +overlay() Overlay
+    }
+    class Ledger {
+        -journal_
+        -compactor_
+    }
+    class Journal
+    class Compactor
+    class Observer
+    class CreditAssigner {
+        <<interface>>
+    }
+    class RuleCredit
+    class Curator
+    class LearnOverlay
+    class Lifecycle {
+        <<table>>
+        +step(stats, now, record) Changes
+    }
+    class EpisodeRecorder
+    class Detector {
+        <<interface>>
+    }
+    class FixedAfterFailure
+    class LongSuccess
+    class Pinned
+    class Author {
+        <<interface>>
+        +author(episode) optional~Draft~
+    }
+    class TemplateAuthor
+    class Reviewer
+    class SkillSink
+    class QueueSink
+    class EventSink {
+        <<interface>>
+    }
+    class Overlay {
+        <<interface>>
+    }
+
+    LearnService o-- Ledger
+    LearnService o-- Observer
+    LearnService o-- Curator
+    LearnService o-- Lifecycle
+    LearnService o-- EpisodeRecorder
+    LearnService o-- Author
+    LearnService o-- Reviewer
+    LearnService o-- SkillSink
+    LearnService o-- LearnOverlay
+    LearnService o-- QueueSink
+    Ledger o-- Journal : the only writer of &lt;home&gt;/learn
+    Ledger o-- Compactor : sealed segments into a snapshot
+    Observer o-- CreditAssigner : RuleCredit
+    Detector <|-- FixedAfterFailure
+    Detector <|-- LongSuccess
+    Detector <|-- Pinned
+    Author <|-- TemplateAuthor
+    QueueSink ..|> EventSink : the router's feedback side
+    LearnOverlay ..|> Overlay : priors, learned terms, demand
+    Curator ..> Overlay : publishes the snapshot the catalogues read
+```
+
 ### 4.1 Seams into `know` (the only edits to P0–P4)
 
 ```cpp
@@ -143,20 +220,43 @@ no embedder, every learned term inspectable with `ariadne-skills learn why <skil
 |---|---|
 | `EpisodeRecorder` | Keeps a bounded ring (last 3 turns, <= 200 CallRecords, already boiled down: no result bodies) and cuts it into `Episode`s. Evicts as it goes. |
 | `Detector` (Strategy, 3 impls) | `FixedAfterFailure`: an error signature seen >= 2 times, then a call sequence after which it never recurs for 3 rounds. `LongSuccess`: >= 8 rounds on one topic ending in a turn with no failed tail. `Pinned`: the user ran `/learn` (always accepted, skips the stuck-then-solved test). Each returns a score; `Ledger` stores the episode's digest, not its content, unless a Draft is made. |
-| `Author` (interface) | `Draft author(const Episode&, const Catalogue& existing)`. Two impls. `TemplateAuthor`: deterministic, no model; builds a **bug card** (symptom = error signature, fix = the successful call sequence with paths normalised, trigger terms from the distiller). `SidekickAuthor`: asks the sidekick (slot 0, the main model, never cloud; 4096 token cap) to rewrite the template into prose with a when-to-use gist <= 200 chars; falls back to the template on timeout, refusal or a failed review. Runs only when the main slot has been idle for >= 20 s. |
+| `Author` (interface, `include/dd/learn/author.hpp:25`) | `author(const Episode&) -> optional<Draft>` (`:29`). **One impl shipped**: `TemplateAuthor` (`include/dd/learn/author.hpp:31`) — deterministic, no model; builds a **bug card** (symptom = error signature, fix = the successful call sequence with paths normalised, trigger terms from the distiller). The `SidekickAuthor` leg of this plan was never built: nothing in `src/learn/` calls a model, so drafting is a template and nothing else (section 10). |
 | `Reviewer` | Gates a Draft before it exists on disk: size limits; gist length; **secret scan** (tokens, keys, `Authorization`, private paths under `$HOME` other than the project, email); **dedupe** against the catalogue (BM25 of the draft's gist against existing cards: a near-duplicate becomes an *amend proposal* to that card, not a new card); a **no-instruction rule** (the body may not contain imperatives aimed at the harness, e.g. "ignore", "always run", tool-call syntax), because a learned skill is a prompt-injection surface. Rejections are journaled with the reason. |
 | `SkillSink` | Writes accepted drafts: `<home>/skills/learned/<slug>/SKILL.md` (beside the binary, never `~/.daedalus`) and, when the pod is up, `skill:learned:<slug>` + `skillsrc:learned:<slug>` in the maze. Frontmatter carries `origin: learned`, the episode digest, the date, and `state:`. Never overwrites a file without `origin: learned`. |
 | `LearnedSkills` | A `SkillSource` (the existing Composite seam) that lists `skills/learned/`, with the *lowest* precedence, so a human or imported skill of the same name wins, and the `prior` of anything in `Probation` is capped at 0.7. |
 
 ### 4.6 Lifecycle
 
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    Draft --> Probation : review ok, journaled at write (src/learn/service.cpp:124)
+    Draft --> Rejected : review fail, journaled with the reason (src/learn/service.cpp:117)
+
+    Probation --> Active : proven
+    Probation --> Retired : failed twice
+    Probation --> Retired : no win in probation
+    Probation --> Dormant : demand refused in probation
+    Probation --> Dormant : never opened in probation
+
+    Active --> Probation : efficacy fell below the floor, once
+    Active --> Probation : demand refused
+    Active --> Dormant : idle 120 d
+
+    Dormant --> Active : used again
+    Dormant --> Retired : idle a year
+
+    Rejected --> [*]
+    Retired --> [*] : moved to skills/.retired, still in the journal
 ```
-Draft ──review ok──► Probation ──N Helped, 0 Failed──► Active ──idle 120 d──► Dormant ──idle 365 d──► Retired
-   │ review fail           │ 2 Failed, 60 d without a win,         │ efficacy < floor                      (kept in journal)
-   │                       │ demand refused, never opened          │                         ▲
-   ▼                       ▼                                       ▼                         │ last_used again
- Rejected               Retired / Dormant                       Probation (demoted, once)   Active
-```
+
+The edges above are the table in `src/learn/lifecycle.cpp:88-131`, in that order, and the labels are the `why`
+strings it writes into the journal and the frontmatter (`include/dd/learn/lifecycle.hpp:48-52`), so every state
+change is traceable to the rule that caused it. Thresholds are `LifecycleParams`
+(`include/dd/learn/lifecycle.hpp:21-35`): `promote_wins = 3`, `promote_quiet_s = 30 d`,
+`retire_failures = 2`, `probation_max_s = 60 d`, `dormant_after_s = 120 d`, `retire_after_s = 365 d`,
+`demote_floor = 0.25` with `demote_evidence = 5`, `refuse_offers = 8` with `refuse_floor = 0.15`.
 
 Two channels drive those edges, and they own different verdicts:
 
@@ -171,14 +271,19 @@ channel that sees it: `refuse_offers = 8` decayed offers with `conversion_lcb < 
 card to Probation and a Probation card to Dormant. Retirement still requires efficacy draws, because refusal is
 evidence about the *selector*, not about the skill: a card nobody read is not a card that failed.
 
-`Lifecycle` is a table of `Transition{from, to, Guard, Action}` evaluated by the `Curator`; guards read `Stats` only, so
-the policy is data and each transition is a one-line test. Nothing is deleted by the harness: Retired skills move to
-`skills/learned/.retired/` and remain recoverable (the distilled-retention incident, `bug_distilled_retention_deleted_curated`,
-is why).
+`Lifecycle` is a table of `Transition{from, to, why, guard}` (`include/dd/learn/lifecycle.hpp:48-52`); guards read
+`Stats` only, so the policy is data and each transition is a one-line test. It is stepped by
+`LearnService::curate()`, not by the `Curator` (`src/learn/service.cpp:134-140`) — one pass per tick, at most one
+transition per skill, gated by `learn.govern` (`src/dd_tui.cpp:875`). Governance keeps running when drafting is
+off, or a hub the offer bar keeps surfacing sits in probation until a 60-day timer clears it
+(`include/dd/learn/service.hpp:38-41`). Nothing is deleted by the harness: Retired skills move to
+`skills/.retired/` and remain recoverable (the distilled-retention incident,
+`bug_distilled_retention_deleted_curated`, is why).
 
-### 4.7 Curator and Governor
+### 4.7 Curator and budgets
 
-`Curator` runs on the learn thread when idle (at most once per 10 minutes, and after a Compactor pass): folds `Stats`
+`Curator::pass(now)` (`include/dd/learn/curator.hpp:33`) runs on the learn thread when idle (at most once per
+10 minutes, and after a Compactor pass): folds `Stats`
 into a new `OverlaySnapshot` (priors, learned terms), publishes it through a `SnapCell`, and bumps `Overlay::version()`
 only when something moved by more than a threshold, so the catalogue does not rebuild on noise. Every pass also
 publishes a separate `DemandSnapshot` (decayed `offered`, `opened`, conversion lower bound per card) through its own
@@ -186,9 +291,21 @@ cell: it deliberately does **not** bump `version()`, because decayed counts chan
 rebuild the catalogues for evidence the ranking does not use. `Router` reads that snapshot; nothing else decides whether
 a card is offered. The near-miss boost now applies only to a card nobody offered — a card offered a lot and opened never
 is refused, not starved, so the curator no longer pushes a hub up while its own demand says stop. It also writes
-`<home>/learn/report.md` (top movers, dormant cards, rejected drafts and why, hubs). `Governor` holds the budgets: at most
-3 drafts per day, 40 learned skills active, 1 sidekick call in flight, and the kill switches (`learn.enabled`,
-`learn.author`, `learn.feedback`, and a `<home>/learn/OFF` file checked by presence, no polling).
+`<home>/learn/report.md` (top movers, dormant cards, rejected drafts and why, hubs), from
+`LearnService::curate()` (`src/learn/service.cpp:143`).
+- The plan named a `Governor` holding budgets: at most 3 drafts per day, 40 learned skills active, 1 sidekick
+  call in flight, plus the kill switches (`learn.enabled`, `learn.author`, `learn.feedback`, and a
+  `<home>/learn/OFF` file checked by presence, no polling). **No `Governor` class shipped.** The budget that
+  exists is one field and one counter: `ServiceOptions::max_drafts_per_day = 3`
+  (`include/dd/learn/service.hpp:43`), enforced against a day-stamped counter in
+  `LearnService::author_now()` (`src/learn/service.cpp:105-109`) — so the cap is per calendar day and resets
+  on the first draft after midnight. The kill switches are read at construction: `learn.enabled`
+  (`src/dd_tui.cpp:845`) decides whether the service starts at all, and an empty `<home>/learn/OFF` file stops
+  it before the ledger is opened (`src/learn/service.cpp:14-16`); `learn.feedback` (`src/dd_tui.cpp:873`)
+  decides whether the curator runs (`src/learn/service.cpp:141-144`); `learn.author` (`src/dd_tui.cpp:874`)
+  decides whether drafting is allowed and is **opt-in**, unlike `learn.govern` (`src/dd_tui.cpp:875`). The
+  other two caps — 40 learned skills, one sidekick call in flight — do not exist in the code: nothing counts
+  learned skills and nothing calls a model.
 
 ### 4.8 The facade and the command surface
 

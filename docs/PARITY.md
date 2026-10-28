@@ -70,7 +70,6 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
 typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1138`) and `Agent::steer_hook`
 (`src/dd_tui.cpp:1198`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
-```
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:380`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
@@ -141,6 +140,87 @@ of one operator's asks, not a distribution; the curve is reproducible with the t
 only way these numbers stay true. What the rule costs per offer is a line in the prompt; what
 it saves is the `find()` call the operator would otherwise make, and the corpus cannot measure
 that second half — a saved call leaves no trace in the log.
+
+## Seam graph
+
+The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
+becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
+nothing (`src/dd_tui.cpp:792`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:333`). The hand-off seam is the same
+object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
+
+```mermaid
+classDiagram
+    direction LR
+
+    class Canvas {
+        <<surface>>
+        +put(x, y, ch, style) void
+        +text(x, y, s, style, max_w) int
+        +to_ansi(color, truecolor) string
+    }
+    class Frame {
+        -prev_ : vector~Cell~
+        +present(truecolor) string
+    }
+    class Scene {
+        -th_ : const Theme*
+        -grammars_ : const GrammarSet*
+        -frame_ : unique_ptr~Frame~
+        -cache_ : deque
+        +reconcile() void
+    }
+    class Theme
+    class GrammarSet {
+        +load(roots) GrammarSet
+        -table : Grammar map
+    }
+    class Grammar
+    class CodeCtx {
+        +set : const GrammarSet*
+        +lang : const Grammar*
+        +highlight_row(text, out, out_w) void
+    }
+    class SlotRing {
+        <<ring>>
+        +publish(payload) bool
+        +claim_one(out) bool
+        +refused() uint64
+    }
+    class LiveBuf {
+        <<buf>>
+    }
+    class QueueSink {
+        <<interface>>
+        +publish(Event) void
+    }
+    class Router
+    class Agent {
+        +steer_hook : function~string()~
+    }
+    class TapeEngine {
+        +on_steering : function~string()~
+    }
+
+    Frame --|> Canvas
+    Scene o-- Frame : frame_
+    Scene o-- Theme : th_, owned by the root
+    Scene o-- GrammarSet : grammars_, owned by the root
+    Scene o-- LiveBuf
+    Scene ..> CodeCtx : paint_row carries it
+    CodeCtx ..> GrammarSet : table lookup per line
+    GrammarSet o-- Grammar
+    Scene o-- SlotRing : q_, 256 slots of Event
+    Router o-- SlotRing : opened_q_, 64 slots of Opened
+    QueueSink o-- SlotRing : 8192-slot ceiling, runtime cap
+    Agent ..> SlotRing : the typed 16-slot steering ring
+    Agent ..> TapeEngine : steer_hook polled at segment boundaries
+```
+
+Anchors: `include/dd/ui.hpp:73` (Canvas), `:101` (Frame), `:206-217` (GrammarSet::load), `:234-243` (CodeCtx),
+`:328` (Scene), `:425` (`SlotRing<256, Event> q_`), `:443` (LiveBuf), `:462` (the paint cache, 8 rows of 200 ms),
+`include/dd/agent.hpp:99` (`steer_hook`), `include/dd/engine.hpp:86` (`on_steering`),
+`include/dd/learn/sink.hpp:43`, `include/dd/know/router.hpp:120`, `include/dd/context/maze.cpp:246`
+(`SlotRing<256, Job>`).
 
 ## Plan
 
