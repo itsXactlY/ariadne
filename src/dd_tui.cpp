@@ -1,5 +1,5 @@
-// src/dd_tui.cpp — the Daedalus C++ harness in a terminal: dd::ui panels over
-// the agent loop.
+// src/dd_tui.cpp — the Ariadne harness in a terminal: dd::ui panels over
+// the agent loop. The file keeps its port name; `build/ariadne` is what ships.
 //
 //   * tty: full-screen, fixed layout (transcript cards | session/engine/tools
 //     sidebar, prompt box, status row) on the alternate screen. agent.run()
@@ -299,7 +299,7 @@ int hide_stderr(const std::string& dir) {
     std::error_code ec;
     int fd = -1;
     if (std::filesystem::is_directory(dir, ec))
-        fd = ::open((dir + "/dd_tui.log").c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        fd = ::open((dir + "/ariadne.log").c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd < 0) fd = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     const int saved = ::dup(STDERR_FILENO);

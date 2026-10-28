@@ -121,9 +121,9 @@ int main() {
         "init --from a missing file says why");
 
     // ---- the example config in the repo is the embedded default (generated from it)
-    for (const char* rel : {"examples/daedalus/config.yaml", "../examples/daedalus/config.yaml"})
+    for (const char* rel : {"examples/ariadne/config.yaml", "../examples/ariadne/config.yaml"})
         if (fs::exists(rel)) {
-            chk(slurp(rel) == default_config(), "examples/daedalus/config.yaml is the embedded default");
+            chk(slurp(rel) == default_config(), "examples/ariadne/config.yaml is the embedded default");
             break;
         }
 

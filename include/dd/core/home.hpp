@@ -81,7 +81,7 @@ bool ensure_home(const Home& h, std::string* why = nullptr);
 // Never overwrites. Returns true when a file was written.
 bool init_config(const Home& h, const std::string& from, std::string* why = nullptr);
 
-// The reference config for a fresh home (examples/daedalus/config.yaml).
+// The reference config for a fresh home (examples/ariadne/config.yaml).
 const char* default_config();
 
 }  // namespace core

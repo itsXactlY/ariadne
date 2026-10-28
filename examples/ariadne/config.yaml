@@ -4,7 +4,7 @@
 #   ariadne --init --from FILE        # ... starting from an existing config
 #   ariadne --home DIR                # run from another folder (config.yaml, skills/, rules/, state/ ...)
 #
-# Nothing is read from ~/.daedalus (the Python Daedalus's home). `dd import-daedalus`
+# Nothing is read from ~/.daedalus (the Python Daedalus's home). `ariadne-skills import-daedalus`
 # copies skills and skins over once, on request.
 #
 # Env overrides: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS.

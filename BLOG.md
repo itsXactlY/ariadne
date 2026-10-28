@@ -22,7 +22,7 @@ So the whole evolution arc is five prompts wide. Nothing else asked for it.
 Not a rewrite. The run loop, `core::Message`, the hand-rolled `core::Json`,
 the tool registry — already ported and green behind **64 test suites**. The
 only missing leaves were the HTTP transport (libcurl), three real filesystem
-tools, and an entrypoint. One `int main()` later there is a `build/dd_agent`
+tools, and an entrypoint. One `int main()` later there is a `build/ariadne-agent`
 that drives a live llama.cpp OpenAI endpoint and does real I/O.
 
 The ground rules got written down before the fun started: plain `g++` +

@@ -2,7 +2,7 @@
 //
 // It does one thing worth writing down: it compiles itself, then compiles the harness.
 // This TU is built by a bare `g++` with nothing else in the tree built, then re-execs
-// itself, so the compiler invocation that produces dd is the one dd's own build runs.
+// itself, so the compiler invocation that produces ariadne is the one ariadne's own build runs.
 //
 // Deliberately absent: toolchain probes, a suite gate, a doc audit, skill seeding, an
 // import step, a captured-output pipe. If libcurl or OpenMP is missing `make` says so in
@@ -12,7 +12,7 @@
 //
 //   build/ariadne-install                            # into $HOME/projects/daedalus
 //   build/ariadne-install --home DIR                 # into DIR — DIR owns config.yaml
-//   build/ariadne-install --home DIR --agent --cli   # also ariadne-agent, also dd
+//   build/ariadne-install --home DIR --agent --cli   # also ariadne-agent, also ariadne-skills
 //
 // Exit codes: 0 installed, 2 bad arguments, 3 build or install failed.
 
@@ -54,7 +54,7 @@ struct Opts {
     fs::path root;      // the repo: holds Makefile and installer/ariadne-install.cpp
     fs::path home;      // the install: owns config.yaml, state/, logs/
     bool agent = false; // also install ariadne-agent
-    bool cli = false;   // also install dd (the skill catalogue CLI)
+    bool cli = false;   // also install ariadne-skills (the skill catalogue CLI)
     bool booted = false;
     bool self_check = false;
 };
@@ -87,7 +87,7 @@ bool parse(int argc, char** argv, Opts& o, std::string& err) {
     return true;
 }
 
-// dd refuses two kinds of folder as its home and the sidegag mirrors it, because `make`
+// ariadne refuses two kinds of folder as its home and the sidegag mirrors it, because `make`
 // never checks it: make's output is not an install, and ~/.daedalus belongs to the Python
 // harness — sharing it makes two installs fight over one config.yaml.
 bool home_refusable(const fs::path& home, std::string* why) {
@@ -98,7 +98,7 @@ bool home_refusable(const fs::path& home, std::string* why) {
     }
     const char* h = std::getenv("HOME");
     if (h && home == fs::path(h) / ".daedalus") {
-        if (why) *why = "~/.daedalus belongs to the Python Daedalus; dd lives somewhere else";
+        if (why) *why = "~/.daedalus belongs to the Python Daedalus; ariadne lives somewhere else";
         return true;
     }
     return false;
@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     if (home_refusable(o.home, &why)) { say("refusing home: " + why); return EXIT_FAILED; }
     if (!fs::exists(o.root / "Makefile")) { say("no Makefile at " + o.root.string()); return EXIT_FAILED; }
 
-    // The folder has to exist before anything can be installed into it. dd's --init may
+    // The folder has to exist before anything can be installed into it. ariadne's --init may
     // create a home, but it runs after the copy, so an absent DIR fails the copy first —
     // with a message about a file that cannot be created, which is not the real cause.
     std::error_code hc;
@@ -143,8 +143,8 @@ int main(int argc, char** argv) {
     if (!fs::exists(o.home, hc)) { say("cannot create " + o.home.string()); return EXIT_FAILED; }
 
     // ariadne is always built and installed: it is the harness, and it is the only binary
-    // that can write dd's reference config. dd's own --init seeds the home — dd owns that
-    // config, so an installer holding a second copy of it would drift the moment dd
+    // that can write ariadne's reference config. ariadne's own --init seeds the home — ariadne owns
+    // that config, so an installer holding a second copy of it would drift the moment ariadne
     // changes one key.
     std::vector<std::string> targets{"ariadne"};
     if (o.agent) targets.push_back("ariadne-agent");

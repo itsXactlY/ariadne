@@ -297,7 +297,7 @@ std::string MCPClient::instructions() {
     Json params = core::json_obj(
         {{"protocolVersion", jsp(core::json_str(kProtocolVersion))},
          {"capabilities", jsp(core::json_obj())},
-         {"clientInfo", jsp(core::json_obj({{"name", jsp(core::json_str("daedalus-cpp"))}, {"version", jsp(core::json_str("0.1"))}}))}});
+         {"clientInfo", jsp(core::json_obj({{"name", jsp(core::json_str("ariadne"))}, {"version", jsp(core::json_str("0.1"))}}))}});
     Json res = rpc("initialize", params);
     try { exchange("notifications/initialized", Json{}, true); } catch (...) {}   // best effort: a stateless server may not care
     if (res.type != Json::Obj) return "";

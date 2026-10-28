@@ -23,7 +23,7 @@ special-cased.
 ## W1 — the tool-result envelope (highest cost, one seam)
 
 **Closed.** The caps are config-driven and a cut names itself. `tool_output`
-ships in `src/core/default_config.cpp` and `examples/daedalus/config.yaml`;
+ships in `src/core/default_config.cpp` and `examples/ariadne/config.yaml`;
 `tools::resolve_tool_output_from(cfg)` resolves it against the config the
 process loaded, and both mains hand the result to `ShellOptions::max_output`
 and `FsLimits` (`max_lines`, `max_line_length`, `max_read_bytes`) instead of
@@ -195,7 +195,7 @@ on asks that opened nothing at all, and was right at rank 1 only 23 of 70 times 
 | the term-count lever is not the lever | the grid | `min_matched` 1→4 at every mass keeps precision between .32 and .44; `matched>=4` is strictly worse (104 offers, 8 right, prec .32, top-3 recall 28 → 10). So `min_matched` stays 2 |
 | the absolute evidence bar is | the grid | mass 6.4 → prec .34, 7.12 → .37, **9.5 → .41**, 11.9 → .36 at the same recall. `offer_mass` 6.5 → 9.5, `calibrated_at` 568 → 502 (measured, not guessed) |
 | opening a head costs the model a head | the open-bar sweep | at 0.25 the rule opens 73 heads for 9 right ones; at 0.40 it opens 17 for 4. `open_score` 0.25 → 0.40 |
-| the numbers reach the running harness | `Router::offers` passes `cat->size()` | `examples/daedalus/config.yaml` carries the same three numbers and the generated `default_config.cpp` shows them; `build/dd_know_router_tests` re-derives `needed()` from the defaults (9.5 at 502, 4.65 at 20, 12.6 at 3700, never under 1) |
+| the numbers reach the running harness | `Router::offers` passes `cat->size()` | `examples/ariadne/config.yaml` carries the same three numbers and the generated `default_config.cpp` shows them; `build/dd_know_router_tests` re-derives `needed()` from the defaults (9.5 at 502, 4.65 at 20, 12.6 at 3700, never under 1) |
 | the curve is reported, not asserted | `docs/PARITY.md` "Calibration" | the two-row before/after table, the lever finding, and what the numbers are *not*: precision is a floor because labels are what the model did rather than what it should have done, and the corpus cannot measure the `find()` call a good offer saves |
 
 `make test`: 0 test binaries failed.
@@ -213,7 +213,7 @@ moves code cannot leave a doc pointing somewhere else.
 | reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 59 TUs, `ariadne-agent` 18, `ariadne` 82; closure reaches **176 files** (83 TUs, 93 headers); **33 of 116** `src/*.cpp` linked into no product binary, **49 of 142** headers reached by none, 16 of 32 header-only ports unreached |
 | the README's unwired list is now bidirectional | `README.md` "Ported but not wired" | names every unwired TU by name or directory *and* rejects a name the closure reaches; `src/tools/mcp_schema_cache.cpp` was on the list and is **wired** since W6 (`Makefile:139-140`), so it is off it |
 | a citation must point at the thing it describes | `citations()` | 25 citations checked; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (12 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts (`brief.md`, `report.md`, `tape.jsonl`) are excluded |
-| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `527`, `790-810`, `1019-1032`, `1177`, `1338-1344`; steering `1159` → `1195`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/daedalus/config.yaml:71-79`, not the generated `default_config.cpp` |
+| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `527`, `790-810`, `1019-1032`, `1177`, `1338-1344`; steering `1159` → `1195`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:71-79`, not the generated `default_config.cpp` |
 | findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`src/dd_tui.cpp:763-768,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
 `make doc-audit`: clean — 25 citations, 0 unresolved or drifting, 0 wiring claims.

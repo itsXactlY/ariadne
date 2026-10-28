@@ -311,7 +311,7 @@ goes.
 ## 10. Home beside the binary
 
 ```
-<dir>/dd_tui          the binary
+<dir>/ariadne          the binary
 <dir>/config.yaml     config
 <dir>/skills/ rules/ skins/      own content
 <dir>/state/          soak-spool.jsonl, spill/<session>/
@@ -323,7 +323,7 @@ goes.
 **Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too, `DAEDALUS_HOME` stays
 as an override for the ported Python modules. The five hard-coded sites go.
 
-- `ariadne --init` writes `config.yaml` from `examples/daedalus/config.yaml` and creates the dirs
+- `ariadne --init` writes `config.yaml` from `examples/ariadne/config.yaml` and creates the dirs
   (`--from FILE` copies an existing config once).
 - `ariadne-skills import-daedalus [--skills] [--skins]` copies from `~/.daedalus` explicitly, once. Nothing is
   shared at runtime.

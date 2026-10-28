@@ -10,7 +10,7 @@ on branch `fix/audit-20261024`, not read out of a README.
 |---|---|---|
 | Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:232,337,383-403,420` |
 | Retrieval | One `Router` at turn start, after tool batches, on failure; local BM25f catalogues + async pod leg | `src/know/trigger.cpp`, `src/know/router.cpp` |
-| Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/daedalus/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
+| Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/ariadne/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
 | Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:934-944` |
 | Learning | `dd::learn` service: episodes, credit, priors, drafted skills, lifecycle | `docs/LEARN.md`, `src/learn/*` |
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
@@ -127,7 +127,7 @@ top-3 recall down from 28 to 10). Sweeping the absolute mass bar is what moves i
 7.12 → .37, 9.5 → **.41**, 11.9 → .36. So `min_matched` stays 2, `offer_mass` goes 6.5 → 9.5,
 `calibrated_at` 568 → 502 (the size it was fitted at, measured rather than guessed), and
 `open_score` 0.25 → 0.40 — opening the head of a skill costs the model a whole head, and at
-0.25 that bought 73 heads for 9 right ones against 17 for 4 at 0.40. `examples/daedalus/config.yaml`
+0.25 that bought 73 heads for 9 right ones against 17 for 4 at 0.40. `examples/ariadne/config.yaml`
 carries the same three numbers, and `tests/know_router_test.cpp` re-derives `needed()` from them.
 
 **What the numbers are not:** ground truth is behavioural, so precision is a floor, not a

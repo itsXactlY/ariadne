@@ -1,4 +1,4 @@
-// ariadne-skills — daedalus-cpp harness CLI (the skill catalogue, and the tools to keep it honest).
+// ariadne-skills — the Ariadne harness CLI (the skill catalogue, and the tools to keep it honest).
 //
 //   ariadne-skills list [--category C] [--limit N] [--names-only]   the merged catalogue: ./skills, external dirs, the maze
 //   ariadne-skills view NAME [FILE] [--page N|all]                  a skill, a page at a time (or one of its files)

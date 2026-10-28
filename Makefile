@@ -85,8 +85,8 @@ LEARN := $(wildcard src/learn/*.cpp) src/core/crc32c.cpp $(PROVENANCE)   # the s
 KNOWDEP := $(KNOW) $(SKILLS) $(SHA256) $(CONFIG) $(COREHOME)
 KNOWPOD := src/context/recall.cpp src/context/maze.cpp src/context/deck.cpp $(NET) $(MCP) $(TSEARCH) $(TOOLS)
 
-# the embedded default config is examples/daedalus/config.yaml, byte for byte
-src/core/default_config.cpp: examples/daedalus/config.yaml
+# the embedded default config is examples/ariadne/config.yaml, byte for byte
+src/core/default_config.cpp: examples/ariadne/config.yaml
 	{ printf 'namespace dd {\nnamespace core {\nconst char* default_config() {\n    return R"DDCFG('; cat $<; printf ')DDCFG";\n}\n}  // namespace core\n}  // namespace dd\n'; } > $@.tmp.$$$$ && mv $@.tmp.$$$$ $@
 
 $(BUILD)/dd_home_tests: $(CORE) $(COREHOME) $(HOMEINIT) include/dd/core/home.hpp tests/core_home_test.cpp

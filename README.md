@@ -3,12 +3,12 @@
 
 <p align="center"><img src="Daedalus-CPP.png" alt="Daedalus-CPP" width="90%"/></p>
 
-**TL;DR:** C++20 port of the Daedalus agent. Plain `g++` + `Makefile`. One real agent binary (`build/dd_agent`) that drives the ported run loop over a live llama.cpp OpenAI endpoint via libcurl, with working `read_file`/`write_file`/`list_dir` tools doing real I/O.
+**TL;DR:** C++20 port of the Daedalus agent. Plain `g++` + `Makefile`. One real agent binary (`build/ariadne-agent`) that drives the ported run loop over a live llama.cpp OpenAI endpoint via libcurl, with working `read_file`/`write_file`/`list_dir` tools doing real I/O.
 
 ```
 make                         # build/ariadne, the harness (default goal)
 make build/ariadne-skills                # the skill/learn CLI
-make build/dd_agent          # the plain agent binary (links -lcurl)
+make build/ariadne-agent          # the plain agent binary (links -lcurl)
 make test                    # every test binary, one after another; keeps going and fails at the end
 make doc-audit               # re-derive the wiring list and every doc anchor from the tree
 make BUILD=build-x ...       # any target into another output folder (parallel work trees)
@@ -31,12 +31,12 @@ The rest stay unwired **by design**: `website_policy`/`threat_patterns` have no 
 ## Run the agent
 
 ```
-build/dd_agent                                  # msg on stdin, config.yaml beside the binary
-build/dd_agent path/to/config.yaml -- hello     # config arg, then -- , then message words
-echo "list files in /tmp/ using list_dir" | build/dd_agent
+build/ariadne-agent                                  # msg on stdin, config.yaml beside the binary
+build/ariadne-agent path/to/config.yaml -- hello     # config arg, then -- , then message words
+echo "list files in /tmp/ using list_dir" | build/ariadne-agent
 ```
 
-**Everything lives beside the binary.** `build/ariadne --init` writes `config.yaml` (the embedded copy of `examples/daedalus/config.yaml`: model, turns, skin, MCP, denylist, knowledge) and `state/ cache/ logs/` next to it; `--init --from FILE` starts from an existing config, `--init --rules` also installs a starter set of tripwires. `skills/`, `rules/`, `skins/` and an optional `brief.md` sit there too. Nothing is read from `~/.daedalus` (the Python Daedalus's home): `ariadne-skills import-daedalus` copies skills and skins over once, on request. Resolution, first match wins: `--home DIR` → the folder of `--config FILE` (or a bare path argument) → `$DD_HOME` (or `$DAEDALUS_HOME`) → the binary's folder when it holds a `config.yaml` → the folder ariadne was started from when it holds a `config.yaml` → a folder that already has `state/ cache/ logs/ learn/`. `~/.daedalus` is refused as a home, and so is a `build/` folder picked implicitly (`make install` refuses both, rather than discovering them after the build). The message is stdin, or the words after `--`.
+**Everything lives beside the binary.** `build/ariadne --init` writes `config.yaml` (the embedded copy of `examples/ariadne/config.yaml`: model, turns, skin, MCP, denylist, knowledge) and `state/ cache/ logs/` next to it; `--init --from FILE` starts from an existing config, `--init --rules` also installs a starter set of tripwires. `skills/`, `rules/`, `skins/` and an optional `brief.md` sit there too. Nothing is read from `~/.daedalus` (the Python Daedalus's home): `ariadne-skills import-daedalus` copies skills and skins over once, on request. Resolution, first match wins: `--home DIR` → the folder of `--config FILE` (or a bare path argument) → `$DD_HOME` (or `$DAEDALUS_HOME`) → the binary's folder when it holds a `config.yaml` → the folder ariadne was started from when it holds a `config.yaml` → a folder that already has `state/ cache/ logs/ learn/`. `~/.daedalus` is refused as a home, and so is a `build/` folder picked implicitly (`make install` refuses both, rather than discovering them after the build). The message is stdin, or the words after `--`.
 
 ## Install it — a sidegag that compiles itself
 
@@ -83,7 +83,7 @@ build/ariadne path/to/config.yaml -- "msg"      # single-shot
 ### TUI internals (`dd::ui`)
 
 - **Layout, fixed geometry:** transcript panel | 34-col sidebar (`session`, `engine`, `plan`, `tools`) over a 3-row prompt box and a status row. Panels are rounded boxes with their titles set into the border. The sidebar drops under 100 cols; under 60×14 the screen says so. Cards are at most 112 cols wide.
-- **Cards:** user = gold bar; answer = rounded `⟁ DAEDALUS ⟁` box with the call latency; tool = square card of **fixed height** (name, status `queued`/spinner/`✓ 1.2s`/`✗`, flattened args, two-line result preview); notes; errors; a rule closing each turn (`turn 3 · 4 calls · 2 tools · 41.2s`).
+- **Cards:** user = gold bar; answer = rounded `⟁ ARIADNE ⟁` box with the call latency; tool = square card of **fixed height** (name, status `queued`/spinner/`✓ 1.2s`/`✗`, flattened args, two-line result preview); notes; errors; a rule closing each turn (`turn 3 · 4 calls · 2 tools · 41.2s`).
 - **Verbosity:** `/verbose off|normal|full` (a bare `/verbose` toggles), `display.verbose`, env `DD_VERBOSE`. `off` folds a turn to a glance (4-line answers, 2-line arguments, one-line notes); `full` opens everything — argument values unclipped to 240 cols, results up to 48 rows, reasoning every line — and puts on the status row the accounting nothing else asks for (`calls`, `out`, `cache`, `epoch`, `deferred`, `plan N/M`, `mode verbose`). It also lowers the sidebar's height gates, so the token, cache and epoch readouts survive on a short terminal. One more cache key: cards re-block when it changes, never per frame. A result the
 tool cut states the cut rather than the card's cap: the header carries the tool's
 dropped count (`✓ 95ms · 1,001,800 bytes dropped`), `full` adds the reconciliation
@@ -100,7 +100,7 @@ clipped away.
 - **Render:** `Canvas` (16-byte padding-free `Cell`, wide-glyph aware) → `Frame::present()` diffs against the last frame and emits only changed cells, inside synchronized output (`?2026`), on the alternate screen. An unchanged frame writes nothing.
 - **Threads, no locks, no queues:** a lifecycle event publishes into the scene's fixed-slot ring (`core::SlotRing`) — one `fetch_add` for the order stamp, one CAS for ownership — and a streamed delta is not an event at all: its bytes go into a 512 KiB buffer its producing thread owns alone and only the **length** word is shared (bytes land before the length moves, release), so a token costs no node and no copy. The render thread owns every bit of scene state and claims what was published. Nothing in `src` or `include` holds a mutex, a `lock_guard` or a `condition_variable`. Measured across a 200-delta turn: the hand-off allocates **0** where the queue this replaced allocated **214**. A full ring refuses and counts (`dropped_events()`, `dropped_live_bytes()`); nothing is dropped without a number attached. `Agent::interrupt_requested` is `std::atomic<bool>`, and doubles as the libcurl abort flag, so Esc cancels an LLM call in flight (measured: 0.86 s from Esc to ready during a live generation).
 - **SIMD + OpenMP (`dd/ui_simd.hpp`):** cell diff, ASCII scan/width/widen as AVX-512 (F+BW+VL) / AVX2 / scalar kernels, picked once by CPUID — one binary for every box. Rows encode in parallel (OpenMP) on big frames, cards re-wrap in parallel after a resize; small frames stay serial so the TUI never wakes threads on cores the model uses. `tests/ui_test.cpp` checks each kernel set the CPU has against scalar, and 1-thread vs 8-thread frames byte for byte. The AVX-512 set has not run on hardware yet (Zen 2 here; QEMU TCG has no AVX-512).
-- **Input:** raw `termios` (restored on exit and on fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse wheel (`DD_TUI_MOUSE=0` leaves the mouse to the terminal), UTF-8 line editing, history. Enter sends (while busy: folded into the running turn at the next tool-round boundary and counted `(N)` until it lands; if no round follows, the idle loop drains it one per turn), Esc/Ctrl-C interrupt, PgUp/PgDn or wheel scroll, Tab completes `/help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full /plan /context /rebase /resume /clear /learn /interrupt /mcp /quit` and their arguments, Ctrl-L redraws. stderr goes to `<home>/logs/dd_tui.log` while the screen is up.
+- **Input:** raw `termios` (restored on exit and on fatal signals), CSI/SS3 keys, bracketed paste, SGR mouse wheel (`DD_TUI_MOUSE=0` leaves the mouse to the terminal), UTF-8 line editing, history. Enter sends (while busy: folded into the running turn at the next tool-round boundary and counted `(N)` until it lands; if no round follows, the idle loop drains it one per turn), Esc/Ctrl-C interrupt, PgUp/PgDn or wheel scroll, Tab completes `/help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full /plan /context /rebase /resume /clear /learn /interrupt /mcp /quit` and their arguments, Ctrl-L redraws. stderr goes to `<home>/logs/ariadne.log` while the screen is up.
 - **No tty** (`-- msg` or piped stdin): the same cards print inline, in order.
 - `run_terminal` runs `{ cmd; } </dev/null 2>&1`: a child never reads the raw-mode tty.
 
@@ -178,7 +178,7 @@ static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems,
 
 TL;DR of how this tree got here, oldest → newest:
 
-1. **Seed.** One plain goal: get a *running* `int main()` agent (`build/dd_agent`) that drives the already-ported run loop (`src/agent/agent.cpp`) against the real llama.cpp OpenAI endpoint — libcurl transport + real filesystem tools.
+1. **Seed.** One plain goal: get a *running* `int main()` agent (`build/ariadne-agent`) that drives the already-ported run loop (`src/agent/agent.cpp`) against the real llama.cpp OpenAI endpoint — libcurl transport + real filesystem tools.
 2. **Ported base, not rewritten.** The run loop, `core::Message`, `core::Json`, tool registry were already ported and green (a 64-suite base then, 86 test binaries now). Only the missing leaves got written: the HTTP transport + the FS tool handlers + the entrypoint.
 3. **Scale.** Long evolution, heavy tool churn, one hard crash (libcurl 4-arg callback SIGSEGV) burned most of the tokens — then the 4-param sink fix, clean `-Werror` rebuild, live smoke.
 4. **Proof of concept (this README).** A working binary + documented gotchas + verified smoke = the *context tape*: the ground rules of the port. Everything above this line is that PoC baseline.
