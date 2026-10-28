@@ -85,13 +85,32 @@ verbosity grows by one row (16 → 17) because the cut row is real.
 
 ## W3 — fold duplicated inline logic into the ported modules (no new behavior)
 
-- `binary_extensions::has_binary_extension` vs the inline detection at
-  `fs_tools.cpp:133`, and `patch_apply`'s binary refusal which is currently only
-  exercised by a test. One source of truth, extension list from the module.
-- `tools::interrupt` vs the inline cancel path: `src/dd_tui.cpp:187-210`
-  (`g_cancel`, SIGINT/SIGTERM/SIGHUP) and `ui.cpp:911-917` (fills
-  `{"error":"cancelled"}` for skipped calls). Move the state into the module and
-  keep the same semantics.
+W5's two premises were falsified by the tree on 2026-10-28 and are deleted here,
+not worked around:
+
+- ~~`binary_extensions::has_binary_extension` vs the inline detection at
+  `fs_tools.cpp:133`~~ — the inline check is not an extension check. It is a
+  content probe: `std::memchr(buf.data(), 0, min(r, kBinaryProbe))` with
+  `kBinaryProbe = 8192` (`src/tools/fs_tools.cpp:29,130,319`). The module is a
+  lowercase-extension-set lookup with **zero call sites** in `src/` or
+  `include/`. Making it the source of truth would *change behavior* — it refuses
+  a text file named `.dat`/`.db`/`.idx` and accepts a binary with no NUL inside
+  the probe window — so it is not a refactor. The only honest shape left is an
+  extension **pre-filter** that skips the open+read, with the NUL probe staying
+  authoritative and the reply byte-identical; that is a cost change, not a fold,
+  so it belongs in its own wave with its own measurement.
+- ~~`patch_apply`'s binary refusal, exercised only by a test~~ — there is no
+  binary check in `src/tools/patch_apply.cpp` at all. The refusal lives in
+  `fs_tools.cpp:319`, the edit path.
+
+**Still in scope, and it is a real fold:** `tools::interrupt` vs the inline cancel
+path — `src/dd_tui.cpp:194-206` (`g_cancel`, `g_sig`, `on_term`,
+`install_term_handlers`) and `src/ui.cpp:1407` (fills `{"error":"cancelled"}` for
+skipped calls). Constraint found by reading, not assumed: the module models a
+*global* flag (`set_interrupt`/`is_interrupted`), while the live path hands the
+running command a **per-call** `std::atomic<bool>*` through `g_cancel`. The fold
+must keep the per-call flag, or Esc stops one command and cancels the next one
+too.
 
 Invariant that must survive the move: **every tool call the loop skipped gets a
 result message**. That is what keeps the tape legal. Proof: existing tests stay
@@ -121,15 +140,19 @@ second send instead of ending the turn.
 
 ## W5 — redact untrusted server text at the point it enters the prompt
 
-`src/dd_tui.cpp:649-654` puts a server's `description` and `inputSchema` into the deck
-verbatim, and server `instructions` into notes (`:625-627`); `agent::mask_token` is
-applied only inside `render.cpp:44-45`. Apply the existing masking to MCP description
-and instruction **strings only** — not to schema nodes (names and enums must stay
-exact, and the probes below show the schemas need no rewriting here). No capability
-is added or removed; long key-like tokens from a server stop riding every subsequent
-prompt. Proof: a server whose description carries a key-shaped token renders masked
-in the composed prompt while tool names and enum values stay byte-identical.
-
+**Closed** by `a42b913` (ancestor of HEAD). One rule: a server's prose is masked
+where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:686-688`
+masks the tool `description` through
+`dd::agent::mask_secret_tokens(desc->str, SecretPolicy::ServerProse)`;
+`src/dd_tui.cpp:731-733` masks the server's `instructions` the same way. The
+`inputSchema` node is deep-copied untouched (`:690`), so names, enums and
+`required` stay byte-identical — a masked schema would make the model call things
+the server never offered. `SecretPolicy::ServerProse` deliberately drops the
+slash rule (`include/dd/agent/redact.hpp:52`): a path is prose, not a credential,
+so `src/tools/shell.cpp` would have been starred. Tool output keeps the old
+policy through `mask_secrets` → `src/context/render.cpp:31`, which calls the
+module rather than copying it.
+```
 ## W6 — MCP schema cache at boot (the IO half, now ported)
 
 **Closed.** One rule, one file: a cached manifest may be served only while the config
