@@ -364,6 +364,12 @@ public:
     void set_input(const std::u32string& line, size_t cursor, const std::string& hint);
     void scroll(int rows);              // + = older
     void scroll_end() { scroll_ = 0; }
+    // The tools box in the sidebar scrolls on its own: a wheel over it moves the list, not the transcript.
+    bool over_tools(int col, int row) const {
+        return tools_box_.h > 0 && col >= tools_box_.x && col < tools_box_.x + tools_box_.w &&
+               row >= tools_box_.y && row < tools_box_.y + tools_box_.h;
+    }
+    void scroll_tools(int rows) { tools_scroll_ = std::max(0, tools_scroll_ + rows); }   // + = older calls
     void set_reason_view(ReasonView v) { view_ = v; }
     ReasonView reason_view() const { return view_; }
     void set_verbosity(Verbosity v) { verb_ = v; }
@@ -390,7 +396,7 @@ public:
     uint64_t dropped_live_bytes() const;
     const Theme& theme() const { return th_; }
 
-    static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14, kReasonRows = 6;
+    static constexpr int kSidebarW = 34, kCardMaxW = 112, kMinCols = 60, kMinRows = 14, kReasonRows = 6, kStripKeep = 8;
 
 private:
     using clock = std::chrono::steady_clock;
@@ -482,6 +488,8 @@ private:
     size_t cursor_ = 0;
     std::string hint_;
     int scroll_ = 0, tick_ = 0;
+    mutable int tools_scroll_ = 0;                       // calls scrolled past, newest first; clamped as it paints
+    mutable struct { int x = 0, y = 0, w = 0, h = 0; } tools_box_;   // where the box last landed
     ReasonView view_ = ReasonView::Tail;
     Verbosity verb_ = Verbosity::Normal;
     std::unique_ptr<Frame> frame_;
@@ -503,6 +511,7 @@ private:
     void paint_transcript(Frame& f, int x, int y, int w, int h);
     void paint_splash(Frame& f, int x, int y, int w, int h) const;
     void paint_sidebar(Frame& f, int x, int y, int w, int h) const;
+    void paint_plan(Frame& f, int x, int y, int w, int shown) const;
     void paint_prompt(Frame& f, int x, int y, int w, int& cur_x) const;
     void paint_status(Frame& f, int y, int w) const;
 };

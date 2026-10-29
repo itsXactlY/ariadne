@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
         e.handler = [&todos, &agent](const Json& a) {
             const Json* t = json_get(a, "todos");
             const Json* m = json_get(a, "merge");
-            const bool merge = m && m->type == Json::Bool && m->b;
+            const bool merge = dd::tools::todo_merge_flag(m);
             const std::string r = dd::tools::todo_tool(t ? *t : Json{}, merge, todos);
             const auto inj = todos.format_for_injection();
             agent.ephemeral_system_prompt = inj ? *inj : "";

@@ -527,7 +527,7 @@ int main() {
         chk(!status_has(Verbosity::Normal), "normal status carries no accounting");
     }
     {   // the todo ledger: a sidebar panel in every mode, a count on the status row in verbose
-        auto with_plan = [&](Verbosity v) {
+        auto with_plan = [&](Verbosity v, int cols = 120) {
             Scene s{Theme{}};
             s.set_verbosity(v);
             Info info;
@@ -547,7 +547,7 @@ int main() {
             s.llm_content("hi");
             s.llm_end(LlmStats{});
             s.turn_end();
-            s.present(120, 30, true);
+            s.present(cols, 30, true);
             bool panel = false, active = false, status = false;
             for (int y = 0; y < 30; ++y) {
                 const std::string t = s.row_text(y);
@@ -564,6 +564,8 @@ int main() {
         auto [p2, a2, s2] = with_plan(Verbosity::Normal);
         chk(p2 && a2, "the plan panel shows in normal too");
         chk(!s2, "normal status carries no plan count");
+        auto [p3, a3, s3] = with_plan(Verbosity::Normal, 80);
+        chk(p3 && a3, "a terminal too narrow for the sidebar still shows the plan, as a strip above the prompt");
         Scene s{Theme{}};
         s.set_verbosity(Verbosity::Verbose);
         s.present(120, 30, true);
@@ -793,6 +795,51 @@ int main() {
         }
         chk(title, "sidebar title reads 'tools · 7'");
         chk(!mojibake, "no double-encoded characters on screen");
+    }
+
+    // ---- a long list of calls squeezes nothing: the turns box stays, the tools box scrolls inside ----
+    {
+        Scene s{Theme{}};
+        Info info;
+        info.model = "m";
+        info.endpoint = "http://127.0.0.1:9/v1";
+        info.tools = 7;
+        info.max_turns = 80;
+        s.set_info(info);
+        for (int t = 0; t < 2; ++t) {
+            s.turn_begin();
+            for (int i = 0; i < 30; ++i) {
+                const std::string id = "c" + std::to_string(t) + "_" + std::to_string(i);
+                s.tool_call(id, "tool_" + std::to_string(t) + "_" + std::to_string(i), "{}");
+                s.tool_result(id, "{}");
+            }
+            s.turn_end();
+        }
+        auto find_row = [&](const std::string& what) {
+            for (int y = 0; y < 30; ++y)
+                if (s.row_text(y).find(what) != std::string::npos) return y;
+            return -1;
+        };
+        s.present(120, 30, true);
+        chk(find_row("\xE2\x94\xA4 turns \xE2\x94\x9C") >= 0, "sixty calls do not squeeze the turns box out");
+        const int ty = find_row("tools \xC2\xB7 7");
+        chk(ty >= 0, "the tools box is still there beside it");
+        chk(s.row_text(ty).find("\xE2\x86\x93") != std::string::npos, "the tools box says more lies below it");
+        chk(s.row_text(ty).find("\xE2\x86\x91") == std::string::npos, "and nothing above, at the newest");
+        chk(find_row("\xE2\x9C\x93 tool_1_29") >= 0 && find_row("\xE2\x9C\x93 tool_0_0") < 0, "newest first; the oldest is past the edge");
+        chk(s.over_tools(110, ty + 1) && !s.over_tools(5, ty + 1), "a wheel over the box is the box's, over the transcript is not");
+        s.scroll_tools(4);
+        s.present(120, 30, true);
+        chk(s.row_text(find_row("tools \xC2\xB7 7")).find("\xE2\x86\x91 4") != std::string::npos, "scrolled four calls the box says so");
+        chk(find_row("\xE2\x9C\x93 tool_1_29") < 0 && find_row("\xE2\x9C\x93 tool_1_25") >= 0, "the list moved four calls older");
+        chk(find_row("\xE2\x94\xA4 turns \xE2\x94\x9C") >= 0, "the turns box stays through the scroll");
+        s.scroll_tools(10000);
+        s.present(120, 30, true);
+        chk(find_row("\xE2\x9C\x93 tool_0_0") >= 0, "scrolled to the end the oldest call shows");
+        chk(s.row_text(find_row("tools \xC2\xB7 7")).find("\xE2\x86\x93") == std::string::npos, "and nothing lies below it");
+        s.scroll_tools(-10000);
+        s.present(120, 30, true);
+        chk(find_row("\xE2\x9C\x93 tool_1_29") >= 0, "back at the top the newest call shows");
     }
 
     // ---- a streaming card keeps at most 512 KiB, cut at a character ----

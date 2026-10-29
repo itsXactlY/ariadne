@@ -115,6 +115,15 @@ int main() {
     // the reproduction from the audit: an arrow key split right after its ESC
     chk(run({"\x1b", "[A"}) == "Up ", "ESC | [A is Up, not Esc and stray text");
     chk(run({"\x1b", "[<64;10;5M"}) == "WheelUp ", "ESC | wheel is one WheelUp, no Esc, no stray text");
+    {   // a wheel carries its cell (SGR is 1-based; the key is 0-based), so the sidebar can claim it
+        KeyReader r;
+        const std::string w = "\x1b[<65;120;45M";
+        const auto ks = r.feed(w.data(), w.size());
+        chk(ks.size() == 1 && ks[0].k == K::WheelDown && ks[0].x == 119 && ks[0].y == 44, "a wheel carries its 0-based cell");
+        const std::string bare = "\x1b[<64M";
+        const auto k2 = r.feed(bare.data(), bare.size());
+        chk(k2.size() == 1 && k2[0].k == K::WheelUp && k2[0].x == -1 && k2[0].y == -1, "a wheel without a cell says -1, not 0");
+    }
     chk(run({"\x1b"}) == "Esc ", "ESC with silence is Esc");
     chk(run({"a\x1b"}) == "Char:a Esc ", "text then a lone ESC");
     // Esc Esc: the first is a key, the second is held

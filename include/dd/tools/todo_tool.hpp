@@ -37,5 +37,10 @@ public:
 // a Null Json means "not provided" (read). Returns the JSON result string.
 std::string todo_tool(const core::Json& todos, bool merge, TodoStore& store);
 
+// The `merge` argument as a model writes it. The schema says boolean, but a model that sends
+// "true" / "True" as a string means it; reading that as false replaces the whole list with
+// content-less items. Absent, null, or anything that does not say yes is false.
+bool todo_merge_flag(const core::Json* v);
+
 }  // namespace tools
 }  // namespace dd

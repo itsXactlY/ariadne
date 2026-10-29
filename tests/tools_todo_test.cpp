@@ -135,6 +135,25 @@ int main() {
         CHECK(todo_tool(json_parse(IN6), true, s) == EXP6, "todo6.merge-ignore");
     }
 
+    // A model that sends merge as the string "True" means merge: the list keeps its contents.
+    {
+        auto flag = [](const std::string& j) { const Json v = json_parse(j); return todo_merge_flag(&v); };
+        CHECK(todo_merge_flag(nullptr) == false, "merge.absent");
+        CHECK(flag("true") == true, "merge.bool-true");
+        CHECK(flag("false") == false, "merge.bool-false");
+        CHECK(flag("\"True\"") == true, "merge.string-True");
+        CHECK(flag("\" true \"") == true, "merge.string-padded");
+        CHECK(flag("\"false\"") == false, "merge.string-false");
+        CHECK(flag("null") == false, "merge.null");
+        TodoStore s;
+        todo_tool(json_parse(R"JSON([{"id":"a","content":"first","status":"in_progress"},
+                                     {"id":"b","content":"second","status":"pending"}])JSON"), false, s);
+        const auto upd = json_parse(R"JSON([{"id":"a","status":"completed"}])JSON");
+        todo_tool(upd, flag("\"True\""), s);
+        CHECK(s.items.size() == 2 && s.items[0].content == "first" && s.items[0].status == "completed" &&
+              s.items[1].content == "second", "merge.string-True keeps the plan's words");
+    }
+
     if (g_fail == 0) {
         std::cout << "all todo-tool tests passed\n";
         return 0;

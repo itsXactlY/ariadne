@@ -193,6 +193,15 @@ static std::string esc_str(const std::string& s) {
     return json_dump(j);
 }
 
+bool todo_merge_flag(const core::Json* v) {
+    if (!v) return false;
+    if (v->type == Json::Bool) return v->b;
+    if (v->type == Json::Num) return v->num != 0.0;
+    if (v->type != Json::Str) return false;
+    const std::string t = py_lower(py_strip(v->str));
+    return t == "true" || t == "1" || t == "yes";
+}
+
 std::string todo_tool(const core::Json& todos, bool merge, TodoStore& store) {
     std::vector<TodoItem> items;
     if (todos.type != Json::Null) {

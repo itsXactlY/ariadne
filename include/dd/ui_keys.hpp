@@ -20,6 +20,7 @@ enum class K { Char, Paste, Enter, Backspace, Delete, Left, Right, WordLeft, Wor
 struct Key {
     K k;
     std::u32string text;
+    int x = -1, y = -1;   // a wheel's cell, 0-based; -1 when the terminal did not say
 };
 
 class KeyReader {
@@ -73,8 +74,14 @@ public:
                     i = j + 1;
                     if (!par.empty() && par[0] == '<') {
                         const int b = std::atoi(par.c_str() + 1);
-                        if (fin == 'M' && b == 64) key(K::WheelUp);
-                        if (fin == 'M' && b == 65) key(K::WheelDown);
+                        int cx = -1, cy = -1;   // "<b;x;y" -- SGR cells are 1-based
+                        if (const size_t s1 = par.find(';'); s1 != std::string::npos) {
+                            cx = std::atoi(par.c_str() + s1 + 1) - 1;
+                            if (const size_t s2 = par.find(';', s1 + 1); s2 != std::string::npos)
+                                cy = std::atoi(par.c_str() + s2 + 1) - 1;
+                        }
+                        if (fin == 'M' && b == 64) out.push_back(Key{K::WheelUp, {}, cx, cy});
+                        if (fin == 'M' && b == 65) out.push_back(Key{K::WheelDown, {}, cx, cy});
                         continue;
                     }
                     const bool ctrl = par.find(";5") != std::string::npos;

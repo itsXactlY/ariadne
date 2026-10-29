@@ -2116,6 +2116,25 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
         f.title_right(x + w - 2, y, "● live", Style{th_.ok}, b);
 }
 
+void Scene::paint_plan(Frame& f, int x, int py, int w, int pshown) const {
+    const Style b{th_.session_border}, mut{th_.muted}, val{th_.text};
+    const Style head{th_.session_label, kNone, kBold};
+    f.box(x, py, w, pshown + 2, b, true);
+    f.title(x + 2, py, "plan · " + std::to_string(plan_.open) + " open of " + std::to_string(plan_.total), head, b);
+    if (static_cast<int>(plan_.items.size()) > pshown)
+        f.title_right(x + w - 2, py, "↑ " + std::to_string(static_cast<int>(plan_.items.size()) - pshown), mut, b);
+    const size_t first = plan_.items.size() - static_cast<size_t>(pshown);   // newest last, oldest folded away
+    int ry = py + 1;
+    for (size_t i = first; i < plan_.items.size(); ++i) {
+        const auto [mk, text] = plan_.items[i];
+        const char32_t g = mk == PlanView::Active ? U'▶' : mk == PlanView::Done ? U'✓' : mk == PlanView::Dropped ? U'✗' : U'○';
+        const Style gs = mk == PlanView::Active ? Style{th_.hot, kNone, kBold} : mk == PlanView::Done ? Style{th_.ok}
+                       : mk == PlanView::Dropped ? Style{th_.dim} : mut;
+        f.put(x + 2, ry, g, gs);
+        f.text(x + 4, ry++, clip(text, w - 6), mk == PlanView::Active ? val : mut);
+    }
+}
+
 void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     const Style b{th_.session_border}, lab{th_.label}, val{th_.text}, mut{th_.muted};
     const Style head{th_.session_label, kNone, kBold};
@@ -2152,23 +2171,7 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     row(y + 5, "session", std::to_string(turns_) + " turns · " + std::to_string(calls_total_) + " calls", val);
     row(y + 6, "work", fmt_ms(work_ms()), busy_ ? Style{th_.hot, kNone, kBold} : val);
 
-    if (ph > 0) {   // the todo ledger: what the model said it would do, and where it stands
-        const int py = y + sh;
-        f.box(x, py, w, ph, b, true);
-        f.title(x + 2, py, "plan · " + std::to_string(plan_.open) + " open of " + std::to_string(plan_.total), head, b);
-        if (static_cast<int>(plan_.items.size()) > pshown)
-            f.title_right(x + w - 2, py, "↑ " + std::to_string(static_cast<int>(plan_.items.size()) - pshown), mut, b);
-        const size_t first = plan_.items.size() - static_cast<size_t>(pshown);   // newest last, oldest folded away
-        int ry = py + 1;
-        for (size_t i = first; i < plan_.items.size(); ++i) {
-            const auto [mk, text] = plan_.items[i];
-            const char32_t g = mk == PlanView::Active ? U'▶' : mk == PlanView::Done ? U'✓' : mk == PlanView::Dropped ? U'✗' : U'○';
-            const Style gs = mk == PlanView::Active ? Style{th_.hot, kNone, kBold} : mk == PlanView::Done ? Style{th_.ok}
-                           : mk == PlanView::Dropped ? Style{th_.dim} : mut;
-            f.put(x + 2, ry, g, gs);
-            f.text(x + 4, ry++, clip(text, w - 6), mk == PlanView::Active ? val : mut);
-        }
-    }
+    if (ph > 0) paint_plan(f, x, y + sh, w, pshown);   // the todo ledger: what the model said it would do, and where it stands
 
     if (engine) {
         const int ey = y + sh + ph;
@@ -2288,29 +2291,46 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     }
 
     if (th < 3) return;
-    // Dynamic height: the tools panel is as tall as its content, never a
-    // stretched box. It keeps every call the session has made (entries_ is
-    // the rolling history), so it grows as work accumulates instead of
-    // padding to a fixed budget with blank rows.
-    int want = 0;
+    // Recent turns first, because the tools box is sized around them: a session that has made many
+    // calls must not squeeze the turns box out, so the turns keep their three rows (box, title,
+    // one turn) and the tools box scrolls inside what is left.
+    std::vector<std::string> hist;
+    if (turns_ > 0)
+        for (const auto& e : entries_)
+            if (e.kind == Kind::Rule) hist.push_back(e.text);
+    constexpr int kToolsMin = 5;   // a box and three rows
+    const int turn_rows = (!hist.empty() && th - 3 >= kToolsMin) ? 3 : 0;
+
+    std::vector<const Entry*> calls;   // newest first
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
-        if (it->kind == Kind::Tool) ++want;
-    if (want == 0) want = std::max<int>(1, static_cast<int>(info_.sources.size()) + 1);
-    const int th2 = std::min(th, want + 2);
+        if (it->kind == Kind::Tool) calls.push_back(&*it);
+    // Dynamic height: the tools panel is as tall as its content, never a stretched box.
+    const int want = calls.empty() ? std::max<int>(1, static_cast<int>(info_.sources.size()) + 1)
+                                   : static_cast<int>(calls.size());
+    const int th2 = std::min(th - turn_rows, want + 2);
     const int ty = y + sh + ph + eh + tph;
+    const int shown = th2 - 2;
+    const int total = static_cast<int>(calls.size());
+    tools_scroll_ = std::clamp(tools_scroll_, 0, std::max(0, total - shown));
+    tools_box_ = {x, ty, w, th2};
     f.box(x, ty, w, th2, b, true);
     f.title(x + 2, ty, "tools · " + std::to_string(info_.tools), head, b);
+    if (total > shown) {   // the list is longer than its box: say which way the rest lies
+        const int above = tools_scroll_, below = total - tools_scroll_ - shown;
+        f.title_right(x + w - 2, ty, std::string(above ? "↑ " + std::to_string(above) : "") + (above && below ? " " : "") +
+                                         (below ? "↓ " + std::to_string(below) : ""), mut, b);
+    }
     int ry = ty + 1;
-    for (auto it = entries_.rbegin(); it != entries_.rend() && ry < ty + th2 - 1; ++it) {
-        if (it->kind != Kind::Tool) continue;
+    for (size_t i = static_cast<size_t>(tools_scroll_); i < calls.size() && ry < ty + th2 - 1; ++i) {
+        const Entry& e = *calls[i];
         char32_t g = U'·';
         Style gs = mut;
-        if (it->run == Run::Running) { g = kSpin[tick_ % 10]; gs = Style{th_.hot}; }
-        else if (it->run == Run::Ok) { g = U'✓'; gs = Style{th_.ok}; }
-        else if (it->run == Run::Failed) { g = U'✗'; gs = Style{th_.error}; }
+        if (e.run == Run::Running) { g = kSpin[tick_ % 10]; gs = Style{th_.hot}; }
+        else if (e.run == Run::Ok) { g = U'✓'; gs = Style{th_.ok}; }
+        else if (e.run == Run::Failed) { g = U'✗'; gs = Style{th_.error}; }
         f.put(x + 2, ry, g, gs);
-        const std::string ms = it->ms > 0 ? fmt_ms(it->ms) : "";
-        f.text(x + 4, ry, clip(it->name, w - 7 - text_width(ms)), val);
+        const std::string ms = e.ms > 0 ? fmt_ms(e.ms) : "";
+        f.text(x + 4, ry, clip(e.name, w - 7 - text_width(ms)), val);
         f.text(x + w - 2 - text_width(ms), ry, ms, mut);
         ++ry;
     }
@@ -2323,24 +2343,17 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         if (ry < ty + th2 - 1) f.text(x + 2, ry, "no calls yet", mut);
     }
 
-    // Recent turns, only when the column has leftover rows to spend: one row
-    // per turn, newest last. The panel exists when it can say something, so
-    // the sidebar never stretches into blank rows.
+    // Recent turns, one row per turn, newest last, in whatever the tools box left.
     const int left = th - th2;
-    if (left >= 3 && turns_ > 0) {
-        std::vector<std::string> hist;
-        for (const auto& e : entries_)
-            if (e.kind == Kind::Rule) hist.push_back(e.text);
+    if (left >= 3 && !hist.empty()) {
         const int cap = left - 2;
         if (static_cast<int>(hist.size()) > cap)
             hist.erase(hist.begin(), hist.end() - static_cast<size_t>(cap));
-        if (!hist.empty() && cap > 0) {
-            const int py2 = ty + th2;
-            f.box(x, py2, w, 2 + static_cast<int>(hist.size()), b, true);
-            f.title(x + 2, py2, "turns", head, b);
-            int ry2 = py2 + 1;
-            for (const auto& h : hist) f.text(x + 2, ry2++, clip(h, w - 4), mut);
-        }
+        const int py2 = ty + th2;
+        f.box(x, py2, w, 2 + static_cast<int>(hist.size()), b, true);
+        f.title(x + 2, py2, "turns", head, b);
+        int ry2 = py2 + 1;
+        for (const auto& h : hist) f.text(x + 2, ry2++, clip(h, w - 4), mut);
     }
 }
 
@@ -2467,8 +2480,15 @@ std::string Scene::present(int cols, int rows, bool truecolor) {
         f.text(std::max(0, (cols - text_width(msg)) / 2), rows / 2, clip(msg, cols), Style{th_.warn});
     } else {
         const int body_h = rows - 4;
+        tools_box_ = {};   // set again if the sidebar paints a tools box this frame
         const int side = cols >= 100 ? kSidebarW : 0;
-        paint_transcript(f, 0, 0, cols - side, body_h);
+        // No sidebar, no plan panel: a narrow terminal would never show the ledger. It rides a strip
+        // above the prompt instead, as many rows as leave the transcript its reading room.
+        const int strip = (side || plan_.items.empty()) ? 0
+            : std::min<int>(static_cast<int>(plan_.items.size()), std::min(4, body_h - kStripKeep - 2));
+        const int strip_h = strip > 0 ? strip + 2 : 0;
+        paint_transcript(f, 0, 0, cols - side, body_h - strip_h);
+        if (strip_h) paint_plan(f, 0, body_h - strip_h, cols, strip);
         if (side) paint_sidebar(f, cols - side, 0, side, body_h);
         int cur_x = 0;
         paint_prompt(f, 0, body_h, cols, cur_x);

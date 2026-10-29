@@ -904,7 +904,7 @@ int main(int argc, char** argv) {
         e.handler = [&todos, &publish_plan](const Json& a) {
             const Json* t = json_get(a, "todos");
             const Json* m = json_get(a, "merge");
-            const bool merge = m && m->type == Json::Bool && m->b;
+            const bool merge = dd::tools::todo_merge_flag(m);
             const std::string r = dd::tools::todo_tool(t ? *t : Json{}, merge, todos);
             if (publish_plan) publish_plan();
             return r;
@@ -1418,7 +1418,7 @@ int main(int argc, char** argv) {
             if (cmd == "/quit" || cmd == "/exit") {
                 quit = true;
             } else if (cmd == "/help") {
-                scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll · "
+                scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll (over the tools box: that list) · "
                            "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /verbose quiet|normal|full  /context  /rebase  "
                            "/resume  /tools  /turns N  /plan  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
             } else if (cmd == "/learn") {
@@ -1617,8 +1617,8 @@ int main(int argc, char** argv) {
         case K::End: ed.cur = ed.buf.size(); break;
         case K::PgUp: scene.scroll(std::max(1, rows - 8)); break;
         case K::PgDn: scene.scroll(-std::max(1, rows - 8)); break;
-        case K::WheelUp: scene.scroll(3); break;
-        case K::WheelDown: scene.scroll(-3); break;
+        case K::WheelUp: if (scene.over_tools(k.x, k.y)) scene.scroll_tools(-1); else scene.scroll(3); break;
+        case K::WheelDown: if (scene.over_tools(k.x, k.y)) scene.scroll_tools(1); else scene.scroll(-3); break;
         case K::Tab: {
             const std::string typed = dd::ui::to_utf8(ed.buf);
             if (is_command(typed) && typed.find(' ') == std::string::npos) {
