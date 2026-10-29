@@ -1019,6 +1019,40 @@ std::string shell_danger(const std::string& cmd, const ShellPolicy& policy) {
     return Guard(policy).check(cmd, 0);
 }
 
+#ifdef __ANDROID__
+// Android: the shell is /system/bin/sh, and bionic has no posix_spawn_file_actions_addclosefrom_np.
+// So the child takes posix_spawn's steps by hand -- a new session, default signals and an empty mask,
+// stdin from /dev/null, the pipe on 1 and 2, every other descriptor closed -- and calls nothing but
+// async-signal-safe functions between fork and exec. Returns 0 or an errno, as posix_spawn does.
+static int spawn_sh_android(pid_t* pid, const char* const* argv, char* const* envp, int out) {
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    const int top = open_max > 0 ? static_cast<int>(std::min<long>(open_max, 65536)) : 1024;
+    const pid_t p = ::fork();
+    if (p < 0) return errno;
+    if (p == 0) {
+        ::setsid();
+        struct sigaction dfl {};
+        dfl.sa_handler = SIG_DFL;
+        for (int s = 1; s < NSIG; ++s) ::sigaction(s, &dfl, nullptr);   // SIGKILL/SIGSTOP refuse; harmless
+        sigset_t none;
+        sigemptyset(&none);
+        ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        const int dn = ::open("/dev/null", O_RDONLY);
+        if (dn > 0) {
+            ::dup2(dn, 0);
+            ::close(dn);
+        }
+        ::dup2(out, 1);
+        ::dup2(out, 2);
+        for (int fd = 3; fd < top; ++fd) ::close(fd);
+        ::execve("/system/bin/sh", const_cast<char* const*>(argv), envp);
+        ::_exit(127);
+    }
+    *pid = p;
+    return 0;
+}
+#endif
+
 std::string run_shell(const std::string& cmd, const ShellOptions& opt, const ShellPolicy& policy) {
     if (cmd.empty()) return jerr("cmd required");
     if (std::string why = shell_danger(cmd, policy); !why.empty()) return jerr("refused: " + why);
@@ -1045,6 +1079,11 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
 
     int fds[2];
     if (::pipe2(fds, O_CLOEXEC) != 0) return jerr(std::string("pipe failed: ") + std::strerror(errno));
+    const char* argv[] = {"sh", "-c", full.c_str(), nullptr};
+    pid_t pid = 0;
+#ifdef __ANDROID__
+    const int rc = spawn_sh_android(&pid, argv, envp.data(), fds[1]);
+#else
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
@@ -1059,11 +1098,10 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     posix_spawnattr_setsigmask(&at, &none);
     posix_spawnattr_setsigdefault(&at, &all);
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-    const char* argv[] = {"sh", "-c", full.c_str(), nullptr};
-    pid_t pid = 0;
     const int rc = ::posix_spawn(&pid, "/bin/sh", &fa, &at, const_cast<char* const*>(argv), envp.data());
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
+#endif
     ::close(fds[1]);
     if (rc != 0) {
         ::close(fds[0]);

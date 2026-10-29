@@ -1,5 +1,6 @@
 // Port of tools/url_safety.py — SSRF gate.
 #include "dd/tools/url_safety.hpp"
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -247,6 +248,27 @@ std::string url_hostname(const std::string& url) {
     return host;
 }
 
+namespace {
+// Published whole by admit_configured_url() at boot; a replaced set is never freed, so a reader that
+// loaded the old pointer keeps a valid one. A handful of hosts, written once.
+std::atomic<const std::vector<std::string>*> g_admitted{nullptr};
+
+bool admitted(const std::string& host) {
+    const std::vector<std::string>* v = g_admitted.load(std::memory_order_acquire);
+    return v && std::find(v->begin(), v->end(), host) != v->end();
+}
+}  // namespace
+
+void admit_configured_url(const std::string& url) {
+    const std::string host = url_hostname(url);
+    if (host.empty() || host == "metadata.google.internal" || host == "metadata.goog") return;
+    const std::vector<std::string>* cur = g_admitted.load(std::memory_order_acquire);
+    if (cur && std::find(cur->begin(), cur->end(), host) != cur->end()) return;
+    auto* next = new std::vector<std::string>(cur ? *cur : std::vector<std::string>{});
+    next->push_back(host);
+    g_admitted.store(next, std::memory_order_release);
+}
+
 // The name is resolved here and again by whoever connects: a caller that must not be rebound connects to the checked address.
 bool is_safe_url(const std::string& url) {
     std::string host = url_hostname(url);
@@ -257,6 +279,7 @@ bool is_safe_url(const std::string& url) {
     if (host == "localhost") return true;
     std::uint32_t ltip = 0;
     if (parse_ipv4(host, ltip) && v4_is_loopback(ltip)) return true;
+    if (admitted(host)) return true;   // the operator named this server in the config
     addrinfo hint{};
     hint.ai_family = AF_UNSPEC;
     addrinfo* res = nullptr;

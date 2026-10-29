@@ -11,13 +11,13 @@ on branch `fix/audit-20261024`, not read out of a README.
 | Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:232,337,383-403,420` |
 | Retrieval | One `Router` at turn start, after tool batches, on failure; local BM25f catalogues + async pod leg | `src/know/trigger.cpp`, `src/know/router.cpp` |
 | Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/ariadne/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
-| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:934-944` |
+| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:937-947` |
 | Learning | `dd::learn` service: episodes, credit, priors, drafted skills, lifecycle | `docs/LEARN.md`, `src/learn/*` |
-| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
+| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:911-928` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
-| Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:888`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1122`, `src/ui.cpp:2155`, `src/dd_tui.cpp:1445`, `src/dd_agent_main.cpp:197-218` |
-| Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1353-1448`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1278-1310`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:776-792`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
+| Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:914-920`, `agent.contract` toggles it |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:891`, `src/dd_tui.cpp:793-813`, `src/dd_tui.cpp:1125`, `src/ui.cpp:2155`, `src/dd_tui.cpp:1448`, `src/dd_agent_main.cpp:197-218` |
+| Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1353-1448`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1278-1310`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:779-795`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2283-2288`, asserted in `tests/ui_test.cpp:1160-1230` |
 
 ## What is missing — measured, not assumed
@@ -96,8 +96,8 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
-typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1242`) and `Agent::steer_hook`
-(`src/dd_tui.cpp:1198`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1245`) and `Agent::steer_hook`
+(`src/dd_tui.cpp:1201`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:380`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
@@ -173,7 +173,7 @@ that second half — a saved call leaves no trace in the log.
 
 The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
 becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
-nothing (`src/dd_tui.cpp:868`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:333`). The hand-off seam is the same
+nothing (`src/dd_tui.cpp:871`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:333`). The hand-off seam is the same
 object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
 
 ```mermaid

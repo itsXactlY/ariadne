@@ -48,6 +48,7 @@
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/mcp_schema_cache.hpp"
 #include "dd/tools/shell.hpp"
+#include "dd/tools/url_safety.hpp"
 #include "dd/tools/registry.hpp"
 #include "dd/tools/tool.hpp"
 #include "dd/tools/tool_search.hpp"
@@ -563,6 +564,7 @@ int main(int argc, char** argv) {
     int max_iterations = (mt > 0) ? (int)mt : 50;
 
     if (base_url.empty()) { std::cerr << "no model.base_url and DD_BASE_URL unset\n"; return 2; }
+    dd::tools::admit_configured_url(base_url);   // the operator's model may sit on the LAN (a phone's does)
 
     const bool to_tty = isatty(STDOUT_FILENO);
     const bool serving = !serve_addr.empty();
@@ -711,6 +713,7 @@ int main(int argc, char** argv) {
             const Json* u = json_get(sv, "url");
             if (!u || u->type != Json::Str || u->str.empty()) continue;
 
+            dd::tools::admit_configured_url(u->str);
             auto mcp = std::make_unique<MCPClient>();
             mcp->url = u->str;
             if (const Json* hs = json_get(sv, "headers"); hs && hs->type == Json::Obj)

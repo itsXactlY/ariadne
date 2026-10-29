@@ -24,7 +24,7 @@ namespace learn {
 class QueueSink final : public know::EventSink {
 public:
     // The cap is the capacity: the ring refuses at it, so no counter has to police the queue.
-    explicit QueueSink(size_t cap = 8192) : q_(cap), cap_(static_cast<int64_t>(cap)) {}
+    explicit QueueSink(size_t cap = 8192) : q_(cap) {}
 
     void emit(know::Event&& e) noexcept override;   // any thread
 
@@ -41,7 +41,6 @@ public:
 
 private:
     core::SlotRing<8192, know::Event> q_;   // ceiling 8192, the runtime cap selects how many slots it admits
-    const int64_t cap_;
     std::atomic<int64_t> depth_{0};
     std::atomic<uint64_t> dropped_{0}, pushed_{0};
     std::atomic<uint32_t> seq_{0};   // bumped on empty -> non-empty and by wake(); the consumer parks on it

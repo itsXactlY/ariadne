@@ -3,7 +3,10 @@
 // project's baseline flags and dispatch decides at run time (see ui_simd.cpp).
 #include "dd/core/sha256.hpp"
 
+#if defined(__x86_64__)
 #include <immintrin.h>
+#define DD_SHA_HW 1
+#endif
 
 #include <array>
 #include <atomic>
@@ -66,6 +69,7 @@ void compress_scalar(uint32_t h[8], const uint8_t* data, size_t blocks) {
 }
 
 // ---- SHA-NI ----
+#ifdef DD_SHA_HW
 __attribute__((target("sha,sse4.1,ssse3"))) void compress_shani(uint32_t h[8], const uint8_t* data, size_t blocks) {
     const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bll, 0x0405060700010203ll);   // big-endian words
     // the state as the instructions want it: ABEF and CDGH
@@ -96,6 +100,10 @@ __attribute__((target("sha,sse4.1,ssse3"))) void compress_shani(uint32_t h[8], c
     _mm_storeu_si128(reinterpret_cast<__m128i*>(&h[0]), _mm_blend_epi16(tmp, s1, 0xF0));   // DCBA
     _mm_storeu_si128(reinterpret_cast<__m128i*>(&h[4]), _mm_alignr_epi8(s1, tmp, 8));      // HGFE
 }
+#else
+// No SHA-NI off x86: the kernel keeps its name, the body is the scalar one, and has() says no.
+void compress_shani(uint32_t h[8], const uint8_t* data, size_t blocks) { compress_scalar(h, data, blocks); }
+#endif
 
 struct Kernel {
     const char* name;
@@ -106,8 +114,12 @@ constexpr Kernel kScalar{"scalar", compress_scalar};
 constexpr Kernel kShani{"shani", compress_shani};
 
 bool has(const Kernel& k) {
+#ifdef DD_SHA_HW
     __builtin_cpu_init();
     if (&k == &kShani) return __builtin_cpu_supports("sha") && __builtin_cpu_supports("sse4.1") && __builtin_cpu_supports("ssse3");
+#else
+    if (&k == &kShani) return false;
+#endif
     return true;
 }
 

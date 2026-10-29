@@ -3,7 +3,10 @@
 // baseline flags and dispatch decides at run time.
 #include "dd/know/scan.hpp"
 
+#if defined(__x86_64__)
 #include <immintrin.h>
+#define DD_SCAN_X86 1
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -36,6 +39,7 @@ void classify32_scalar(const char* s, size_t n, Masks32* m) {
     *m = {static_cast<uint32_t>(w.alnum), static_cast<uint32_t>(w.upper), static_cast<uint32_t>(w.lower), static_cast<uint32_t>(w.high)};
 }
 
+#ifdef DD_SCAN_X86
 // ---- AVX2 ----
 __attribute__((target("avx2"))) inline __m256i in_range(__m256i v, char lo, char hi) {   // lo <= v <= hi, unsigned
     const __m256i d = _mm256_sub_epi8(v, _mm256_set1_epi8(lo));
@@ -105,6 +109,7 @@ __attribute__((target("avx512f,avx512bw,bmi2"))) void classify32_avx512(const ch
     classify_avx512(s, n, &w);   // n <= 32: nothing above bit 31
     *m = {static_cast<uint32_t>(w.alnum), static_cast<uint32_t>(w.upper), static_cast<uint32_t>(w.lower), static_cast<uint32_t>(w.high)};
 }
+#endif
 
 struct Kernels {
     const char* name;
@@ -113,13 +118,24 @@ struct Kernels {
 };
 
 constexpr Kernels kScalar{"scalar", classify_scalar, classify32_scalar};
+#ifdef DD_SCAN_X86
 constexpr Kernels kAvx2{"avx2", classify_avx2, classify32_avx2};
 constexpr Kernels kAvx512{"avx512", classify_avx512, classify32_avx512};
+#else
+// No x86 vectors on this target (aarch64 Android): the names stay so level() and force() answer
+// the same way everywhere, the bodies are scalar, and has() never picks them.
+constexpr Kernels kAvx2{"avx2", classify_scalar, classify32_scalar};
+constexpr Kernels kAvx512{"avx512", classify_scalar, classify32_scalar};
+#endif
 
 bool has(const Kernels& k) {
+#ifdef DD_SCAN_X86
     __builtin_cpu_init();
     if (&k == &kAvx512) return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("bmi2");
     if (&k == &kAvx2) return __builtin_cpu_supports("avx2");
+#else
+    if (&k != &kScalar) return false;
+#endif
     return true;
 }
 

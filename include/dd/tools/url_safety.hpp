@@ -19,6 +19,13 @@ std::string url_hostname(const std::string& url);
 // the hostname via getaddrinfo, and block if any resolved address is blocked.
 // Returns false on any parse/DNS failure (mirrors the Python try/except).
 bool is_safe_url(const std::string& url);
+
+// The hosts the operator wrote into the config -- the model endpoint, the MCP servers -- are the
+// harness's own servers, the way loopback is on a desktop; on a phone the model lives on the LAN.
+// admit_configured_url() adds a URL's host to that set and is_safe_url() then passes it without the
+// private-range check. Only a configured URL is ever admitted, never one a tool argument carries, and
+// the metadata hostnames stay refused. Boot only: one thread publishes, before any client runs.
+void admit_configured_url(const std::string& url);
 }  // namespace tools
 }  // namespace dd
 #endif

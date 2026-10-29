@@ -61,7 +61,7 @@ All in `namespace dd::learn`, `include/dd/learn/`, `src/learn/`. Depends on `kno
 `EventSink` and `Overlay` interfaces, never on `learn` (dependency rule `learn -> know -> mem -> core`).
 
 The graph as shipped. `LearnService` is the only object the composition root constructs
-(`include/dd/learn/service.hpp:52`, `src/dd_tui.cpp:845`); everything else is private to it, and the two
+(`include/dd/learn/service.hpp:52`, `src/dd_tui.cpp:848`); everything else is private to it, and the two
 interfaces it implements are `know`'s, not its own (`include/dd/learn/sink.hpp:24`,
 `include/dd/learn/overlay.hpp:27`).
 
@@ -274,7 +274,7 @@ evidence about the *selector*, not about the skill: a card nobody read is not a 
 `Lifecycle` is a table of `Transition{from, to, why, guard}` (`include/dd/learn/lifecycle.hpp:48-52`); guards read
 `Stats` only, so the policy is data and each transition is a one-line test. It is stepped by
 `LearnService::curate()`, not by the `Curator` (`src/learn/service.cpp:134-140`) — one pass per tick, at most one
-transition per skill, gated by `learn.govern` (`src/dd_tui.cpp:951`). Governance keeps running when drafting is
+transition per skill, gated by `learn.govern` (`src/dd_tui.cpp:954`). Governance keeps running when drafting is
 off, or a hub the offer bar keeps surfacing sits in probation until a 60-day timer clears it
 (`include/dd/learn/service.hpp:38-41`). Nothing is deleted by the harness: Retired skills move to
 `skills/.retired/` and remain recoverable (the distilled-retention incident,
@@ -300,10 +300,10 @@ is refused, not starved, so the curator no longer pushes a hub up while its own 
   (`include/dd/learn/service.hpp:43`), enforced against a day-stamped counter in
   `LearnService::author_now()` (`src/learn/service.cpp:105-109`) — so the cap is per calendar day and resets
   on the first draft after midnight. The kill switches are read at construction: `learn.enabled`
-  (`src/dd_tui.cpp:921`) decides whether the service starts at all, and an empty `<home>/learn/OFF` file stops
-  it before the ledger is opened (`src/learn/service.cpp:14-16`); `learn.feedback` (`src/dd_tui.cpp:949`)
-  decides whether the curator runs (`src/learn/service.cpp:141-144`); `learn.author` (`src/dd_tui.cpp:950`)
-  decides whether drafting is allowed and is **opt-in**, unlike `learn.govern` (`src/dd_tui.cpp:951`). The
+  (`src/dd_tui.cpp:924`) decides whether the service starts at all, and an empty `<home>/learn/OFF` file stops
+  it before the ledger is opened (`src/learn/service.cpp:14-16`); `learn.feedback` (`src/dd_tui.cpp:952`)
+  decides whether the curator runs (`src/learn/service.cpp:141-144`); `learn.author` (`src/dd_tui.cpp:953`)
+  decides whether drafting is allowed and is **opt-in**, unlike `learn.govern` (`src/dd_tui.cpp:954`). The
   other two caps — 40 learned skills, one sidekick call in flight — do not exist in the code: nothing counts
   learned skills and nothing calls a model.
 

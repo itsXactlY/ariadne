@@ -14,6 +14,9 @@ CXXFLAGS := -std=c++20 -Wall -Wextra -Werror -O2 -pipe -mtune=native -Iinclude
 # Use mold when installed; fall back automatically to the system linker otherwise.
 MOLD_FLAG := $(shell command -v mold >/dev/null 2>&1 && printf '%s' '-fuse-ld=mold')
 CXXFLAGS += $(MOLD_FLAG)
+# How the product binary links libcurl. A cross build (android/build.sh) points it at a static
+# curl and the TLS library under it, which have to follow -lcurl on the line.
+CURL_LIBS ?= -lcurl
 
 # Every executable rule writes into build/. Create it while parsing the Makefile,
 # so even direct goals such as `make $(BUILD)/ariadne` work from a clean checkout.
@@ -150,7 +153,7 @@ install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
 $(BUILD)/ariadne: $(SERVE) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/ariadne
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE)) src/dd_tui.cpp -pthread $(CURL_LIBS) -o $(BUILD)/ariadne
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests

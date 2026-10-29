@@ -3,7 +3,10 @@
 // the project's baseline flags and dispatch decides at run time.
 #include "dd/ui_simd.hpp"
 
+#if defined(__x86_64__)
 #include <immintrin.h>
+#define DD_UI_X86 1
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -14,6 +17,7 @@ namespace simd {
 
 namespace {
 
+#ifdef DD_UI_X86
 // Four "cell differs" nibbles (bits 0,4,8,12 after the fold) -> 4 dirty bytes.
 constexpr uint32_t kNibbleBytes[16] = {
     0x00000000, 0x00000001, 0x00000100, 0x00000101, 0x00010000, 0x00010001, 0x00010100, 0x00010101,
@@ -24,6 +28,7 @@ inline unsigned fold4(unsigned m) {   // 16 dword-mismatch bits -> one bit per c
     m |= m >> 2;
     return (m & 1u) | ((m >> 3) & 2u) | ((m >> 6) & 4u) | ((m >> 9) & 8u);
 }
+#endif
 
 // ---- scalar ----
 int diff_scalar(const Cell* a, const Cell* b, int n, char* dirty) {
@@ -52,6 +57,7 @@ void widen_scalar(const char* s, size_t n, char32_t* out) {
     for (size_t i = 0; i < n; ++i) out[i] = static_cast<unsigned char>(s[i]);
 }
 
+#ifdef DD_UI_X86
 // ---- AVX2 ----
 __attribute__((target("avx2,popcnt"))) int diff_avx2(const Cell* a, const Cell* b, int n, char* dirty) {
     int cnt = 0, i = 0;
@@ -154,6 +160,7 @@ __attribute__((target("avx512f,avx512bw,avx512vl,bmi2"))) void widen_avx512(cons
         _mm512_mask_storeu_epi32(out + i, live, _mm512_cvtepu8_epi32(v));
     }
 }
+#endif
 
 struct Kernels {
     const char* name;
@@ -164,15 +171,25 @@ struct Kernels {
 };
 
 constexpr Kernels kScalar{"scalar", diff_scalar, run_scalar, printable_scalar, widen_scalar};
+#ifdef DD_UI_X86
 constexpr Kernels kAvx2{"avx2", diff_avx2, run_avx2, printable_avx2, widen_avx2};
 constexpr Kernels kAvx512{"avx512", diff_avx512, run_avx512, printable_avx512, widen_avx512};
+#else
+// No x86 vectors on this target: the names stay, the bodies are scalar, has() never picks them.
+constexpr Kernels kAvx2{"avx2", diff_scalar, run_scalar, printable_scalar, widen_scalar};
+constexpr Kernels kAvx512{"avx512", diff_scalar, run_scalar, printable_scalar, widen_scalar};
+#endif
 
 bool has(const Kernels& k) {
+#ifdef DD_UI_X86
     __builtin_cpu_init();
     if (&k == &kAvx512)
         return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
                __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("bmi2");
     if (&k == &kAvx2) return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi");
+#else
+    if (&k != &kScalar) return false;
+#endif
     return true;
 }
 

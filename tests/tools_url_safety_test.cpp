@@ -52,6 +52,14 @@ int main() {
     CHECK(is_safe_url("") == false, "empty-host");
     CHECK(is_safe_url("http://169.254.169.254/") == false, "numeric-blocked");
 
+    // A host the operator configured passes; its neighbours on the same private net do not.
+    CHECK(is_safe_url("http://192.168.0.2:8080/v1/chat/completions") == false, "lan model refused before the config names it");
+    admit_configured_url("http://192.168.0.2:8080/v1");
+    CHECK(is_safe_url("http://192.168.0.2:8080/v1/chat/completions") == true, "configured lan model admitted");
+    CHECK(is_safe_url("http://192.168.0.3:8080/") == false, "a neighbour on the same net stays refused");
+    admit_configured_url("http://metadata.google.internal/x");
+    CHECK(is_safe_url("http://metadata.google.internal/x") == false, "metadata is never admitted, configured or not");
+
     // NAT64 carries an IPv4: as blocked as the address inside; 6to4 and Teredo are blocked wholesale
     CHECK(is_blocked_ip("64:ff9b::a9fe:a9fe"), "nat64 metadata address");
     CHECK(is_blocked_ip("64:ff9b::7f00:1"), "nat64 loopback");
