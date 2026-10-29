@@ -1,4 +1,4 @@
-// tests/gateway_test.cpp — the device gateway: its crypto against vectors from an
+// tests/device_gateway_test.cpp — the device gateway: its crypto against vectors from an
 // independent implementation (Python's `cryptography`, the same AES-GCM the app's
 // GatewayCrypto and hermes-crypto's CryptoMiddleware use), the identity, the device
 // store, every /command path, and one real TLS round trip through net::Server.

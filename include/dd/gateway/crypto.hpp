@@ -4,7 +4,7 @@
 // The envelope is the one hermes-crypto's CryptoMiddleware and the Mazemaker app's
 // GatewayCrypto already speak: base64(nonce16 | tag16 | ciphertext), AES-256-GCM with
 // a 16-byte nonce and no associated data. Anything that changes it breaks every paired
-// phone, so it is pinned by a known-answer test (tests/gateway_test.cpp).
+// phone, so it is pinned by a known-answer test (tests/device_gateway_test.cpp).
 //
 // Byte strings travel as std::string. Nothing here keeps state.
 
