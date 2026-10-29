@@ -194,6 +194,7 @@ void ChatApi::chat(const net::Request& req, net::Conn& conn) {
             b.store(false, std::memory_order_release);
         }
     } release{busy_, stream_};
+    runner_.claimed(req);
 
     created_ = now_s();
     turn_id_ = "chatcmpl-ariadne-" + std::to_string(created_) + "-" + std::to_string(++turns_);

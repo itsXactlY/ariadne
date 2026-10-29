@@ -25,6 +25,10 @@ struct TurnRunner {
     virtual ~TurnRunner() = default;
     virtual std::string run(const std::string& user_message) = 0;
     virtual void interrupt() = 0;
+    // The turn is this request's: called once the claim succeeded and before run(), on the
+    // same thread. The device gateway sets the device's tool scope here -- a request that
+    // lost the claim (409) never reaches it, so it cannot change a running turn.
+    virtual void claimed(const net::Request& /*req*/) {}
 };
 
 struct ApiInfo {

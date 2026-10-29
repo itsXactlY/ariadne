@@ -5,6 +5,10 @@
 // so nothing is shared but a count of live connections. Every response closes
 // the connection (no keep-alive): a client of an agent sends one request per
 // turn, and an SSE stream ends when the turn does.
+//
+// TLS is optional and per server: set_tls() hands it an OpenSSL SSL_CTX, and every
+// connection then handshakes on its own thread before a byte of HTTP is read. A build
+// without OpenSSL (-DDD_NO_TLS, the Android NDK one) keeps the plain server only.
 
 #include <atomic>
 #include <cstddef>
@@ -19,6 +23,8 @@ namespace net {
 
 struct Request {
     std::string method, target, path, query, body;
+    std::string peer;   // the client's address as text ("127.0.0.1", "::1"), "" when unknown
+    bool tls = false;   // arrived over the TLS listener
     std::vector<std::pair<std::string, std::string>> headers;   // names lowercased
     // The first header of that (lowercase) name, "" when absent.
     std::string header(std::string_view name) const;
@@ -32,7 +38,7 @@ Parse parse_request(std::string_view raw, Request& out, size_t max_body);
 
 class Conn {
 public:
-    explicit Conn(int fd) : fd_(fd) {}
+    explicit Conn(int fd, void* ssl = nullptr) : fd_(fd), ssl_(ssl) {}
     Conn(const Conn&) = delete;
     Conn& operator=(const Conn&) = delete;
     ~Conn();
@@ -41,12 +47,17 @@ public:
     bool json(int status, std::string_view body) { return respond(status, "application/json", body); }
     bool sse_begin();
     bool sse_data(std::string_view data);   // one `data: …` event
+    // A response whose body is written as it arrives (a proxied event stream):
+    // headers without a length, then raw bytes until the connection closes.
+    bool stream_begin(int status, std::string_view content_type);
+    bool stream_write(std::string_view bytes) { return write_all(bytes); }
     // false once a write failed: the peer is gone, stop producing for it.
     bool open() const { return ok_; }
 
 private:
     bool write_all(std::string_view bytes);
     int fd_;
+    void* ssl_;   // SSL* when the connection is TLS
     bool ok_ = true;
     bool headers_sent_ = false;
 };
@@ -61,18 +72,22 @@ public:
     ~Server();
 
     bool listen(std::string& error);   // bind + listen; port 0 picks a free one
+    // Serve TLS on this listener: `ssl_ctx` is an SSL_CTX* the owner keeps alive
+    // for the server's life. Ignored (returns false) in a build without TLS.
+    bool set_tls(void* ssl_ctx);
     int port() const { return port_; }
     // Accept until `stop` is non-zero, then wait for the live connections.
     void serve(const std::atomic<int>& stop);
 
 private:
-    void handle(int fd);
+    void handle(int fd, const std::string& peer);
     std::string host_;
     int port_;
     Handler handler_;
     size_t max_body_;
     int listen_fd_ = -1;
     std::atomic<int> live_{0};
+    void* tls_ = nullptr;
 };
 
 const char* reason_phrase(int status);

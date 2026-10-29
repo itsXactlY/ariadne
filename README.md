@@ -75,12 +75,12 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **One run loop:** the interactive TUI and headless entrypoint drive the same `Agent::run` implementation.
 - **The model knows the contract.** One composed system prompt (`PromptComposer`): the
   **workflow contract** (`PromptComposer::workflow_contract` in `src/know/prompt.cpp:46`,
-  toggled by `agent.contract` at `src/dd_tui.cpp:1020-1021`) — a plan before multi-step work,
+  toggled by `agent.contract` at `src/dd_tui.cpp:1156-1157`) — a plan before multi-step work,
   facts from running not guessing, a change is done when it was run and looked at, skills are
   guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
   before acting, never guess a path or a name, live state is a command and memory is history), a
   catalogue map, and `brief.md` if there is one. A pod's own protocol text is not pasted: it is
-  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:724`), which reads the
+  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:860`), which reads the
   server's instructions at `src/tools/mcp_client.cpp:304` and can be set to `harness`,
   `verbatim` or `off`.
 - **Context tape:** requests reuse a stable prompt prefix within an epoch; rebases are explicit and watermark-driven.

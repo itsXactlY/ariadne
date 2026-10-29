@@ -34,6 +34,10 @@
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
 #include "dd/core/slot_ring.hpp"
+#include "dd/gateway/cli.hpp"
+#include "dd/gateway/device_gateway.hpp"
+#include "dd/gateway/identity.hpp"
+#include "dd/gateway/relay.hpp"
 #include "dd/know/prompt.hpp"
 #include "dd/know/resolver.hpp"
 #include "dd/know/router.hpp"
@@ -234,6 +238,9 @@ static void usage(FILE* f) {
     std::fputs(
         "usage: ariadne [--home DIR | --config FILE | FILE] [-- message words...]\n"
         "       ariadne [--home DIR | --config FILE] --serve [HOST:]PORT   the agent as an OpenAI-compatible server\n"
+        "       ariadne [--home DIR] --gateway [HOST:]PORT     the agent, its memory and model for paired phones (TLS)\n"
+        "       ariadne [--home DIR] --pair [--name N] [--scopes LIST] [--host HOST:PORT] | --devices | --revoke ID\n"
+        "       ariadne [--home DIR] --gateway-adopt DIR   take over a hermes-crypto gateway's identity and token\n"
         "       ariadne --init [--from FILE] [--rules]     write config.yaml and the folders beside the binary\n"
         "       ariadne --help | --version\n"
         "\n"
@@ -244,6 +251,11 @@ static void usage(FILE* f) {
         "  -- words...     one message, cards printed inline; with no words and a tty: the interactive screen\n"
         "  --serve ADDR    no screen: /v1/chat/completions (SSE with stream:true), /v1/models, /health on\n"
         "                  ADDR (PORT = 127.0.0.1:PORT); a bind past loopback needs serve.api_key or DD_SERVE_KEY\n"
+        "  --gateway ADDR  TLS on ADDR (PORT = 0.0.0.0:PORT) for paired devices: /command (session, pod, bridge,\n"
+        "                  llm; AES-GCM inside TLS), /bridge/stream, and the agent's /v1 surface per device scope;\n"
+        "                  gateway.relay_url dials out to a relay for phones away from the LAN\n"
+        "  --pair          mint a device token and print its pairing code (scopes: chat,memory,tools,admin)\n"
+        "  --devices       list paired devices    --revoke ID   end one\n"
         "\n"
         "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n",
         f);
@@ -448,9 +460,108 @@ static int run_serve(const std::string& addr, const std::string& key, dd::agent:
     return sig ? 128 + sig : 0;
 }
 
+// The device gateway's tool scope. A device paired without `tools` gets the agent's answers
+// but none of its local file and shell tools; the scope is set when a turn is claimed (one
+// turn at a time), on the turn's own thread, before the first tool can run.
+struct DeviceToolGate : dd::agent::ToolGate {
+    dd::agent::ToolGate* inner = nullptr;
+    std::atomic<bool> allow_tools{true};
+    std::string device;
+    std::optional<std::string> veto(const dd::core::ToolCall& call) override {
+        static const std::set<std::string> local{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "find"};
+        if (!allow_tools.load(std::memory_order_acquire) && local.count(call.name))
+            return "this device (" + device + ") was not paired for local tools; pair it with --scopes ...,tools";
+        return inner ? inner->veto(call) : std::nullopt;
+    }
+};
+
+struct GatewayTurns : AgentTurns {
+    const dd::gateway::DeviceGateway& gw;
+    DeviceToolGate& gate;
+    GatewayTurns(dd::agent::Agent& a, const dd::gateway::DeviceGateway& g, DeviceToolGate& t) : AgentTurns(a), gw(g), gate(t) {}
+    void claimed(const dd::net::Request& req) override {
+        auto d = gw.device(req);   // the handler only lets an authenticated device this far
+        gate.device = d ? d->name : "?";
+        gate.allow_tools.store(d && d->has("tools"), std::memory_order_release);
+    }
+};
+
+static int run_gateway(const std::string& addr, const ddcore::Config& cfg, const std::filesystem::path& gdir,
+                       dd::agent::Agent& agent, dd::agent::HttpLLM& llm, dd::agent::ToolGate& inner_gate,
+                       const std::string& model, const std::string& home, int tool_count,
+                       const std::vector<std::string>& boot_errors) {
+    std::string host = "0.0.0.0", port_s = addr;
+    if (const size_t colon = addr.rfind(':'); colon != std::string::npos) {
+        host = addr.substr(0, colon);
+        port_s = addr.substr(colon + 1);
+        if (host.size() > 1 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
+    }
+    int port = -1;
+    try { port = std::stoi(port_s); } catch (const std::exception&) {}
+    if (port < 0 || port > 65535) { std::cerr << "ariadne: --gateway wants [HOST:]PORT, got " << addr << "\n"; return 2; }
+
+    std::string err;
+    auto id = dd::gateway::load_or_create(gdir, err);
+    if (!id) { std::cerr << "ariadne: gateway identity: " << err << "\n"; return 1; }
+    void* tls = dd::gateway::make_server_ctx(*id, err);
+    if (!tls) { std::cerr << "ariadne: " << err << "\n"; return 1; }
+    dd::gateway::DeviceGateway gw(dd::gateway::config_from(cfg), dd::gateway::Devices(gdir / "devices.json"));
+    const size_t devices = dd::gateway::Devices(gdir / "devices.json").list().size();
+
+    DeviceToolGate gate;
+    gate.inner = &inner_gate;
+    agent.gate = &gate;
+    GatewayTurns turns(agent, gw, gate);
+    dd::serve::ApiInfo info;
+    info.upstream_model = model;
+    info.home = home;
+    info.tools = tool_count;
+    dd::serve::ChatApi api(info, "", turns);   // the gateway authenticates before the API sees a request
+
+    llm.on_begin = [] {};
+    llm.on_reasoning = [&api](const std::string& d) { api.on_reasoning(d); };
+    llm.on_content = [&api](const std::string& d) { api.on_content(d); };
+    agent.step_hook = [&api, &llm](const dd::core::Message& m) {
+        if (m.role == "tool") {
+            api.on_tool_result(m.tool_call_id, m.content);
+        } else if (m.role == "assistant") {
+            if (!m.content.empty() && !llm.streamed) api.on_message(m.content);
+            for (const auto& tc : m.tool_calls) api.on_tool_call(tc.id, tc.name, tc.arguments);
+        }
+    };
+
+    dd::net::Server server(host, port, [&](const dd::net::Request& q, dd::net::Conn& c) {
+        if (gw.handle(q, c)) return;
+        // The agent's own surface: a paired device with the chat scope, nothing else.
+        auto d = gw.device(q);
+        if (!d) { c.json(401, R"({"error":{"message":"a paired device's token is required","type":"auth"}})"); return; }
+        if (!d->has("chat")) { c.json(403, R"({"error":{"message":"this device was not paired for chat","type":"scope"}})"); return; }
+        api.handle(q, c);
+    });
+    server.set_tls(tls);
+    if (!server.listen(err)) { std::cerr << "ariadne: " << err << "\n"; dd::gateway::free_server_ctx(tls); return 1; }
+    for (const auto& e : boot_errors) std::cerr << "ariadne: " << e << "\n";
+    std::cerr << "ariadne gateway: https://" << host << ":" << server.port() << " · " << model << " · " << tool_count
+              << " tools · " << devices << " paired device(s) · fp sha256/" << id->fp_b64() << "\n";
+    if (devices == 0) std::cerr << "ariadne gateway: no device is paired yet: `ariadne --pair` prints a code for one\n";
+
+    install_term_handlers();
+    std::thread relay_thread;
+    const std::string relay_url = dd::gateway::relay_url_from(cfg);
+    dd::gateway::RelayClient relay(relay_url, *id, gw);
+    if (!relay_url.empty()) relay_thread = std::thread([&relay] { relay.run(g_sig); });
+    server.serve(g_sig);
+    if (relay_thread.joinable()) relay_thread.join();
+    dd::tools::shell_kill_all();
+    dd::gateway::free_server_ctx(tls);
+    const int sig = g_sig.load();
+    return sig ? 128 + sig : 0;
+}
+
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
-    std::string home_flag, config_flag, init_from, serve_addr;
+    std::string home_flag, config_flag, init_from, serve_addr, gateway_addr, gw_action, gw_arg;
+    dd::gateway::PairOptions pair_opt;
     bool init = false, init_rules = false;
     std::vector<std::string> msg_words;
     bool after_dd = false;
@@ -477,6 +588,14 @@ int main(int argc, char** argv) {
         else if (a == "--rules") init_rules = true;
         else if (a == "--from") init_from = value("--from");
         else if (a == "--serve") serve_addr = value("--serve");
+        else if (a == "--gateway") gateway_addr = value("--gateway");
+        else if (a == "--pair") gw_action = "pair";
+        else if (a == "--devices") gw_action = "devices";
+        else if (a == "--revoke") { gw_action = "revoke"; gw_arg = value("--revoke"); }
+        else if (a == "--gateway-adopt") { gw_action = "adopt"; gw_arg = value("--gateway-adopt"); }
+        else if (a == "--name") pair_opt.name = value("--name");
+        else if (a == "--scopes") pair_opt.scopes = dd::gateway::split_scopes(value("--scopes"));
+        else if (a == "--host") pair_opt.host = value("--host");
         else if (a.size() > 1 && a[0] == '-') { std::cerr << "ariadne: unknown option " << a << "\n"; usage(stderr); return 2; }
         else config_flag = a;   // a bare path is the config, as it always was
     }
@@ -532,6 +651,22 @@ int main(int argc, char** argv) {
     catch (const std::exception& ex) { std::cerr << "config: " << ex.what() << "\n"; }
     dd::know::configure(cfg);
 
+    // The device gateway's admin: no agent, no model, no MCP -- files under state/gateway.
+    if (!gw_action.empty()) {
+        const auto gdir = dd::gateway::state_dir(home.state());
+        if (gw_action == "pair") {
+            if (const auto colon = gateway_addr.rfind(':'); colon != std::string::npos) {
+                try { pair_opt.port = std::stoi(gateway_addr.substr(colon + 1)); } catch (const std::exception&) {}
+            } else if (!gateway_addr.empty()) {
+                try { pair_opt.port = std::stoi(gateway_addr); } catch (const std::exception&) {}
+            }
+            return dd::gateway::pair(gdir, cfg, pair_opt);
+        }
+        if (gw_action == "devices") return dd::gateway::list_devices(gdir);
+        if (gw_action == "revoke") return dd::gateway::revoke(gdir, gw_arg);
+        return dd::gateway::adopt(gdir, dd::know::expand_home(gw_arg));
+    }
+
     // The tool-output envelope, resolved once from the config this process loaded: run_terminal's
     // byte cap and read_file's line window come from `tool_output`. Absent values keep the numbers
     // the tools shipped before the section existed, so an unset config changes nothing.
@@ -567,8 +702,9 @@ int main(int argc, char** argv) {
     dd::tools::admit_configured_url(base_url);   // the operator's model may sit on the LAN (a phone's does)
 
     const bool to_tty = isatty(STDOUT_FILENO);
-    const bool serving = !serve_addr.empty();
-    if (serving && !msg_words.empty()) { std::cerr << "ariadne: --serve takes no message\n"; return 2; }
+    const bool serving = !serve_addr.empty() || !gateway_addr.empty();
+    if (serving && !msg_words.empty()) { std::cerr << "ariadne: --serve / --gateway take no message\n"; return 2; }
+    if (!serve_addr.empty() && !gateway_addr.empty()) { std::cerr << "ariadne: --serve or --gateway, not both\n"; return 2; }
     const bool interactive = !serving && msg_words.empty() && isatty(STDIN_FILENO) && to_tty;
     const char* ct = std::getenv("COLORTERM");
     const bool truecolor = ct && (std::strcmp(ct, "truecolor") == 0 || std::strcmp(ct, "24bit") == 0);
@@ -1165,6 +1301,9 @@ int main(int argc, char** argv) {
     };
 
     // ---- --serve: the same assembled agent, its events on the wire instead of the screen ----
+    if (!gateway_addr.empty())
+        return run_gateway(gateway_addr, cfg, dd::gateway::state_dir(home.state()), agent, llm, gate, model,
+                           home.root.string(), tool_count, boot_errors);
     if (serving) {
         std::string serve_key = env_or("DD_SERVE_KEY", cfg.get_string("serve.api_key"));
         return run_serve(serve_addr, serve_key, agent, llm, model, home.root.string(), tool_count, boot_errors);

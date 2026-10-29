@@ -17,6 +17,8 @@ CXXFLAGS += $(MOLD_FLAG)
 # How the product binary links libcurl. A cross build (android/build.sh) points it at a static
 # curl and the TLS library under it, which have to follow -lcurl on the line.
 CURL_LIBS ?= -lcurl
+# The device gateway (TLS, AES-GCM, the relay's signatures) stands on OpenSSL.
+TLS_LIBS ?= -lssl -lcrypto
 
 # Every executable rule writes into build/. Create it while parsing the Makefile,
 # so even direct goals such as `make $(BUILD)/ariadne` work from a clean checkout.
@@ -61,6 +63,7 @@ ANSI := src/tools/ansi_strip.cpp
 UI := src/ui.cpp src/ui_simd.cpp src/ui_grammar.cpp
 NET := src/net/http.cpp $(URLSAFE)
 SERVE := src/net/server.cpp src/serve/chat_api.cpp
+GWDEV := src/gateway/crypto.cpp src/gateway/identity.cpp src/gateway/devices.cpp src/gateway/device_gateway.cpp src/gateway/relay.cpp src/gateway/cli.cpp
 HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
 CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp $(SHA256)   # the staleness key is a sha256 of the config
@@ -152,8 +155,8 @@ install: $(BUILD)/ariadne-install
 install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/ariadne: $(SERVE) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE)) src/dd_tui.cpp -pthread $(CURL_LIBS) -o $(BUILD)/ariadne
+$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
