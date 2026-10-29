@@ -21,6 +21,8 @@
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
+#include "dd/net/server.hpp"
+#include "dd/serve/chat_api.hpp"
 #include "dd/agent/redact.hpp"
 #include "dd/context/deck.hpp"
 #include "dd/context/endpoint.hpp"
@@ -230,6 +232,7 @@ static const char* const kVersion = "0.1.0";
 static void usage(FILE* f) {
     std::fputs(
         "usage: ariadne [--home DIR | --config FILE | FILE] [-- message words...]\n"
+        "       ariadne [--home DIR | --config FILE] --serve [HOST:]PORT   the agent as an OpenAI-compatible server\n"
         "       ariadne --init [--from FILE] [--rules]     write config.yaml and the folders beside the binary\n"
         "       ariadne --help | --version\n"
         "\n"
@@ -238,8 +241,10 @@ static void usage(FILE* f) {
         "  --init          write config.yaml (the embedded reference, or a copy of --from FILE) and the folders\n"
         "  --rules         with --init: also install the starter tripwires\n"
         "  -- words...     one message, cards printed inline; with no words and a tty: the interactive screen\n"
+        "  --serve ADDR    no screen: /v1/chat/completions (SSE with stream:true), /v1/models, /health on\n"
+        "                  ADDR (PORT = 127.0.0.1:PORT); a bind past loopback needs serve.api_key or DD_SERVE_KEY\n"
         "\n"
-        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n",
+        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n",
         f);
 }
 
@@ -374,9 +379,77 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
     return m;
 }
 
+// ---- --serve ----
+namespace {
+
+struct AgentTurns : dd::serve::TurnRunner {
+    dd::agent::Agent& agent;
+    explicit AgentTurns(dd::agent::Agent& a) : agent(a) {}
+    std::string run(const std::string& msg) override {
+        agent.interrupt_requested = false;
+        return agent.run(msg);
+    }
+    void interrupt() override { agent.interrupt_requested = true; }
+};
+
+bool loopback(const std::string& host) {
+    return host == "127.0.0.1" || host == "localhost" || host == "::1" || host.rfind("127.", 0) == 0;
+}
+
+}  // namespace
+
+static int run_serve(const std::string& addr, const std::string& key, dd::agent::Agent& agent,
+                     dd::agent::HttpLLM& llm, const std::string& model, const std::string& home,
+                     int tool_count, const std::vector<std::string>& boot_errors) {
+    std::string host = "127.0.0.1", port_s = addr;
+    if (const size_t colon = addr.rfind(':'); colon != std::string::npos) {
+        host = addr.substr(0, colon);
+        port_s = addr.substr(colon + 1);
+        if (host.size() > 1 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
+    }
+    int port = -1;
+    try { port = std::stoi(port_s); } catch (const std::exception&) {}
+    if (port < 0 || port > 65535) { std::cerr << "ariadne: --serve wants [HOST:]PORT, got " << addr << "\n"; return 2; }
+    if (!loopback(host) && key.empty()) {
+        std::cerr << "ariadne: serving on " << host << " runs a shell for whoever connects; set serve.api_key or DD_SERVE_KEY\n";
+        return 2;
+    }
+
+    AgentTurns turns(agent);
+    dd::serve::ApiInfo info;
+    info.upstream_model = model;
+    info.home = home;
+    info.tools = tool_count;
+    dd::serve::ChatApi api(info, key, turns);
+
+    llm.on_begin = [] {};
+    llm.on_reasoning = [&api](const std::string& d) { api.on_reasoning(d); };
+    llm.on_content = [&api](const std::string& d) { api.on_content(d); };
+    agent.step_hook = [&api, &llm](const dd::core::Message& m) {
+        if (m.role == "tool") {
+            api.on_tool_result(m.tool_call_id, m.content);
+        } else if (m.role == "assistant") {
+            if (!m.content.empty() && !llm.streamed) api.on_message(m.content);
+            for (const auto& tc : m.tool_calls) api.on_tool_call(tc.id, tc.name, tc.arguments);
+        }
+    };
+
+    dd::net::Server server(host, port, [&api](const dd::net::Request& q, dd::net::Conn& c) { api.handle(q, c); });
+    std::string err;
+    if (!server.listen(err)) { std::cerr << "ariadne: " << err << "\n"; return 1; }
+    for (const auto& e : boot_errors) std::cerr << "ariadne: " << e << "\n";
+    std::cerr << "ariadne serve: http://" << host << ":" << server.port() << " · " << model << " · " << tool_count
+              << " tools" << (key.empty() ? "" : " · bearer token required") << "\n";
+    install_term_handlers();   // a signal interrupts a running turn through g_cancel and ends the accept loop
+    server.serve(g_sig);
+    dd::tools::shell_kill_all();
+    const int sig = g_sig.load();
+    return sig ? 128 + sig : 0;
+}
+
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
-    std::string home_flag, config_flag, init_from;
+    std::string home_flag, config_flag, init_from, serve_addr;
     bool init = false, init_rules = false;
     std::vector<std::string> msg_words;
     bool after_dd = false;
@@ -402,6 +475,7 @@ int main(int argc, char** argv) {
         else if (a == "--init") init = true;
         else if (a == "--rules") init_rules = true;
         else if (a == "--from") init_from = value("--from");
+        else if (a == "--serve") serve_addr = value("--serve");
         else if (a.size() > 1 && a[0] == '-') { std::cerr << "ariadne: unknown option " << a << "\n"; usage(stderr); return 2; }
         else config_flag = a;   // a bare path is the config, as it always was
     }
@@ -491,7 +565,9 @@ int main(int argc, char** argv) {
     if (base_url.empty()) { std::cerr << "no model.base_url and DD_BASE_URL unset\n"; return 2; }
 
     const bool to_tty = isatty(STDOUT_FILENO);
-    const bool interactive = msg_words.empty() && isatty(STDIN_FILENO) && to_tty;
+    const bool serving = !serve_addr.empty();
+    if (serving && !msg_words.empty()) { std::cerr << "ariadne: --serve takes no message\n"; return 2; }
+    const bool interactive = !serving && msg_words.empty() && isatty(STDIN_FILENO) && to_tty;
     const char* ct = std::getenv("COLORTERM");
     const bool truecolor = ct && (std::strcmp(ct, "truecolor") == 0 || std::strcmp(ct, "24bit") == 0);
     const bool color = to_tty && !std::getenv("NO_COLOR");
@@ -1084,6 +1160,12 @@ int main(int argc, char** argv) {
         }
         if (flush_inline) flush_inline();
     };
+
+    // ---- --serve: the same assembled agent, its events on the wire instead of the screen ----
+    if (serving) {
+        std::string serve_key = env_or("DD_SERVE_KEY", cfg.get_string("serve.api_key"));
+        return run_serve(serve_addr, serve_key, agent, llm, model, home.root.string(), tool_count, boot_errors);
+    }
 
     // ---- `-- msg` or piped stdin: cards printed in order ----
     if (!interactive) {

@@ -57,6 +57,7 @@ OSVPARSE := src/tools/osv_package_parse.cpp
 ANSI := src/tools/ansi_strip.cpp
 UI := src/ui.cpp src/ui_simd.cpp src/ui_grammar.cpp
 NET := src/net/http.cpp $(URLSAFE)
+SERVE := src/net/server.cpp src/serve/chat_api.cpp
 HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
 CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp $(SHA256)   # the staleness key is a sha256 of the config
@@ -148,8 +149,8 @@ install: $(BUILD)/ariadne-install
 install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/ariadne: $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/ariadne
+$(BUILD)/ariadne: $(SERVE) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE)) src/dd_tui.cpp -pthread -lcurl -o $(BUILD)/ariadne
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
