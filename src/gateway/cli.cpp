@@ -85,16 +85,6 @@ std::string lan_address() {
 
 namespace {
 
-std::string pairing_code(const Identity& id, const std::string& host, const std::string& token, const std::string& relay_public) {
-    Json doc = core::json_obj();
-    core::obj_set(doc, "v", core::json_num(relay_public.empty() ? 1 : 2));
-    if (!host.empty()) core::obj_set(doc, "host", core::json_str(host));
-    core::obj_set(doc, "token", core::json_str(token));
-    core::obj_set(doc, "fp", core::json_str(id.fp_b64()));
-    if (!relay_public.empty()) core::obj_set(doc, "relay", core::json_str(relay_public));
-    return crypto::b64(core::json_dump(doc));
-}
-
 void print_qr(const std::string& code) {
     if (::access("/usr/bin/qrencode", X_OK) != 0 && ::access("/usr/local/bin/qrencode", X_OK) != 0) {
         std::cout << "(install qrencode for a scannable QR here; the code below pastes the same)\n";
@@ -114,32 +104,37 @@ int pair(const fs::path& dir, const core::Config& cfg, const PairOptions& opt) {
     if (!id) { std::cerr << "ariadne: gateway identity: " << error << "\n"; return 1; }
     Devices devices(dir / "devices.json");
     std::string token;
-    std::string name = opt.name;
-    if (name.empty()) {
-        char buf[32];
-        const std::time_t t = std::time(nullptr);
-        std::strftime(buf, sizeof buf, "phone %Y-%m-%d %H:%M", std::localtime(&t));
-        name = buf;
+    std::optional<Device> d;
+    if (opt.name.empty()) {
+        // Mazemaker's pairing: the same code the gateway's /pair page shows, host-less (the app
+        // finds the gateway by mDNS), carrying the one pairing token.
+        auto t = devices.pairing_token(true, error);
+        if (!t) { std::cerr << "ariadne: " << error << "\n"; return 1; }
+        token = *t;
+        d = devices.by_token(token);
+    } else {
+        // A device of its own: its own token, its own scopes, revocable on its own.
+        d = devices.add(opt.name, opt.scopes, token, error);
+        if (!d) { std::cerr << "ariadne: " << error << "\n"; return 1; }
     }
-    auto d = devices.add(name, opt.scopes, token, error);
-    if (!d) { std::cerr << "ariadne: " << error << "\n"; return 1; }
-    std::string host = opt.host;
-    if (host.empty()) {
-        const std::string ip = lan_address();
-        if (!ip.empty()) host = ip + ":" + std::to_string(opt.port);
-    }
-    const std::string code = pairing_code(*id, host, token, relay_public_from(cfg));
-    std::cout << "paired " << d->id << " (" << d->name << ") · scopes ";
+    const std::string host = opt.host;
+    const std::string code = DeviceGateway::mazemaker_code(token, id->fp_b64(), relay_public_from(cfg), host);
+    std::cout << (opt.name.empty() ? "Mazemaker pairing" : "paired") << " · " << d->id << " (" << d->name << ") · scopes ";
     for (size_t i = 0; i < d->scopes.size(); ++i) std::cout << (i ? "," : "") << d->scopes[i];
     std::cout << "\n";
     print_qr(code);
     std::cout << "\npairing code (Mazemaker app → Settings → Secure Gateway → scan or paste):\n" << code << "\n\n"
-              << "host  " << (host.empty() ? "(none — the phone finds the gateway via mDNS)" : host) << "\n"
+              << "host  " << (host.empty() ? "(none — the phone finds the gateway via mDNS, _mazemaker-gw._tcp)" : host) << "\n"
               << "fp    sha256/" << id->fp_b64() << "\n";
     if (const std::string relay = relay_public_from(cfg); !relay.empty())
         std::cout << "relay " << relay << "  (phones away from the LAN post to " << relay << "/gw/" << id->fp_hex() << ")\n";
-    std::cout << "The code carries the device's token: show it to that phone only. `ariadne --revoke " << d->id
-              << "` ends it.\n";
+    if (opt.name.empty())
+        std::cout << "This is the code the gateway's pairing page (https://127.0.0.1:<port>/pair) shows. It carries the\n"
+                     "pairing token: show it to your phones only. `ariadne --revoke " << d->id << "` ends it for every\n"
+                     "phone paired with it; the next /pair mints a new one.\n";
+    else
+        std::cout << "The code carries this device's own token: show it to that phone only. `ariadne --revoke " << d->id
+                  << "` ends it.\n";
     return 0;
 }
 
@@ -170,9 +165,19 @@ int revoke(const fs::path& dir, const std::string& id) {
 
 int adopt(const fs::path& dir, const fs::path& hc) {
     std::string error;
-    if (!gateway::adopt(hc / "gateway.crt", hc / "gateway.key", dir, error)) { std::cerr << "ariadne: " << error << "\n"; return 1; }
-    auto id = load(dir / "cert.pem", dir / "key.pem", error);
-    std::cout << "identity adopted from " << hc.string() << " · fp sha256/" << (id ? id->fp_b64() : "?") << "\n";
+    // Idempotent: a home that already holds THIS identity (same fp) only takes the token again,
+    // so running it twice -- or after an upgrade that learned something new to adopt -- is safe.
+    // A different identity is still refused: phones pinned the one they paired with.
+    auto theirs = load(hc / "gateway.crt", hc / "gateway.key", error);
+    if (!theirs) { std::cerr << "ariadne: " << error << "\n"; return 1; }
+    std::string mine_err;
+    auto mine = load(dir / "cert.pem", dir / "key.pem", mine_err);
+    if (mine && mine->fp_b64() == theirs->fp_b64()) {
+        std::cout << "identity already adopted from " << hc.string() << " · fp sha256/" << mine->fp_b64() << "\n";
+    } else {
+        if (!gateway::adopt(hc / "gateway.crt", hc / "gateway.key", dir, error)) { std::cerr << "ariadne: " << error << "\n"; return 1; }
+        std::cout << "identity adopted from " << hc.string() << " · fp sha256/" << theirs->fp_b64() << "\n";
+    }
     std::ifstream tf(hc / "gateway.token");
     std::string token;
     std::getline(tf, token);
@@ -182,9 +187,12 @@ int adopt(const fs::path& dir, const fs::path& hc) {
         return 0;
     }
     Devices devices(dir / "devices.json");
-    auto d = devices.add("hermes-crypto (adopted)", Devices::default_scopes(), token, error);
+    auto d = devices.by_token(token);
+    if (!d) d = devices.add("hermes-crypto (adopted)", Devices::default_scopes(), token, error);
     if (!d) { std::cerr << "ariadne: " << error << "\n"; return 1; }
-    std::cout << "token adopted as " << d->id << ": phones paired with hermes-crypto keep working\n";
+    if (!devices.set_pairing_token(token, error)) { std::cerr << "ariadne: " << error << "\n"; return 1; }
+    std::cout << "token adopted as " << d->id << " and as the Mazemaker pairing token: phones paired with\n"
+                 "hermes-crypto keep working, and the /pair page shows the code they were paired with\n";
     return 0;
 }
 

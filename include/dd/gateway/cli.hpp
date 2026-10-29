@@ -2,10 +2,13 @@
 // dd/gateway/cli.hpp — the operator's side of the device gateway: pairing, the device
 // list, revocation, adopting a hermes-crypto gateway, and the config it runs on.
 //
-//   ariadne --pair [--name N] [--scopes chat,memory,tools,admin] [--host HOST:PORT]
-//       mints a device token and prints the pairing code (and a QR when qrencode is
-//       installed). The code is what the Mazemaker app scans: base64(JSON{v, host,
-//       token, fp[, relay]}), fp = base64(sha256(SPKI)) of this gateway's certificate.
+//   ariadne --pair [--host HOST:PORT]
+//       prints the Mazemaker pairing code (and a QR when qrencode is installed): the
+//       same code the gateway's loopback-only /pair page shows and the app scans,
+//       base64(JSON{v, token, fp[, relay]}), fp = base64(sha256(SPKI)) of this
+//       gateway's certificate; host-less unless --host, the app finds it by mDNS.
+//   ariadne --pair --name N [--scopes chat,memory,tools,admin]
+//       instead mints a device of its own (its own token and scopes, revoked alone).
 //   ariadne --devices
 //   ariadne --revoke ID
 //   ariadne --gateway-adopt DIR

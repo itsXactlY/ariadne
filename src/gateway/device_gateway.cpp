@@ -9,6 +9,7 @@
 #include <curl/curl.h>
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 
@@ -314,7 +315,102 @@ void DeviceGateway::bridge_stream(const net::Request& req, net::Conn& conn) cons
     }
 }
 
+std::string DeviceGateway::mazemaker_code(const std::string& token, const std::string& fp_b64,
+                                          const std::string& relay_public, const std::string& host) {
+    Json doc = core::json_obj();
+    core::obj_set(doc, "v", core::json_num(relay_public.empty() ? 1 : 2));
+    if (!host.empty()) core::obj_set(doc, "host", core::json_str(host));
+    core::obj_set(doc, "token", core::json_str(token));
+    core::obj_set(doc, "fp", core::json_str(fp_b64));
+    if (!relay_public.empty()) core::obj_set(doc, "relay", core::json_str(relay_public));
+    return crypto::b64(core::json_dump(doc));
+}
+
+namespace {
+
+std::string qr_svg(const std::string& code) {
+    // The code is base64: no shell metacharacter can stand in it.
+    FILE* p = ::popen(("qrencode -t SVG -o - '" + code + "' 2>/dev/null").c_str(), "r");
+    if (!p) return {};
+    std::string out;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
+    if (::pclose(p) != 0) return {};
+    const size_t at = out.find("<svg");   // the XML prolog would not embed inside HTML
+    return at == std::string::npos ? std::string() : out.substr(at);
+}
+
+std::string html_escape(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '<') o += "&lt;";
+        else if (c == '>') o += "&gt;";
+        else if (c == '&') o += "&amp;";
+        else if (c == '\'') o += "&#39;";
+        else o += c;
+    }
+    return o;
+}
+
+}  // namespace
+
+void DeviceGateway::pairing(const net::Request& req, net::Conn& conn, bool json) const {
+    // The code carries a bearer token: never to a LAN client. Open it on this host (the
+    // Architect's "pair your phone" link does).
+    if (req.peer != "127.0.0.1" && req.peer != "::1") {
+        conn.respond(403, "text/plain; charset=utf-8", "pairing is loopback-only (open from the pod host)");
+        return;
+    }
+    if (pair_fp_.empty()) { conn.json(503, core::json_dump(jerr("pairing is not configured on this gateway"))); return; }
+    std::string error;
+    Devices devices = devices_;
+    const auto token = devices.pairing_token(true, error);
+    if (!token) { conn.json(503, core::json_dump(jerr("no pairing token: " + error))); return; }
+    const std::string code = mazemaker_code(*token, pair_fp_, pair_relay_);
+    if (json) {
+        Json o = core::json_obj();
+        core::obj_set(o, "code", core::json_str(code));
+        core::obj_set(o, "fp", core::json_str(pair_fp_));
+        conn.json(200, core::json_dump(o));
+        return;
+    }
+    std::string svg = qr_svg(code);
+    if (svg.empty()) svg = "<p>(install qrencode to render the QR)</p>";
+    const std::string page =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Pair Mazemaker</title><style>"
+        "body{background:#0b0b12;color:#e8e6f0;font-family:ui-monospace,Menlo,monospace;"
+        "margin:0;padding:32px;display:flex;flex-direction:column;align-items:center;gap:18px}"
+        "h1{font-size:18px;letter-spacing:3px;color:#b69cff;margin:0}"
+        ".qr{background:#fff;padding:16px;border-radius:12px;width:280px;height:280px}"
+        ".qr svg{width:100%;height:100%}"
+        ".code{word-break:break-all;background:#15151f;border:1px solid #2a2a3a;border-radius:8px;"
+        "padding:12px;max-width:480px;font-size:12px;color:#9fe7c4}"
+        ".muted{color:#7a7790;font-size:12px;max-width:480px;text-align:center;line-height:1.5}"
+        ".fp{color:#7a7790;font-size:11px}</style></head><body>"
+        "<h1>PAIR YOUR PHONE</h1>"
+        "<div class='qr'>" + svg + "</div>"
+        "<div class='muted'>Mazemaker app &rarr; Settings &rarr; Secure Gateway &rarr; <b>SCAN QR</b>. "
+        "The phone finds this pod on the LAN (mDNS), fetches the certificate and "
+        "verifies it against the fingerprint below before pinning it &mdash; TLS + token + "
+        "AES end-to-end.</div>"
+        "<div class='code' id='code'>" + html_escape(code) + "</div>"
+        "<div class='fp'>fp sha256/" + html_escape(pair_fp_) + "</div>"
+        "</body></html>";
+    conn.respond(200, "text/html; charset=utf-8", page);
+}
+
 bool DeviceGateway::handle(const net::Request& req, net::Conn& conn) const {
+    if (req.method == "GET" && (req.path == "/" || req.path == "/index.html" || req.path == "/pair")) {
+        pairing(req, conn, false);
+        return true;
+    }
+    if (req.method == "GET" && req.path == "/pair.json") {
+        pairing(req, conn, true);
+        return true;
+    }
     if (req.path == "/health" && req.method == "GET") {
         conn.json(200, R"({"status":"ok","gateway":"running","agent":"ariadne"})");
         return true;

@@ -11,6 +11,11 @@
 //                    -> {"enc":seal(client_key, result)}
 //   POST /bridge/stream  (bearer) the agent bridge's /chat/stream, passed through as SSE
 //   GET  /health   open
+//   GET  / and /pair   the Mazemaker pairing page (QR + code), loopback only -- what the
+//                      Architect's "pair your phone" opens on this host
+//   GET  /pair.json    {code, fp}, loopback only; code = base64(JSON{v:1, token, fp}),
+//                      host-less: the app finds the gateway by mDNS (_mazemaker-gw._tcp);
+//                      v:2 + relay when a relay is published
 //
 // Commands: pod (the Mazemaker pod, scope memory), bridge (the agent bridge, scope chat),
 // llm (this machine's local model, loopback only, scope chat), status, sessions, kill.
@@ -80,6 +85,16 @@ public:
 
     const GatewayConfig& config() const { return cfg_; }
 
+    // What the pairing page needs: this gateway's fp (base64) and the relay a phone away from
+    // the LAN reaches it at ("" when none). Without it /pair answers 503.
+    void set_pairing(std::string fp_b64, std::string relay_public) {
+        pair_fp_ = std::move(fp_b64);
+        pair_relay_ = std::move(relay_public);
+    }
+    // The Mazemaker pairing code, exactly as hermes-crypto's pairing_code() made it.
+    static std::string mazemaker_code(const std::string& token, const std::string& fp_b64,
+                                      const std::string& relay_public, const std::string& host = "");
+
 private:
     struct Session {
         Device device;
@@ -91,10 +106,12 @@ private:
     core::Json proxy(const std::string& base, const char* label, const core::Json& args, const char* path_prefix,
                      const std::string& down_message, bool force_no_stream) const;
     void bridge_stream(const net::Request& req, net::Conn& conn) const;
+    void pairing(const net::Request& req, net::Conn& conn, bool json) const;
 
     GatewayConfig cfg_;
     Devices devices_;
     std::string secret_;   // seals session ids; drawn once, never leaves the process
+    std::string pair_fp_, pair_relay_;
 };
 
 std::string bearer_of(const net::Request& req);   // the token after "Bearer ", "" otherwise

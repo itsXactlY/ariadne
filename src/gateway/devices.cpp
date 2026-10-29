@@ -126,6 +126,51 @@ std::optional<Device> Devices::add(const std::string& name, const std::vector<st
     return d;
 }
 
+namespace {
+constexpr const char* kPairingName = "mazemaker pairing";
+}
+
+std::optional<std::string> Devices::pairing_token(bool create, std::string& error) {
+    {
+        std::ifstream f(pairing_file());
+        std::string token;
+        std::getline(f, token);
+        while (!token.empty() && (token.back() == '\r' || token.back() == ' ')) token.pop_back();
+        if (!token.empty()) {
+            if (by_token(token)) return token;
+            // The file outlived its row (revoked): it is no longer a pairing token.
+            if (!create) { error = "the pairing token was revoked; a new one is minted on the next /pair"; return std::nullopt; }
+        } else if (!create) {
+            error = "no pairing token yet";
+            return std::nullopt;
+        }
+    }
+    std::string token;
+    if (!add(kPairingName, default_scopes(), token, error)) return std::nullopt;
+    if (!set_pairing_token(token, error)) return std::nullopt;
+    return token;
+}
+
+bool Devices::set_pairing_token(const std::string& token, std::string& error) {
+    if (!by_token(token)) {
+        std::string t = token;
+        if (!add(kPairingName, default_scopes(), t, error)) return false;
+    }
+    std::error_code ec;
+    fs::create_directories(pairing_file().parent_path(), ec);
+    const fs::path tmp = pairing_file().string() + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) { error = "cannot write " + tmp.string(); return false; }
+        f << token << "\n";
+        if (!f) { error = "cannot write " + tmp.string(); return false; }
+    }
+    ::chmod(tmp.c_str(), 0600);
+    fs::rename(tmp, pairing_file(), ec);
+    if (ec) { error = "cannot place " + pairing_file().string() + ": " + ec.message(); return false; }
+    return true;
+}
+
 bool Devices::revoke(std::string_view id, std::string& error) {
     auto all = list();
     const auto it = std::remove_if(all.begin(), all.end(), [&](const Device& d) { return d.id == id; });

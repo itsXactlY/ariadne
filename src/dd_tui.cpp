@@ -506,6 +506,7 @@ static int run_gateway(const std::string& addr, const ddcore::Config& cfg, const
     void* tls = dd::gateway::make_server_ctx(*id, err);
     if (!tls) { std::cerr << "ariadne: " << err << "\n"; return 1; }
     dd::gateway::DeviceGateway gw(dd::gateway::config_from(cfg), dd::gateway::Devices(gdir / "devices.json"));
+    gw.set_pairing(id->fp_b64(), dd::gateway::relay_public_from(cfg));   // the Mazemaker pairing page, /pair
     const size_t devices = dd::gateway::Devices(gdir / "devices.json").list().size();
 
     DeviceToolGate gate;

@@ -13,6 +13,12 @@
 //   memory  cmd:pod -- the Mazemaker pod behind the gateway
 //   tools   the agent may run its file and shell tools for this device
 //   admin   cmd:status details and the device list
+//
+// The Mazemaker pairing token. Pairing a phone is Mazemaker's flow: the Architect opens the
+// gateway's loopback-only page (/pair), the app scans the QR. That page hands out one token,
+// as hermes-crypto's gateway.token did -- so it is the one secret kept in clear, in
+// pairing.token beside devices.json (0600), with its device row named "mazemaker pairing".
+// Adopting hermes-crypto makes its gateway.token this token, so phones paired there match.
 
 #include <filesystem>
 #include <optional>
@@ -43,6 +49,14 @@ public:
     std::optional<Device> add(const std::string& name, const std::vector<std::string>& scopes, std::string& token,
                               std::string& error);
     bool revoke(std::string_view id, std::string& error);
+
+    // The token the Mazemaker pairing page and `ariadne --pair` hand out. `create` mints it
+    // (and its device row) when there is none; nullopt + error when that fails, or when there
+    // is none and `create` is false.
+    std::optional<std::string> pairing_token(bool create, std::string& error);
+    // Make `token` the pairing token (adoption). Its device row must exist or is added.
+    bool set_pairing_token(const std::string& token, std::string& error);
+    std::filesystem::path pairing_file() const { return file_.parent_path() / "pairing.token"; }
 
     const std::filesystem::path& file() const { return file_; }
 
