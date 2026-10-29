@@ -126,6 +126,35 @@ def readme_list():
     return groups, dirs
 
 
+def fence_balance():
+    """Every ``` opener needs a closer, in the canonical README and every doc page.
+
+    An unbalanced mermaid block renders as raw text on GitHub and silently swallows the
+    rest of the page — so the imbalance is a documentation defect, not a cosmetic one.
+    Nested fences (``` inside an indented block) are not used in this tree; only
+    line-initial fences are counted.
+    """
+    out = []
+    # No translated READMEs exist in this tree today; the canonical page plus the docs are
+    # what a fence defect could hide. If translations are ever added they join this list and
+    # the citable tree below together — a translation is a copy of the same claims.
+    files = [ROOT / "README.md"] + sorted((ROOT / "docs").glob("*.md")) + [ROOT / "mk/README.md"]
+    for f in files:
+        if not f.exists():
+            continue
+        depth = 0
+        open_ln = 0
+        for i, line in enumerate(f.read_text(errors="replace").split("\n"), 1):
+            if line.startswith("```"):
+                if depth == 0:
+                    depth, open_ln = 1, i
+                else:
+                    depth = 0
+        if depth:
+            out.append((rel(f), open_ln, "fence opened here is never closed"))
+    return out
+
+
 def tokens(text):
     return [t.lower() for t in TOKEN.findall(text)]
 
@@ -152,8 +181,8 @@ def citations():
               # and pushes the doc toward wording that hides where the grammar lives.
               + glob.glob(str(ROOT / "skills/*.yaml"))
               + glob.glob(str(ROOT / "tests/*.cpp"))
-              + glob.glob(str(ROOT / "docs/*.md"))
-              + glob.glob(str(ROOT / "mk/*.md"))
+             + glob.glob(str(ROOT / "docs/*.md"))
+             + glob.glob(str(ROOT / "mk/*.md"))
               # Tier A renamed examples/daedalus -> examples/ariadne; the citable list is
               # name-coupled to that rename and had to move with it, or the gate cannot resolve
               # the reference config the README points at.
@@ -213,6 +242,7 @@ def citations():
 
 def main():
     prod, src_tus, hdrs, reached, unwired, unreached, header_only = wiring()
+    fences = fence_balance()
     ureach = set(unreached)
     print("product binaries: " + ", ".join(f"{k} {len(v)} TUs" for k, v in sorted(prod.items())))
     print(f"closure reaches {len(reached)} files "
@@ -254,11 +284,16 @@ def main():
     print(f"\ncitations checked: {len(cits)} | unresolved or drifting: {len(bad)}")
     for d, ln, raw, why, note in bad:
         print(f"  {d} docL{ln} `{raw}` — {why}: {note}")
+    if fences:
+        print("\nfence balance:")
+        for d, ln, why in fences:
+            print(f"  {d} L{ln} — {why}")
     print("\nwiring vs README:")
     for p in problems:
         print(f"  {p}")
-    print("clean" if not bad and not problems else f"DRIFT: {len(bad)} citations, {len(problems)} wiring claims")
-    return 0 if not bad and not problems else 1
+    print("clean" if not bad and not problems and not fences
+          else f"DRIFT: {len(bad)} citations, {len(problems)} wiring claims, {len(fences)} unbalanced fences")
+    return 0 if not bad and not problems and not fences else 1
 
 
 if __name__ == "__main__":

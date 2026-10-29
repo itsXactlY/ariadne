@@ -16,7 +16,7 @@ on branch `fix/audit-20261024`, not read out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:908-925` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:911-917`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:527`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1020-1033`, `src/dd_tui.cpp:1339-1345`, `src/dd_agent_main.cpp:197-218` |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:888`, `src/dd_tui.cpp:790-810`, `src/dd_tui.cpp:1122`, `src/ui.cpp:2155`, `src/dd_tui.cpp:1445`, `src/dd_agent_main.cpp:197-218` |
 | Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1353-1448`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1278-1310`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:776-792`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2283-2288`, asserted in `tests/ui_test.cpp:1160-1230` |
 
@@ -60,7 +60,7 @@ against `/props`. They move every turn; the ratios are the point, not the totals
 | prompt tokens read | 908,307 at 146 tok/s | the *uncached* part. Every token a window or a note adds lands here |
 | prompt tokens reused | 45,573,645 | 98% of all prompt tokens (45,573,645 / 46,481,952); 500 of 500 requests reused part of their prompt; last request 5,310 of 10,962 |
 | tokens written | 571,178 at 46.7 tok/s | decode. The long-reply side is the slow side |
-| context | 78,690 tokens (`/props n_ctx`) | `total_slots: 1` — two concurrent runs cannot share the server |
+| context | `/props default_generation_settings.n_ctx` = 86,192; the harness panel showed 78,690 for the same server | props is what the server was launched with, the panel is the window actually usable; `total_slots: 1` — two concurrent runs cannot share the server |
 | KV cache | 8-bit, streamed: 32,768 positions per layer in VRAM, the rest in RAM | past 32,768 positions a layer reads RAM, not VRAM |
 | experts in VRAM | 8,651 (8.5 GB) | the rest of the MoE is fetched from RAM per call |
 | speculation | MTP drafts up to 3 tokens, prompt lookup on | the only decode accelerator on this box |
@@ -96,7 +96,7 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
-typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1138`) and `Agent::steer_hook`
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1242`) and `Agent::steer_hook`
 (`src/dd_tui.cpp:1198`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:380`) — after the tool results are
@@ -173,7 +173,7 @@ that second half — a saved call leaves no trace in the log.
 
 The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
 becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
-nothing (`src/dd_tui.cpp:792`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:333`). The hand-off seam is the same
+nothing (`src/dd_tui.cpp:868`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:333`). The hand-off seam is the same
 object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
 
 ```mermaid
