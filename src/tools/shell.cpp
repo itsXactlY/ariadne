@@ -1019,12 +1019,13 @@ std::string shell_danger(const std::string& cmd, const ShellPolicy& policy) {
     return Guard(policy).check(cmd, 0);
 }
 
-#ifdef __ANDROID__
-// Android: the shell is /system/bin/sh, and bionic has no posix_spawn_file_actions_addclosefrom_np.
-// So the child takes posix_spawn's steps by hand -- a new session, default signals and an empty mask,
-// stdin from /dev/null, the pipe on 1 and 2, every other descriptor closed -- and calls nothing but
-// async-signal-safe functions between fork and exec. Returns 0 or an errno, as posix_spawn does.
-static int spawn_sh_android(pid_t* pid, const char* const* argv, char* const* envp, int out) {
+#ifndef __GLIBC__
+// Not glibc (bionic on Android, musl on Alpine): neither has posix_spawn_file_actions_addclosefrom_np,
+// a glibc 2.34 extension. So the child takes posix_spawn's steps by hand -- a new session, default
+// signals and an empty mask, stdin from /dev/null, the pipe on 1 and 2, every other descriptor closed --
+// and calls nothing but async-signal-safe functions between fork and exec. Returns 0 or an errno, as
+// posix_spawn does.
+static int spawn_sh_forked(const char* sh, pid_t* pid, const char* const* argv, char* const* envp, int out) {
     const long open_max = ::sysconf(_SC_OPEN_MAX);
     const int top = open_max > 0 ? static_cast<int>(std::min<long>(open_max, 65536)) : 1024;
     const pid_t p = ::fork();
@@ -1045,7 +1046,7 @@ static int spawn_sh_android(pid_t* pid, const char* const* argv, char* const* en
         ::dup2(out, 1);
         ::dup2(out, 2);
         for (int fd = 3; fd < top; ++fd) ::close(fd);
-        ::execve("/system/bin/sh", const_cast<char* const*>(argv), envp);
+        ::execve(sh, const_cast<char* const*>(argv), envp);
         ::_exit(127);
     }
     *pid = p;
@@ -1081,8 +1082,13 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     if (::pipe2(fds, O_CLOEXEC) != 0) return jerr(std::string("pipe failed: ") + std::strerror(errno));
     const char* argv[] = {"sh", "-c", full.c_str(), nullptr};
     pid_t pid = 0;
+#ifndef __GLIBC__
 #ifdef __ANDROID__
-    const int rc = spawn_sh_android(&pid, argv, envp.data(), fds[1]);
+    constexpr const char* kSh = "/system/bin/sh";   // Android has no /bin
+#else
+    constexpr const char* kSh = "/bin/sh";
+#endif
+    const int rc = spawn_sh_forked(kSh, &pid, argv, envp.data(), fds[1]);
 #else
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
