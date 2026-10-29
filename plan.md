@@ -105,7 +105,7 @@ not worked around:
 
 **Still in scope, and it is a real fold:** `tools::interrupt` vs the inline cancel
 path — `src/dd_tui.cpp:199-211` (`g_cancel`, `g_sig`, `on_term`,
-`install_term_handlers`) and `src/ui.cpp:1407` (fills `{"error":"cancelled"}` for
+`install_term_handlers`) and `src/ui.cpp:1439` (fills `{"error":"cancelled"}` for
 skipped calls). Constraint found by reading, not assumed: the module models a
 *global* flag (`set_interrupt`/`is_interrupted`), while the live path hands the
 running command a **per-call** `std::atomic<bool>*` through `g_cancel`. The fold
@@ -252,8 +252,8 @@ so it is engineer-decidable like every other wave:
 | what | where | why it is in scope |
 |---|---|---|
 | 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp:15` (jitter counter), `src/agent/prompt_cache_boundary.cpp:16` (x3), `include/dd/gateway/pairing.hpp:55` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere. Each is reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guards state no second thread reaches |
-| 5 queues | `src/context/maze.cpp:239` (`Job`), `:240` (`LedgerEntry`), `include/dd/know/router.hpp:115` (`opened_q_`), `include/dd/learn/sink.hpp:35` (`q_`), `include/dd/ui.hpp:269` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:799`) posts an event per streamed delta, so a long answer is thousands of nodes and thousands of string copies on the hot path |
-| 6 deques | `src/core/json.cpp:198`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:273/275/281` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
+| 5 queues | `src/context/maze.cpp:239` (`Job`), `:240` (`LedgerEntry`), `include/dd/know/router.hpp:115` (`opened_q_`), `include/dd/learn/sink.hpp:35` (`q_`), `include/dd/ui.hpp:274` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:799`) posts an event per streamed delta, so a long answer is thousands of nodes and thousands of string copies on the hot path |
+| 6 deques | `src/core/json.cpp:198`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:278/275/281` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
 | `core::park` / `unpark`, 10 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
 | `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:257/280/299`, `src/learn/ledger.cpp:20` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |
 

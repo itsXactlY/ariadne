@@ -240,6 +240,11 @@ struct CodeCtx {
     int hunk_rows = 0;
     const GrammarSet* set = nullptr;   // the languages a fence tag can name
     const Grammar* lang = nullptr;     // the language the open fence declared
+    // A block a previous row opened and did not close -- a triple-quoted string, a /* comment --
+    // and what closes it. Without it a docstring's second row reads as code, and every `is`,
+    // `and` and apostrophe in its prose lights up as a keyword or a string.
+    std::string carry;
+    bool carry_string = false;   // the open block is a string (else a comment)
 };
 struct Span { std::string text; Style st; };
 

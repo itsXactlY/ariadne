@@ -1372,6 +1372,100 @@ int main() {
         chk(w != gspans.end() && w->st.fg == th.text, "under an unknown tag no word is claimed as a keyword");
     }
 
+    {   // a tool result that is code colours like a fence of its language -- the operator's
+        // complaint: a `sed` of a .py file printed as one grey wall while a thought's yaml fence lit up
+        const std::string yaml =
+            "languages:\n"
+            "  python:\n    aliases: [py]\n    keywords: [def, return, class]\n    capital_is_type: false\n"
+            "  json:\n    keys_are_types: true\n";
+        struct Out { std::string ansi, kw, accent, muted; };
+        auto card = [&](const std::string& tool, const std::string& args, const std::string& result) {
+            Scene s{Theme{}};
+            s.set_grammars(GrammarSet::from_yaml(yaml, "test"));
+            // what a ```python fence makes of `def`, against this scene's own reconciled palette
+            GrammarSet same = GrammarSet::from_yaml(yaml, "test");
+            same.reconcile(s.theme());
+            CodeCtx fx;
+            fx.set = &same;
+            highlight_row("```python", s.theme(), fx);
+            Out o;
+            for (const auto& sp : highlight_row("def f():", s.theme(), fx))
+                if (sp.text == "def") o.kw = sgr(sp.st, true) + "def";
+            o.accent = sgr(Style{s.theme().accent}, true);
+            o.muted = sgr(Style{s.theme().muted}, true);
+            s.turn_begin();
+            s.tool_call("c1", tool, args);
+            s.tool_result("c1", result);
+            s.turn_end();
+            o.ansi = s.drain_inline(100, true, true);
+            return o;
+        };
+        const std::string py_out = R"({"exit":0,"stdout":"def f():\n    return 1\n"})";
+        Out o = card("run_terminal", R"({"cmd":"cd ~/x && sed -n '1,5p' tools/run.py"})", py_out);
+        chk(!o.kw.empty() && o.ansi.find(o.kw) != std::string::npos, "sed on a .py file: the rows colour as python");
+        chk(o.ansi.find(o.muted + "exit 0 · ") != std::string::npos, "the harness's `exit 0 · ` stays muted in front of the code");
+        o = card("run_terminal", R"({"cmd":"python3 tools/run.py"})", py_out);
+        chk(o.ansi.find(o.kw) == std::string::npos, "running a .py file prints its output, not its source: no language");
+        o = card("read_file", R"({"path":"src/x.py"})", R"({"content":"def g():\n    return 2\n"})");
+        chk(o.ansi.find(o.kw) != std::string::npos, "read_file of a .py colours as python");
+        o = card("run_terminal", R"({"cmd":"grep -rn def src"})",
+                 R"({"exit":0,"stdout":"src/a.py:12:def h():\nsrc/b.txt:3:def is a word\n"})");
+        auto count = [](const std::string& hay, const std::string& needle) {
+            size_t n = 0;
+            for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+            return n;
+        };
+        chk(count(o.ansi, o.kw) == 1, "of two grep rows only the .py one colours `def` as python (the .txt one is prose)");
+        chk(o.ansi.find(o.accent + "src/a.py") != std::string::npos && o.ansi.find(o.accent + "src/b.txt") != std::string::npos,
+            "every grep row sets its path apart");
+        o = card("run_terminal", R"({"cmd":"grep -n def tools/run.py"})", R"({"exit":0,"stdout":"12:def k():\n"})");
+        chk(o.ansi.find(o.kw) != std::string::npos, "a grep on one file prints no path: its operand names the language");
+        o = card("run_terminal", R"({"cmd":"cat tools/run.py"})", R"({"exit":1,"stdout":"def f():\n"})");
+        chk(o.ansi.find(o.kw) == std::string::npos, "a failed call keeps its error colour");
+        o = card("run_terminal", R"({"cmd":"make test"})", py_out);
+        chk(o.ansi.find(o.kw) == std::string::npos, "a command that names no file says no language");
+    }
+
+    {   // a block opened on one row runs on: a docstring's prose is string, a /* comment's body is comment
+        const GrammarSet set = GrammarSet::from_yaml(
+            "languages:\n"
+            "  python:\n    keywords: [def, return]\n    capital_is_type: false\n"
+            "  c:\n    keywords: [return, int]\n    block_comment: {open: \"/*\", close: \"*/\"}\n", "test");
+        Theme th;
+        CodeCtx ctx;
+        ctx.set = &set;
+        highlight_row("```python", th, ctx);
+        auto spans_of = [&](const std::string& row) { return highlight_row(row, th, ctx); };
+        auto styled = [](const std::vector<Span>& sp, const std::string& text) -> const Span* {
+            for (const auto& x : sp)
+                if (x.text.find(text) != std::string::npos) return &x;
+            return nullptr;
+        };
+        const auto open = spans_of("def f():");
+        const Style kw = styled(open, "def")->st;
+        const auto d1 = spans_of("    \"\"\"Summary, and you return here.");
+        const auto d2 = spans_of("    it's prose: you return nothing here");
+        const auto d3 = spans_of("    \"\"\"");
+        const auto after = spans_of("    return 1");
+        chk(styled(d1, "you return here") && styled(d1, "you return here")->st.fg == th.code_str,
+            "a docstring's first row is string to its end");
+        chk(d2.size() == 1 && d2[0].st.fg == th.code_str && !(d2[0].st == kw),
+            "its next row is string too: no keyword in the prose, no apostrophe opening another string");
+        chk(styled(d3, "\"\"\"") && styled(d3, "\"\"\"")->st.fg == th.code_str, "the closing quotes are string");
+        chk(styled(after, "return") && styled(after, "return")->st == kw, "after the close the code is code again");
+        highlight_row("```c", th, ctx);
+        const auto c1 = spans_of("int x; /* a comment that");
+        const auto c2 = spans_of("   return goes on */ int y;");
+        chk(styled(c1, "/* a comment that")->st.fg == th.code_cmt, "a block comment opens");
+        chk(styled(c2, "return goes on */") && styled(c2, "return goes on */")->st.fg == th.code_cmt,
+            "its next row is comment up to the close");
+        chk(styled(c2, "int") && styled(c2, "int")->st.fg != th.code_cmt, "and code after it");
+        highlight_row("```python", th, ctx);
+        spans_of("    \"\"\"left open");
+        highlight_row("```", th, ctx);
+        chk(ctx.carry.empty(), "a fence row ends a block the last one left open");
+    }
+
     if (g_fail) std::printf("%d FAILED\n", g_fail);
     else std::printf("ui: all passed (best kernels: %s)\n", best.c_str());
     return g_fail ? 1 : 0;

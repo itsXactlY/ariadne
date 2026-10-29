@@ -37,7 +37,7 @@
 # move is a fact the operator is owed. A skin that already separates its colours moves nothing.
 languages:
   cpp:
-    aliases: [c++, cxx, cc, c]
+    aliases: [c++, cxx, cc, c, hpp, hxx, hh, h]
     keywords:
       - if
       - else

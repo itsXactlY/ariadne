@@ -241,9 +241,9 @@ Highlights:
   against the skin's own text colour and pushes an unreadable hue away from it while keeping the
   hue; it runs on the shipped palette too, since defaults are colours as well, and
   `palette_fixed` counts what moved so a reconciled palette is visible instead of silent.
-- **Patch colour is scoped to the hunk's own claim.** `hunk_contract` in `src/ui.cpp:1278-1310`
+- **Patch colour is scoped to the hunk's own claim.** `hunk_contract` in `src/ui.cpp:1309-1341`
   reads `@@ -a,b +c,d @@` and allows at most `b + c` rows of patch colour, so a `-` after a
-  spent patch block is a bullet, not a deletion (`highlight_row` in `src/ui.cpp:1353-1448`).
+  spent patch block is a bullet, not a deletion (`highlight_row` in `src/ui.cpp:1384-1480`).
 - OpenMP is used for sufficiently large rendering and indexing work; small work stays serial to avoid waking threads unnecessarily.
 
 ## Tooling and trust boundaries

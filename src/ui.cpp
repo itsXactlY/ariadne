@@ -1101,11 +1101,24 @@ bool has(const std::vector<std::string>& sorted, std::string_view w) {
     return std::binary_search(sorted.begin(), sorted.end(), w, std::less<>{});
 }
 size_t highlight_code(const std::string& row, size_t start, const Theme& th, std::vector<Span>& out,
-                      const Grammar& g) {
+                      const Grammar& g, CodeCtx* ctx = nullptr) {
     size_t pos = start;
     auto push = [&](size_t a, size_t b, Style st) {
         if (b > a) out.emplace_back(row.substr(a, b - a), st);
     };
+    // A block the row before opened runs on until its close: all of this row, or up to the close.
+    if (ctx && !ctx->carry.empty()) {
+        const Style st{ctx->carry_string ? code_color(th, g, CodeTok::String, th.code_str)
+                                         : code_color(th, g, CodeTok::Comment, th.code_cmt)};
+        const size_t end = row.find(ctx->carry, pos);
+        if (end == std::string::npos) {
+            push(pos, row.size(), st);
+            return row.size();
+        }
+        push(pos, end + ctx->carry.size(), st);
+        pos = end + ctx->carry.size();
+        ctx->carry.clear();
+    }
     // Quote characters come from the language's own list: json has one, python and C have two,
     // and a row alone cannot tell them apart. Fixed storage, so this allocates nothing per row.
     char qv[8];
@@ -1158,6 +1171,10 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
                 const size_t end = row.find(bc.second, pos + bc.first.size());
                 const size_t p = end == std::string::npos ? row.size() : end + bc.second.size();
                 push(pos, p, Style{cmt});
+                if (end == std::string::npos && ctx) {   // the comment goes on below
+                    ctx->carry = bc.second;
+                    ctx->carry_string = false;
+                }
                 pos = p;
                 handled = true;
                 break;
@@ -1167,6 +1184,20 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
         char quote = 0;
         for (size_t i = 0; i < nq; ++i)
             if (row[pos] == qv[i]) { quote = qv[i]; break; }
+        if (quote && pos + 2 < row.size() && row[pos + 1] == quote && row[pos + 2] == quote) {
+            // A tripled quote is a string that may run over rows: python's docstrings, and the
+            // same spelling anywhere else a language allows it.
+            const std::string close(3, quote);
+            const size_t end = row.find(close, pos + 3);
+            const size_t p = end == std::string::npos ? row.size() : end + 3;
+            push(pos, p, Style{code_color(th, g, CodeTok::String, th.code_str)});
+            if (end == std::string::npos && ctx) {
+                ctx->carry = close;
+                ctx->carry_string = true;
+            }
+            pos = p;
+            continue;
+        }
         if (quote) {
             size_t p = pos + 1;
             while (p < row.size()) {
@@ -1370,6 +1401,7 @@ std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx
         while (z < row.size() && row[z] != ' ' && row[z] != '\t' && row[z] != '`' && row[z] != ':')
             ++z;
         const std::string tag = row.substr(t, z - t);
+        ctx.carry.clear();   // a fence row ends whatever block the last one left open
         if (tag.empty()) {
             ctx.fence = false;
             ctx.lang = nullptr;
@@ -1390,12 +1422,12 @@ std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx
             const DiffKind k = diff_kind(row);
             if (k == DiffKind::Add) {
                 push(0, 1, Style{th.diff_add, th.diff_add_bg, kBold});
-                highlight_code(row, 1, th, out, g);
+                highlight_code(row, 1, th, out, g, &ctx);
                 return out;
             }
             if (k == DiffKind::Del) {
                 push(0, 1, Style{th.diff_del, th.diff_del_bg, kBold});
-                highlight_code(row, 1, th, out, g);
+                highlight_code(row, 1, th, out, g, &ctx);
                 return out;
             }
             if (k == DiffKind::Hunk || k == DiffKind::File || k == DiffKind::Patch) {
@@ -1403,7 +1435,7 @@ std::vector<Span> highlight_row(const std::string& row, const Theme& th, CodeCtx
                 return out;
             }
         }
-        highlight_code(row, 0, th, out, g);
+        highlight_code(row, 0, th, out, g, &ctx);
         return out;
     }
     // Outside a fence, patch colouring is scoped to evidence, never to the body. A hunk header
@@ -1760,6 +1792,152 @@ const Canvas& Scene::block(size_t i, int w) {
     return c.block;
 }
 
+namespace {
+
+// ---- what language a tool's result is written in ----
+//
+// A fence names its language; a tool result does not, so the call has to say it. It does when it
+// read a file: the extension of read_file's path, or of the file a shell reader (cat, sed, head...)
+// was pointed at. A grep's rows carry their own file each. An MCP answer that is JSON is JSON.
+// Anything else -- a program's output, a build log -- stays the body's colour: colouring
+// `python3 run.py`'s output as Python would be the guess highlight.yaml exists to refuse.
+
+// The extension of a path-like word, lowercased: "tools/run.py" -> "py", "Makefile" -> "".
+std::string ext_of(std::string t) {
+    while (!t.empty() && std::strchr("\"'`;,)(|&<>", t.back())) t.pop_back();
+    while (!t.empty() && std::strchr("\"'`(<>", t.front())) t.erase(0, 1);
+    if (const size_t colon = t.find(':'); colon != std::string::npos) t = t.substr(colon + 1);   // git show rev:path
+    const size_t slash = t.find_last_of('/');
+    const std::string base = slash == std::string::npos ? t : t.substr(slash + 1);
+    const size_t dot = base.find_last_of('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= base.size() || base.size() - dot - 1 > 8) return {};
+    std::string e = base.substr(dot + 1);
+    for (char& ch : e) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) return {};
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return e;
+}
+
+// The words of a command line, quotes taken off and the shell's separators as words of their own
+// ("|", ";", "&"): enough to find each program and its file operands, not a shell.
+std::vector<std::string> shell_words(const std::string& cmd) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool have = false;
+    char q = 0;
+    auto flush = [&] {
+        if (have) out.push_back(cur);
+        cur.clear();
+        have = false;
+    };
+    for (char ch : cmd) {
+        if (q) {
+            if (ch == q) q = 0;
+            else cur += ch;
+            continue;
+        }
+        if (ch == '\'' || ch == '"') { q = ch; have = true; continue; }
+        if (ch == ' ' || ch == '\t' || ch == '\n') { flush(); continue; }
+        if (ch == '|' || ch == ';' || ch == '&') {
+            flush();
+            if (out.empty() || out.back() != std::string(1, ch)) out.push_back(std::string(1, ch));
+            continue;
+        }
+        cur += ch;
+        have = true;
+    }
+    flush();
+    return out;
+}
+
+struct ResultCode {
+    const Grammar* lang = nullptr;   // the language the rows are in; for grep rows, the fallback
+    bool grep = false;               // rows are path:line:code, each in its own file's language
+};
+
+ResultCode result_code(const std::string& tool, const std::string& args, const std::string& body, const GrammarSet& set) {
+    ResultCode rc;
+    core::Json a;
+    try { a = core::json_parse(args); } catch (...) {}
+    auto arg = [&](const char* k) {
+        const core::Json* v = a.type == core::Json::Obj ? core::json_get(a, k) : nullptr;
+        return v && v->type == core::Json::Str ? v->str : std::string();
+    };
+    if (tool == "read_file" || tool == "write_file" || tool == "edit_file") {
+        if (const std::string e = ext_of(arg("path")); !e.empty()) rc.lang = set.find(e);
+        return rc;
+    }
+    if (tool == "run_terminal") {
+        static const char* const readers[] = {"cat", "sed", "head", "tail", "nl", "bat", "batcat", "less", "more", "tac"};
+        static const char* const greps[] = {"grep", "egrep", "fgrep", "rg", "ag", "ack"};
+        auto in = [](const auto& list, const std::string& w) {
+            return std::any_of(std::begin(list), std::end(list), [&](const char* x) { return w == x; });
+        };
+        bool at_cmd = true;
+        std::string prog;
+        for (const auto& w : shell_words(arg("cmd"))) {
+            if (w == "|" || w == ";" || w == "&") { at_cmd = true; prog.clear(); continue; }
+            if (at_cmd) {
+                if (w.find('=') != std::string::npos && w[0] != '-') continue;   // VAR=value before a program
+                if (w == "sudo" || w == "env" || w == "time" || w == "command" || w == "nice") continue;
+                const size_t sl = w.find_last_of('/');
+                prog = sl == std::string::npos ? w : w.substr(sl + 1);
+                at_cmd = false;
+                if (in(greps, prog)) rc.grep = true;
+                continue;
+            }
+            if (prog == "git" && (w == "grep" || w == "show")) {   // git grep rows; git show rev:path
+                prog = w == "grep" ? "grep" : "cat";
+                if (w == "grep") rc.grep = true;
+                continue;
+            }
+            if (w.empty() || w[0] == '-' || !(in(readers, prog) || in(greps, prog))) continue;
+            if (const std::string e = ext_of(w); !e.empty())
+                if (const Grammar* g = set.find(e)) rc.lang = g;   // a grep on one file prints no path: its rows are this
+        }
+        return rc;
+    }
+    const size_t i = body.find_first_not_of(" \t\r\n");
+    if (i != std::string::npos && (body[i] == '{' || body[i] == '[')) rc.lang = set.find("json");
+    return rc;
+}
+
+// A grep row: "path:12:code", "path:12-code" (context), "path:code" (no -n), "12:code" (one file).
+struct GrepRow {
+    size_t path_end = 0, num_b = 0, num_e = 0, code = 0;
+    bool ok = false;
+};
+
+GrepRow grep_row(const std::string& r) {
+    GrepRow g;
+    const size_t colon = r.find(':');
+    if (colon == std::string::npos || colon == 0) return g;
+    const bool digits = std::all_of(r.begin(), r.begin() + static_cast<long>(colon),
+                                    [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)) != 0; });
+    if (digits) {
+        g.num_b = 0, g.num_e = colon, g.code = colon + 1, g.ok = true;
+        return g;
+    }
+    if (r.find(' ') < colon || r.find('\t') < colon) return g;   // a colon inside prose, not after a path
+    g.path_end = colon;
+    size_t k = colon + 1;
+    while (k < r.size() && std::isdigit(static_cast<unsigned char>(r[k]))) ++k;
+    if (k > colon + 1 && k < r.size() && (r[k] == ':' || r[k] == '-')) g.num_b = colon + 1, g.num_e = k, g.code = k + 1;
+    else g.code = colon + 1;
+    g.ok = true;
+    return g;
+}
+
+// "exit 0 · " in front of a shell's first row: the harness's words, not the output's.
+size_t exit_prefix(const std::string& r) {
+    if (r.rfind("exit ", 0) != 0) return 0;
+    const size_t dot = r.find(" · ");
+    return dot == std::string::npos || dot > 16 ? 0 : dot + std::strlen(" · ");
+}
+
+}  // namespace
+
 Canvas Scene::render(const Entry& e, int w) const {
     switch (e.kind) {
     case Kind::User: {
@@ -1884,9 +2062,43 @@ Canvas Scene::render(const Entry& e, int w) const {
             res_ctx.diff_body = looks_like_diff(f.body);
             const bool res_code = res_ctx.diff_body || f.body.find("```") != std::string::npos;
             const Style base{err ? th_.error : th_.text};
+            // A result the call says is code (a file it read, a grep's rows, JSON) colours like a
+            // fence of that language. A failed call keeps the error colour: that is its message.
+            const ResultCode rc = res_code || err ? ResultCode{} : result_code(e.name, e.text, f.body, grammars_);
+            CodeCtx lang_ctx;
+            lang_ctx.fence = true;
+            lang_ctx.set = &grammars_;
+            lang_ctx.lang = rc.lang;
+            const Style mut{th_.muted}, sep{th_.dim};
             for (size_t k = 0; k < rlines.size(); ++k) {
-                if (res_code) paint_row(c, 4, ry + static_cast<int>(k), rlines[k], th_, res_ctx, base, w - 8);
-                else c.text(4, ry + static_cast<int>(k), rlines[k], base);
+                const int y = ry + static_cast<int>(k);
+                if (res_code) { paint_row(c, 4, y, rlines[k], th_, res_ctx, base, w - 8); continue; }
+                if (!rc.lang && !rc.grep) { c.text(4, y, rlines[k], base); continue; }
+                std::string row = rlines[k];
+                int x = 4;
+                if (k == 0) {
+                    if (const size_t p = exit_prefix(row)) {
+                        x += c.text(x, y, row.substr(0, p), mut);
+                        row = row.substr(p);
+                    }
+                }
+                if (rc.grep) {
+                    if (const GrepRow g = grep_row(row); g.ok) {
+                        if (g.path_end) {
+                            x += c.text(x, y, row.substr(0, g.path_end), Style{th_.accent});
+                            x += c.text(x, y, ":", sep);
+                            const Grammar* own = grammars_.find(ext_of(row.substr(0, g.path_end)));
+                            lang_ctx.lang = own ? own : rc.lang;
+                        }
+                        if (g.num_e > g.num_b) {
+                            x += c.text(x, y, row.substr(g.num_b, g.num_e - g.num_b), Style{th_.code_num});
+                            x += c.text(x, y, row.substr(g.num_e, 1), sep);
+                        }
+                        row = row.substr(g.code);
+                    }   // a wrapped tail or a summary row keeps the language of the row before it
+                    if (!lang_ctx.lang) { c.text(x, y, row, base, std::max(0, w - 4 - x)); continue; }
+                }
+                paint_row(c, x, y, row, th_, lang_ctx, base, std::max(0, w - 4 - x));
             }
             ry += static_cast<int>(rlines.size());
             if (!acct_rows.empty()) {
