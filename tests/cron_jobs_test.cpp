@@ -44,7 +44,7 @@ int main() {
     std::string home = "/tmp/dd_cron_jobs_test";
     std::error_code ec;
     std::filesystem::remove_all(home, ec);
-    set_daedalus_home_override(home);
+    set_ariadne_home_override(home);
 
     // 1) create_job: skill normalization + defaults.
     CreateJobParams p;

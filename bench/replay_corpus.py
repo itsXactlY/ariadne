@@ -13,9 +13,9 @@ Two things are harvested, and neither is asserted:
    curve that matters most. Only ids present in the live catalogue count, so a stale skill name
    never becomes a phantom "right" answer.
 
-    ./build/ddcli skills --home examples/daedalus > build/catalogue.txt
+    ./build/ariadne-skills skills --home examples/ariadne > build/catalogue.txt
     python3 bench/replay_corpus.py build/catalogue.txt build/corpus.jsonl
-    ./build/ddcli replay build/corpus.jsonl --home examples/daedalus --k 3
+    ./build/ariadne-skills replay build/corpus.jsonl --home examples/ariadne --k 3
 
 Read the numbers as a floor, not as truth: the labels are what the model did, not what it
 should have done, so a top hit that names an adjacent skill is counted wrong when the operator

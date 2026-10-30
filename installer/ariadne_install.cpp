@@ -10,7 +10,7 @@
 // is a line the installer would only paraphrase. Refusing two bad homes stays, because
 // that is an invariant `make` does not check, not a report.
 //
-//   build/ariadne-install                            # into $HOME/projects/daedalus
+//   build/ariadne-install                            # into $HOME/ariadne
 //   build/ariadne-install --home DIR                 # into DIR — DIR owns config.yaml
 //   build/ariadne-install --home DIR --agent --cli   # also ariadne-agent, also ariadne-skills
 //
@@ -80,7 +80,7 @@ bool parse(int argc, char** argv, Opts& o, std::string& err) {
     if (home.empty()) {
         const char* h = std::getenv("HOME");
         if (!h || *h == '\0') { err = "--home DIR, or HOME set"; return false; }
-        home = std::string(h) + "/projects/daedalus";
+        home = std::string(h) + "/ariadne";
     }
     o.home = fs::path(home);
     o.root = root.empty() ? fs::current_path() : fs::path(root);

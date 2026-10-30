@@ -4,7 +4,7 @@ BUILD ?= build
 all: $(BUILD)/ariadne
 # The install is the folder the operator runs ariadne from, the one that owns
 # config.yaml; build/ is make's output and never a home (ariadne refuses it).
-INSTALL_DIR ?= $(HOME)/projects/daedalus
+INSTALL_DIR ?= $(HOME)/ariadne
 
 # Single-invocation, whole-target builds: intentionally no per-TU object files.
 CXX ?= g++

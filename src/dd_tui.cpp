@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
     std::string why;
     const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag, &why);
     if (home.root.empty()) { std::cerr << why << "\n"; return 2; }
-    ddcore::set_daedalus_home_override(home.root.string());   // the ported modules agree on it
+    ddcore::set_ariadne_home_override(home.root.string());   // the ported modules agree on it
     const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
 
     // Config first: an install with no config.yaml runs on defaults with a warning,
@@ -992,7 +992,7 @@ int main(int argc, char** argv) {
     {
         // Defaults ship as data beside the binary, never as a table compiled into it. The operator's
         // tree is scanned after them and `highlight.paths` after that, because the last file to
-        // name a language wins: a highlight.yaml under ~/.daedalus/skills corrects a shipped
+        // name a language wins: a highlight.yaml under the home's skills/ corrects a shipped
         // language instead of colliding with it.
         std::error_code ec;
         const std::filesystem::path exe = std::filesystem::canonical("/proc/self/exe", ec);

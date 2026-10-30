@@ -22,7 +22,7 @@ static std::string strip_lower(const std::string& s) {
 }
 
 bool managed_nous_tools_enabled() {
-    return core::env_var_enabled("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS");
+    return core::env_var_enabled("DD_ENABLE_NOUS_MANAGED_TOOLS");
 }
 
 std::string normalize_browser_cloud_provider(const std::string& value) {

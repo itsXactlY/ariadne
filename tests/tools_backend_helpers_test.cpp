@@ -31,13 +31,13 @@ static std::string get_str(const core::Json& o, const std::string& key) {
 
 int main() {
     // ---- managed_nous_tools_enabled ----
-    setenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS", "true", 1);
+    setenv("DD_ENABLE_NOUS_MANAGED_TOOLS", "true", 1);
     CHECK(managed_nous_tools_enabled());
-    setenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS", "1", 1);
+    setenv("DD_ENABLE_NOUS_MANAGED_TOOLS", "1", 1);
     CHECK(managed_nous_tools_enabled());
-    setenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS", "no", 1);
+    setenv("DD_ENABLE_NOUS_MANAGED_TOOLS", "no", 1);
     CHECK(!managed_nous_tools_enabled());
-    unsetenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS");
+    unsetenv("DD_ENABLE_NOUS_MANAGED_TOOLS");
     CHECK(!managed_nous_tools_enabled());
 
     // ---- normalize_browser_cloud_provider ----
@@ -82,14 +82,14 @@ int main() {
         CHECK(!get_bool(r, "managed_mode_blocked"));
     }
     // auto + nous + managed_ready -> managed
-    setenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS", "true", 1);
+    setenv("DD_ENABLE_NOUS_MANAGED_TOOLS", "true", 1);
     {
         core::Json r = resolve_modal_backend_state("auto", true, true);
         bool nul; std::string sel = get_selected(r, nul);
         CHECK(!nul && sel == "managed");
     }
     // managed + nous off -> blocked, selected null
-    unsetenv("DAEDALUS_ENABLE_NOUS_MANAGED_TOOLS");
+    unsetenv("DD_ENABLE_NOUS_MANAGED_TOOLS");
     {
         core::Json r = resolve_modal_backend_state("managed", true, true);
         bool nul; std::string sel = get_selected(r, nul);

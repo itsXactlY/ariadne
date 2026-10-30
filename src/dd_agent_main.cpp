@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
     std::string why;
     const ddcore::Home home = ddcore::resolve_home(home_flag, config_flag, &why);
     if (home.root.empty()) { std::cerr << why << "\n"; return 2; }
-    ddcore::set_daedalus_home_override(home.root.string());
+    ddcore::set_ariadne_home_override(home.root.string());
     const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
 
     ddcore::Config cfg{ddcore::Json{}};

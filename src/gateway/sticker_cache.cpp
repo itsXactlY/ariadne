@@ -14,7 +14,7 @@ namespace gateway {
 using namespace core;
 
 std::filesystem::path cache_path() {
-    return core::get_daedalus_home() / "sticker_cache.json";
+    return core::get_ariadne_home() / "sticker_cache.json";
 }
 
 static double now_seconds() {

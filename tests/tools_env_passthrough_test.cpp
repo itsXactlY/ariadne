@@ -26,7 +26,7 @@ int main() {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
-    setenv("DAEDALUS_HOME", dir.c_str(), 1);
+    setenv("DD_HOME", dir.c_str(), 1);
 
     // config-based passthrough
     write_config(dir,

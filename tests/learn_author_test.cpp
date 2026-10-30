@@ -120,9 +120,9 @@ static void test_detectors() {
 
     learn::LongSuccess lng;
     learn::EpisodeRecorder lr;
-    for (uint32_t r = 1; r <= 9; ++r) lr.feed(call_ev(1, r, "edit_file", "edit " + std::to_string(r), false, "", {}, {"/home/someone/projects/daedalus-cpp/src/a.cpp"}));
+    for (uint32_t r = 1; r <= 9; ++r) lr.feed(call_ev(1, r, "edit_file", "edit " + std::to_string(r), false, "", {}, {"/home/someone/projects/ariadne/src/a.cpp"}));
     const auto l = lng.detect(lr.window());
-    chk(l && l->kind == "long" && l->signature == "daedalus-cpp", "long: nine rounds on one project");
+    chk(l && l->kind == "long" && l->signature == "ariadne", "long: nine rounds on one project");
     learn::EpisodeRecorder ls;
     for (uint32_t r = 1; r <= 7; ++r) ls.feed(call_ev(1, r, "edit_file", "e", false, "", {}, {"/home/someone/projects/p/a.cpp"}));
     chk(!lng.detect(ls.window()), "long: seven rounds are too few");
@@ -189,7 +189,7 @@ static void test_reviewer() {
     learn::Reviewer::SearchFn none = [](const know::Query&) { return std::vector<know::Hit>{}; };
     learn::Reviewer::Options o;
     o.home_dir = "/home/someone";
-    o.project_dir = "/home/someone/projects/daedalus-cpp";
+    o.project_dir = "/home/someone/projects/ariadne";
     learn::Reviewer rv(none, o);
     const auto good = make_draft();
     chk(rv.review(good).ok, "reviewer: a template draft passes");
@@ -228,7 +228,7 @@ static void test_reviewer() {
     chk(learn::Reviewer::find_command("run `make test`").empty(), "reviewer: find_command is quiet on plain text");
     chk(!with("see /home/bob/secrets/notes.txt").ok, "reviewer: another user's path held");
     chk(!with("see /home/someone/Documents/taxes.txt").ok, "reviewer: private path under $HOME held");
-    chk(with("see /home/someone/projects/daedalus-cpp/src/a.cpp").ok, "reviewer: the project path is fine");
+    chk(with("see /home/someone/projects/ariadne/src/a.cpp").ok, "reviewer: the project path is fine");
 
     auto big = good;
     big.body = std::string(7000, 'a');

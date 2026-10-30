@@ -22,9 +22,9 @@ static std::string env_str(const char* key) {
     return trim(v ? std::string(v) : std::string());
 }
 
-void set_daedalus_home_override(const std::string& path) { g_override = path; }
+void set_ariadne_home_override(const std::string& path) { g_override = path; }
 
-std::optional<std::string> get_daedalus_home_override() {
+std::optional<std::string> get_ariadne_home_override() {
     if (g_override.empty()) return std::nullopt;
     return g_override;
 }
@@ -75,9 +75,9 @@ static bool is_python_home(const std::filesystem::path& p) {
            std::filesystem::weakly_canonical(platform_default_daedalus_home(), b);
 }
 
-std::filesystem::path daedalus_home_from_env() {
-    for (const char* key : {"DD_HOME", "DAEDALUS_HOME"})
-        if (const std::string v = env_str(key); !v.empty()) return std::filesystem::path(v);
+std::filesystem::path ariadne_home_from_env() {
+    // DAEDALUS_HOME is the Python Daedalus's variable: set for it, it would steer this home too.
+    if (const std::string v = env_str("DD_HOME"); !v.empty()) return std::filesystem::path(v);
 
     const auto exe = exe_dir();
     std::error_code ec;
@@ -97,10 +97,10 @@ std::filesystem::path daedalus_home_from_env() {
 
 bool is_python_daedalus_home(const std::filesystem::path& p) { return is_python_home(p); }
 
-std::filesystem::path get_daedalus_home() {
-    std::optional<std::string> ov = get_daedalus_home_override();
+std::filesystem::path get_ariadne_home() {
+    std::optional<std::string> ov = get_ariadne_home_override();
     if (ov.has_value() && !trim(*ov).empty()) return std::filesystem::path(trim(*ov));
-    return daedalus_home_from_env();
+    return ariadne_home_from_env();
 }
 
 Home resolve_home(const std::string& home_flag, const std::string& config_flag, std::string* why) {
@@ -108,7 +108,7 @@ Home resolve_home(const std::string& home_flag, const std::string& config_flag, 
     const std::string hf = trim(home_flag), cf = trim(config_flag);
     std::string asked = "--home";
     if (hf.empty() && !cf.empty()) asked = "--config";
-    if (hf.empty() && cf.empty()) asked = "DD_HOME / DAEDALUS_HOME";
+    if (hf.empty() && cf.empty()) asked = "DD_HOME";
 
     Home h;
     if (!hf.empty()) {
@@ -117,7 +117,7 @@ Home resolve_home(const std::string& home_flag, const std::string& config_flag, 
         h.root = fs::path(cf).parent_path();
         if (h.root.empty()) h.root = ".";
     } else {
-        h.root = daedalus_home_from_env();
+        h.root = ariadne_home_from_env();
     }
     std::error_code ec;
     const fs::path abs = fs::absolute(h.root, ec);
@@ -127,10 +127,11 @@ Home resolve_home(const std::string& home_flag, const std::string& config_flag, 
     // empty root says "no home", and *why says what to do instead.
     if (is_python_home(h.root)) {
         if (why)
-            *why = "dd will not run from " + h.root.string() + ": that is the Python install's home, and "
-                   "sharing it lets the two fight over config.yaml, state/, skills and skins. dd keeps its "
-                   "own folder — pass --home somewhere else, or DD_HOME=somewhere else. What you want from "
-                   "the other install: dd import-daedalus --skills --skins --config --from " +
+            *why = "ariadne will not run from " + h.root.string() + ": that is the Python install's home, "
+                   "and sharing it lets the two fight over config.yaml, state/, skills and skins. ariadne "
+                   "keeps its own folder — pass --home somewhere else, or DD_HOME=somewhere else. What you "
+                   "want from the other install: ariadne-skills import-daedalus --skills --skins "
+                   "--with-config --from " +
                    h.root.string() + ", which copies once. (asked by " + asked + ")";
         return Home{};
     }
@@ -138,14 +139,14 @@ Home resolve_home(const std::string& home_flag, const std::string& config_flag, 
     // output, and dd will not turn it into an install. The install owns a config.
     if (hf.empty() && cf.empty() && is_build_output(h.root) && !has_own_config(h.root)) {
         if (why)
-            *why = "dd found only " + h.root.string() + ", which is make's output folder, not an install: "
-                   "dd will not create a home there. Copy the built binary to the folder that owns the "
+            *why = "ariadne found only " + h.root.string() + ", which is make's output folder, not an "
+                   "install: ariadne will not create a home there. Copy the built binary to the folder that owns the "
                    "config.yaml (the install) and run it from there, or name that folder with --home DIR.";
         return Home{};
     }
     // No binary folder and no launch folder: nothing is a home, and dd says so
     // rather than inventing one under $HOME.
-    if (h.root.empty() && why) *why = "dd found no folder to work from: pass --home DIR or DD_HOME=DIR";
+    if (h.root.empty() && why) *why = "ariadne found no folder to work from: pass --home DIR or DD_HOME=DIR";
     return h;
 }
 

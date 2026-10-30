@@ -69,10 +69,10 @@ static bool legacy_path_has_content(const std::filesystem::path& path) {
     return true;
 }
 
-// get_daedalus_dir(new_subpath, old_name): legacy if it has content, else new.
-static std::filesystem::path get_daedalus_dir(const std::string& new_subpath,
-                                              const std::string& old_name) {
-    std::filesystem::path home = core::get_daedalus_home();
+// get_daedalus_dir (daedalus_constants.py): legacy if it has content, else new.
+static std::filesystem::path get_ariadne_dir(const std::string& new_subpath,
+                                             const std::string& old_name) {
+    std::filesystem::path home = core::get_ariadne_home();
     std::filesystem::path old_path = home / old_name;
     if (legacy_path_has_content(old_path)) return old_path;
     return home / new_subpath;
@@ -131,7 +131,7 @@ PairingStore::PairingStore() {
 }
 
 std::filesystem::path PairingStore::pairing_dir() const {
-    return get_daedalus_dir("platforms/pairing", "pairing");
+    return get_ariadne_dir("platforms/pairing", "pairing");
 }
 
 std::filesystem::path PairingStore::pending_path(const std::string& platform) const {

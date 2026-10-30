@@ -59,7 +59,7 @@ const std::map<std::string, int>& get_tool_output_limits() {
     const core::Json* mb = nullptr, *ml = nullptr, *mll = nullptr;
     try {
         core::Config c = core::load_config(
-            (core::get_daedalus_home() / "config.yaml").string());
+            (core::get_ariadne_home() / "config.yaml").string());
         mb = c.get("tool_output.max_bytes");
         ml = c.get("tool_output.max_lines");
         mll = c.get("tool_output.max_line_length");

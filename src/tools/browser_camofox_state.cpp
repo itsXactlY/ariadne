@@ -16,7 +16,7 @@ static const std::string CAMOFOX_STATE_DIR_NAME = "browser_auth";
 static const std::string CAMOFOX_STATE_SUBDIR = "camofox";
 
 std::filesystem::path get_camofox_state_dir() {
-    return get_daedalus_home() / CAMOFOX_STATE_DIR_NAME / CAMOFOX_STATE_SUBDIR;
+    return get_ariadne_home() / CAMOFOX_STATE_DIR_NAME / CAMOFOX_STATE_SUBDIR;
 }
 
 std::map<std::string, std::string> get_camofox_identity(const std::string* task_id) {
@@ -28,6 +28,8 @@ std::map<std::string, std::string> get_camofox_identity(const std::string* task_
         uuid5_url_hex("camofox-session:" + scope_root + ":" + logical_scope).substr(0, 16);
 
     std::map<std::string, std::string> out;
+    // The prefix is the identity Camofox already holds for this profile, like a dd- session id:
+    // spelt "ariadne_" it would be a new user with none of the old one's state.
     out["user_id"] = "daedalus_" + user_digest;
     out["session_key"] = "task_" + session_digest;
     return out;

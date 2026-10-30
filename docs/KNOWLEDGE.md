@@ -6,7 +6,7 @@ what was measured and where it deviates from this plan; 15.1 is the concurrency,
 
 ## 1. Verdict
 
-daedalus-cpp has retrieval parts and no retrieval policy. It looks something up at two moments
+Ariadne has retrieval parts and no retrieval policy. It looks something up at two moments
 (a turn starts; the window is rebuilt), matches skills against the raw user message, and tells the
 model the retrieval is "already done". While the model works (tool call after tool call, where
 guessing happens) nothing looks anything up.
@@ -62,7 +62,7 @@ operator prompts, so it stays out of git.
 
 ## 3. What omp does, and what we take
 
-| omp 18.12.1 | Source | daedalus-cpp |
+| omp 18.12.1 | Source | Ariadne |
 |---|---|---|
 | Skills as `name: description` in the system prompt; "Matching skill -> MUST read `skill://<name>` first" | `py:prompts/system/system-prompt.md` (Skills & Rules), `py:docs/skills.md` | 498 names would cost ~12.5k tokens, 23% of the window. Ship a **catalogue map** (46 groups, <= 250 tokens) plus top-k **cards per decision point**; keep the imperative. |
 | `skill://`, `rule://`, `memory://`, `history://` all resolved by the one `read` verb | `py:docs/skills.md`, `py:docs/rulebook-matching-pipeline.md` s.8 | `Uri` + `Resolver`; `read_file("skill://x#sec")` works; `skill_load` stays as an alias for a weak model. |
@@ -483,8 +483,8 @@ goes.
 ```
 
 `Home::resolve`: `--home DIR` > `$DD_HOME` > the directory of `/proc/self/exe` (symlinks resolved).
-**Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too, `DAEDALUS_HOME` stays
-as an override for the ported Python modules. The five hard-coded sites go.
+**Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too. `DAEDALUS_HOME` is the Python
+Daedalus's variable and is not read: `DD_HOME` is the one environment override. The five hard-coded sites go.
 
 - `ariadne --init` writes `config.yaml` from `examples/ariadne/config.yaml` and creates the dirs
   (`--from FILE` copies an existing config once).

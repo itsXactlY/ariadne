@@ -12,8 +12,8 @@
 # pays for is the tape of this task. DD_MAX_TURNS bounds the loop so both arms stop on the same rule.
 set -uo pipefail
 
-BIN="$HOME/projects/daedalus/dd_tui"
-HOME_DIR="$HOME/projects/daedalus"
+BIN="$HOME/ariadne/ariadne"
+HOME_DIR="$HOME/ariadne"
 OUT="${AB_OUT:-/tmp/dd-ab-edit}"
 TARGET="$OUT/probe.py"
 

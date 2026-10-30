@@ -1,4 +1,4 @@
-# PARITY — daedalus-cpp against an omp-style harness
+# PARITY — Ariadne against an omp-style harness
 
 One ledger for three questions: what the harness does today, what it does not
 do, and what is planned next. Every claim below was measured against the tree

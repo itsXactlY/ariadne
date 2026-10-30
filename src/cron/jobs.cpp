@@ -30,7 +30,7 @@ static std::filesystem::path g_jobs_file;
 static std::filesystem::path g_output_dir;
 
 static void refresh_paths() {
-    std::filesystem::path home = core::get_daedalus_home();
+    std::filesystem::path home = core::get_ariadne_home();
     g_cron_dir = home / "cron";
     g_jobs_file = g_cron_dir / "jobs.json";
     g_output_dir = g_cron_dir / "output";

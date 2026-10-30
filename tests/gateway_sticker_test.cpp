@@ -22,7 +22,7 @@ static int failures = 0;
 
 int main() {
     // Isolate the cache under a temp home so we never touch the real one.
-    set_daedalus_home_override("/tmp/dd_sticker_test");
+    set_ariadne_home_override("/tmp/dd_sticker_test");
     std::error_code ec;
     std::filesystem::remove_all("/tmp/dd_sticker_test", ec);
 

@@ -28,7 +28,7 @@ static const std::set<std::string>& _load_config_passthrough() {
     std::set<std::string> result;
     try {
         core::Config c = core::load_config(
-            (core::get_daedalus_home() / "config.yaml").string());
+            (core::get_ariadne_home() / "config.yaml").string());
         const core::Json* pt = c.get("terminal.env_passthrough");
         if (pt && pt->type == core::Json::Arr) {
             for (const auto& esp : pt->arr) {

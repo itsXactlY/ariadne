@@ -1,5 +1,5 @@
 #pragma once
-// dd/core/config.hpp — general YAML loader for ~/.daedalus/config.yaml.
+// dd/core/config.hpp — general YAML loader for <home>/config.yaml.
 //
 // Parses the block-style YAML subset the config uses (nested maps, block
 // lists at the key's indent OR deeper, inline [] / {}, single/double-quoted

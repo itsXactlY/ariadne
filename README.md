@@ -1,8 +1,8 @@
-# DAEDALUS / ARIADNE
+# ARIADNE
 ### A C++20 agent harness built to outgrow its own assumptions.
 
 <p align="center">
-  <img src="Daedalus-CPP.png" alt="Daedalus C++" width="88%">
+  <img src="ariadne.png" alt="Ariadne" width="88%">
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@ Most agent stacks treat the transcript as the mind, the prompt as the architectu
 
 The model is replaceable. The endpoint is replaceable. The terminal is replaceable. The state is not allowed to become accidental.
 
-This repository is a native C++20 port of the Daedalus agent: a real agent loop, real tools, real filesystem effects, a live OpenAI-compatible inference endpoint, a context tape designed for prefix reuse, and a TUI that renders changes rather than repainting the world.
+This repository is Ariadne, a native C++20 port of the Python Daedalus agent: a real agent loop, real tools, real filesystem effects, a live OpenAI-compatible inference endpoint, a context tape designed for prefix reuse, and a TUI that renders changes rather than repainting the world.
 
 The guiding constraint is simple:
 
@@ -445,4 +445,4 @@ The objective is not to make the README sound futuristic. It is to build systems
 
 ---
 
-<sub>Daedalus / Ariadne · Native C++20 agent harness · Experimental systems engineering at the edge of what one person can reasonably hold in their head.</sub>
+<sub>Ariadne · Native C++20 agent harness · Experimental systems engineering at the edge of what one person can reasonably hold in their head.</sub>

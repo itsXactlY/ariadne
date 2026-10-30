@@ -53,7 +53,7 @@ int main() {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir);
-    setenv("DAEDALUS_HOME", dir.c_str(), 1);
+    setenv("DD_HOME", dir.c_str(), 1);
 
     write_config(dir,
         "tool_output:\n"

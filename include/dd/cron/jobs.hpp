@@ -1,7 +1,7 @@
 #pragma once
 // dd::cron::jobs — cron job storage/CRUD (port of cron/jobs.py).
 //
-// Jobs live in <daedalus_home>/cron/jobs.json; output in cron/output/{id}/{ts}.md.
+// Jobs live in <home>/cron/jobs.json; output in cron/output/{id}/{ts}.md.
 // Each job is a core::Json object. Atomic writes (tempfile + fsync + rename),
 // owner-only perms (0700 dirs / 0600 files), and an in-process lock serialize
 // the load->modify->save critical section, matching the Python module.

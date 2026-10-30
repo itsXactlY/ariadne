@@ -1,5 +1,5 @@
 # The language rules this screen colours code with. Nothing here is compiled into the harness: a
-# file dropped anywhere under a skill root (~/.daedalus/skills/, or this repo's skills/) adds a
+# file dropped anywhere under a skill root (<home>/skills/, or this repo's skills/) adds a
 # language, corrects one, or retints one, and the C++ carries no table of languages at all. Which
 # word is a keyword is a fact about a language, so it lives in a file a language's owner can edit —
 # the same refusal that makes a prose '-' a bullet instead of a deletion.

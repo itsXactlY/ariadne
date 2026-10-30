@@ -55,7 +55,7 @@ int main() {
     const char* t = std::getenv("DD_TEST_TMP");
     const std::filesystem::path dir =
         std::filesystem::absolute(std::filesystem::path(t && *t ? t : "build") / ("dd_pairing_test-" + std::to_string(::getpid())));
-    set_daedalus_home_override(dir.string());
+    set_ariadne_home_override(dir.string());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);

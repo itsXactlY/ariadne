@@ -74,7 +74,7 @@ DebugSession::DebugSession(const std::string& tool_name, const std::string& env_
     const char* raw = std::getenv(env_var.c_str());
     std::string val = raw ? to_lower(raw) : "false";
     enabled_ = (val == "true");
-    log_dir_ = core::get_daedalus_home() / "logs";
+    log_dir_ = core::get_ariadne_home() / "logs";
     if (enabled_) {
         session_id_ = uuid4();
         start_time_ = iso_now();

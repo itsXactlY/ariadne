@@ -4,7 +4,7 @@
 // started, the install itself is where the binary sits:
 //   1. --home
 //   2. the folder of --config
-//   3. DD_HOME / DAEDALUS_HOME
+//   3. DD_HOME
 //   4. the binary's own folder, when it already holds a config.yaml (installed)
 //   5. the folder dd was started from, when it holds a config.yaml (the project)
 //   6. the binary's own folder, when it already holds state/ cache/ logs/ learn/
@@ -30,13 +30,13 @@
 namespace dd {
 namespace core {
 
-// Set/clear the active context-local Daedalus home override. A ported module
+// Set/clear the active context-local home override. A ported module
 // that wants a folder handed to it calls this once, at startup.
-void set_daedalus_home_override(const std::string& path);
-std::optional<std::string> get_daedalus_home_override();
+void set_ariadne_home_override(const std::string& path);
+std::optional<std::string> get_ariadne_home_override();
 
-// $HOME/.daedalus — what the Python install uses. Kept only so `dd import-
-// daedalus --from` can copy its skills and skins into a dd home, once.
+// $HOME/.daedalus — what the Python install uses. Kept only so `ariadne-skills
+// import-daedalus --from` can copy its skills and skins into this home, once.
 std::filesystem::path platform_default_daedalus_home();
 
 // True when p is that folder, whatever $HOME is: dd never lives there.
@@ -45,13 +45,13 @@ bool is_python_daedalus_home(const std::filesystem::path&);
 // Directory of the running executable, symlinks resolved; empty if unknown.
 std::filesystem::path exe_dir();
 
-// DD_HOME, else DAEDALUS_HOME, else the folder that owns the config.yaml (the
+// DD_HOME, else the folder that owns the config.yaml (the
 // binary's first, then the launch folder), else a folder already in use, else
 // the folder dd was started from. $HOME is never consulted.
-std::filesystem::path daedalus_home_from_env();
+std::filesystem::path ariadne_home_from_env();
 
 // The home for this run: the override first, else the order above.
-std::filesystem::path get_daedalus_home();
+std::filesystem::path get_ariadne_home();
 
 struct Home {
     std::filesystem::path root;  // the install: the folder holding config.yaml
@@ -66,7 +66,7 @@ struct Home {
 };
 
 // The home for this run. Absolute, lexically normal. When the result names the
-// Python install's home — asked for by --home, or found in DD_HOME / DAEDALUS_HOME —
+// Python install's home — asked for by --home, or found in DD_HOME —
 // the root is empty and *why (when non-null) says what to do instead: callers
 // must check home.root before using it.
 Home resolve_home(const std::string& home_flag = "", const std::string& config_flag = "",

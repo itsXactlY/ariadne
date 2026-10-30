@@ -41,7 +41,7 @@ int main() {
     // launch folder decides. Run the suite from the project root, not from build/.
     ::unsetenv("DD_HOME");
     ::unsetenv("DAEDALUS_HOME");
-    set_daedalus_home_override("");
+    set_ariadne_home_override("");
     const fs::path exe = exe_dir();
     const fs::path start = fs::current_path();
     chk(resolve_home().root == start, "make's output folder is not adopted: the launch folder decides");
@@ -55,26 +55,26 @@ int main() {
     { std::ofstream(project / "config.yaml") << "model:\n  base_url: http://p/v1\n"; }
     chk(::chdir(project.c_str()) == 0, "dd is started from the project folder");
     chk(resolve_home().root == project, "its config.yaml governs: the home is the project folder");
-    chk(get_daedalus_home() == project, "the ported modules agree on it");
+    chk(get_ariadne_home() == project, "the ported modules agree on it");
     fs::remove(project / "config.yaml");
     chk(resolve_home().root == project, "a launch folder that owns nothing is still where dd works");
     chk(::chdir(start.string().c_str()) == 0, "back to where the test was started");
 
     // ---- the flags and the environment still outrank every folder rule
     ::setenv("DAEDALUS_HOME", (tmp / "legacy").c_str(), 1);
-    chk(resolve_home().root == tmp / "legacy", "DAEDALUS_HOME still names a home");
+    chk(resolve_home().root != tmp / "legacy", "DAEDALUS_HOME is the Python Daedalus's: not read");
     ::setenv("DD_HOME", (tmp / "dd").c_str(), 1);
-    chk(resolve_home().root == tmp / "dd", "DD_HOME beats DAEDALUS_HOME");
-    chk(get_daedalus_home() == tmp / "dd", "get_daedalus_home follows DD_HOME");
+    chk(resolve_home().root == tmp / "dd", "DD_HOME names the home");
+    chk(get_ariadne_home() == tmp / "dd", "get_ariadne_home follows DD_HOME");
     chk(resolve_home("", (tmp / "cfgdir" / "config.yaml").string()).root == tmp / "cfgdir",
         "the folder of --config is the home");
     chk(resolve_home((tmp / "flag").string(), (tmp / "cfgdir" / "config.yaml").string()).root == tmp / "flag",
         "--home beats --config");
     chk(resolve_home("rel/dir").root.is_absolute(), "a relative --home is made absolute");
     chk(resolve_home("a/../b").root.filename() == "b", "and normalised lexically, not through symlinks");
-    set_daedalus_home_override((tmp / "override").string());
-    chk(get_daedalus_home() == tmp / "override", "the override beats the env for the ported modules");
-    set_daedalus_home_override("");
+    set_ariadne_home_override((tmp / "override").string());
+    chk(get_ariadne_home() == tmp / "override", "the override beats the env for the ported modules");
+    set_ariadne_home_override("");
     ::unsetenv("DD_HOME");
     ::unsetenv("DAEDALUS_HOME");
 
@@ -86,6 +86,9 @@ int main() {
         "DD_HOME naming ~/.daedalus is refused, with a reason");
     chk(resolve_home(pyhome.string(), "", &nohome).root.empty() && nohome.find("--home") != std::string::npos,
         "--home ~/.daedalus is refused too, and says what asked");
+    chk(nohome.find("ariadne-skills import-daedalus") != std::string::npos &&
+            nohome.find("--with-config") != std::string::npos,
+        "and names the import that works: the binary that has it, the flag it takes");
     ::unsetenv("DD_HOME");
     chk(resolve_home().root != pyhome, "nothing names ~/.daedalus by default");
 

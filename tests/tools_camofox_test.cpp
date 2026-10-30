@@ -19,7 +19,7 @@ static void check(const std::string& got, const std::string& want, const char* w
 
 int main() {
     // Pin the home so the digest is deterministic across machines.
-    core::set_daedalus_home_override("/home/test/.daedalus");
+    core::set_ariadne_home_override("/home/test/.daedalus");
 
     // State dir.
     check(tools::get_camofox_state_dir().string(), "/home/test/.daedalus/browser_auth/camofox", "state_dir");

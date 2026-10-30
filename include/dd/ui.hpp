@@ -1,10 +1,10 @@
 #pragma once
-// dd/ui.hpp — dd_tui's screen: a fixed-geometry panel layout in the Daedalus
+// dd/ui.hpp — dd_tui's screen: a fixed-geometry panel layout in the active
 // skin, painted into a cell grid and blitted as minimal-diff truecolor ANSI.
 //
 //   Canvas — cell grid: UTF-8 in, wide-char aware, boxes with titled borders.
 //   Frame  — Canvas + the last presented grid; present() emits changed cells.
-//   Theme  — palette, spinner, branding from ~/.daedalus/skins/<skin>.yaml.
+//   Theme  — palette, spinner, branding from <home>/skins/<skin>.yaml.
 //   Scene  — transcript cards + telemetry laid out as transcript | sidebar
 //            over a prompt box and a status row. The same cards print inline
 //            when there is no tty.
