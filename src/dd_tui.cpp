@@ -17,7 +17,7 @@
 //   build/ariadne --help | --version
 //   env: DD_HOME, DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS, DD_TUI_COLS, DD_TUI_ROWS,
 //        DD_TUI_MOUSE=0 (keep the terminal's own mouse), NO_COLOR
-//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /verbose off|normal|full (bare toggles) /plan /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
+//   commands: /help /tools /turns N /effort L /reasoning L|show|full|hide /verbose <level> (bare toggles; levels are ui.hpp's kVerbosityWords) /plan /context /rebase /resume /clear /learn /interrupt /mcp /<server> /quit
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
@@ -385,7 +385,8 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
     if (sp == std::string::npos || typed.find(' ', sp + 1) != std::string::npos) return m;
     const std::string cmd = typed.substr(0, sp), pre = typed.substr(sp + 1);
     std::vector<std::string> all;
-    if (cmd == "/verbose") all = {"quiet", "normal", "full"};
+    if (cmd == "/verbose")
+        all.assign(dd::ui::kVerbosityWords, dd::ui::kVerbosityWords + sizeof(dd::ui::kVerbosityWords) / sizeof(const char*));
     else if (cmd == "/effort") all = efforts;
     else if (cmd == "/reasoning") {
         all = efforts;
@@ -745,8 +746,11 @@ int main(int argc, char** argv) {
         // An empty DD_VERBOSE must not override the config: "" matches none of the words below,
         // so it would silently drop the configured verbosity level.
         if (const char* e = std::getenv("DD_VERBOSE"); e && *e) v = e;
-        if (v == "off" || v == "quiet" || v == "minimal") scene.set_verbosity(Verbosity::Minimal);
-        else if (v == "full" || v == "verbose") scene.set_verbosity(Verbosity::Verbose);
+        // A value that names no level is said out loud, not dropped: `verbose: 1` in config and
+        // DD_VERBOSE=1 in the environment both used to leave the deck at its default with nothing
+        // on screen saying the setting was ignored.
+        if (dd::ui::is_verbosity_word(v)) scene.set_verbosity(dd::ui::verbosity_from_word(v));
+        else scene.note("display.verbose \"" + v + "\" names no level — kept " + dd::ui::verbosity_label(scene.verbosity()));
     }
 
     // A/B knob: names to leave out of the deck entirely (comma-separated). The prompt, the tape and
@@ -1611,14 +1615,25 @@ int main(int argc, char** argv) {
             } else if (cmd == "/verbose") {
                 const std::string arg = trim_ws(p.substr(cmd.size()));
                 using dd::ui::Verbosity;
-                Verbosity v = Verbosity::Normal;
-                if (arg == "off" || arg == "quiet" || arg == "minimal") v = Verbosity::Minimal;
-                else if (arg == "full" || arg == "verbose") v = Verbosity::Verbose;
-                else if (arg.empty()) v = scene.verbosity() == Verbosity::Verbose ? Verbosity::Normal : Verbosity::Verbose;
-                scene.set_verbosity(v);
-                scene.note(v == Verbosity::Minimal ? "verbose off — cards fold to a glance"
-                           : v == Verbosity::Verbose ? "verbose on — full arguments, results, reasoning, accounting"
-                           : "verbose normal");
+                if (arg.empty()) {
+                    const Verbosity v = scene.verbosity() == Verbosity::Verbose ? Verbosity::Normal : Verbosity::Verbose;
+                    scene.set_verbosity(v);
+                    scene.note(v == Verbosity::Minimal ? "verbose off — cards fold to a glance"
+                               : v == Verbosity::Verbose ? "verbose on — full arguments, results, reasoning, accounting"
+                               : "verbose normal");
+                } else if (!dd::ui::is_verbosity_word(arg)) {
+                    // Anything outside the table changes nothing and says what was kept. Falling
+                    // through to Normal used to report "verbose normal" while quietly dropping a
+                    // level the caller never asked to drop: /verbose 1 on a verbose scene silenced
+                    // the deck and described the change as if it had been made to normal.
+                    scene.note("verbose \"" + arg + "\" names no level — kept " + dd::ui::verbosity_label(scene.verbosity()));
+                } else {
+                    const Verbosity v = dd::ui::verbosity_from_word(arg);
+                    scene.set_verbosity(v);
+                    scene.note(v == Verbosity::Minimal ? "verbose off — cards fold to a glance"
+                               : v == Verbosity::Verbose ? "verbose on — full arguments, results, reasoning, accounting"
+                               : "verbose normal");
+                }
             } else if (cmd == "/plan") {
                 if (!todos.has_items()) {
                     scene.note("no plan yet: the model writes one with the todo tool");

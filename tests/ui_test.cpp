@@ -402,6 +402,28 @@ int main() {
     }
 
     // ---- verbosity: quiet folds a turn to a glance, verbose opens what it carried ----
+    // The words themselves, before any card is drawn: three places set the level (config,
+    // DD_VERBOSE, /verbose) and all three go through this one table. A value outside it is not a
+    // level — it must be rejected rather than read as Normal, because DD_VERBOSE=1 used to match
+    // nothing and leave the configured level alone while /verbose 1 fell through to Normal and
+    // reported "verbose normal", dropping a level nobody asked to drop.
+    {
+        chk(is_verbosity_word("1") && verbosity_from_word("1") == Verbosity::Verbose, "1 turns verbose on");
+        chk(is_verbosity_word("true") && verbosity_from_word("true") == Verbosity::Verbose, "true turns verbose on");
+        chk(is_verbosity_word("on") && verbosity_from_word("on") == Verbosity::Verbose, "on turns verbose on");
+        chk(is_verbosity_word("FULL") && verbosity_from_word("FULL") == Verbosity::Verbose, "an env value is read case-insensitively");
+        chk(is_verbosity_word("0") && verbosity_from_word("0") == Verbosity::Minimal, "0 turns verbose off");
+        chk(is_verbosity_word("false") && verbosity_from_word("false") == Verbosity::Minimal, "false turns verbose off");
+        chk(is_verbosity_word("off") && verbosity_from_word("off") == Verbosity::Minimal, "off turns verbose off");
+        chk(is_verbosity_word("normal") && verbosity_from_word("normal") == Verbosity::Normal, "normal is the glance");
+        chk(is_verbosity_word("default") && verbosity_from_word("default") == Verbosity::Normal, "default is the glance");
+        chk(!is_verbosity_word("loud"), "a word outside the table is not a level");
+        chk(!is_verbosity_word(""), "an empty value is not a level: it must not override the config");
+        chk(!is_verbosity_word("2"), "a number outside 0 and 1 is not a level");
+        chk(verbosity_label(Verbosity::Minimal) == std::string("off")
+            && verbosity_label(Verbosity::Verbose) == std::string("on"), "a kept level has a word the refusal can name");
+    }
+
     {
         const std::string long_cmd = std::string(120, 'x');
         auto card = [&](Verbosity v) {

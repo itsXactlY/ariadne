@@ -283,6 +283,38 @@ inline const char* reason_view_label(ReasonView v) {
 // How much a card shows: Minimal folds a card to its headline, Normal is the
 // default glance, Verbose opens arguments, results, reasoning and accounting.
 enum class Verbosity { Minimal, Normal, Verbose };
+
+// The words that set verbosity, from the three places that set it: display.verbose in config,
+// DD_VERBOSE in the environment, and /verbose at runtime. The list lives here once so the
+// completion palette, the dispatcher and the startup cannot drift apart — the same contract
+// kReasonViewWords holds for /reasoning. `1`/`0` and their boolean spellings are in the set
+// because an environment variable is read as a flag by whoever writes it: DD_VERBOSE=1 matched
+// nothing and left the configured level alone, and /verbose 1 fell through to Normal while
+// reporting "verbose normal", which dropped a level the caller never asked to drop and described
+// a change that had not happened. A word outside this set is not a level: it changes nothing and
+// is reported.
+inline const char* const kVerbosityWords[] = {
+    "off", "quiet", "minimal", "0", "false", "no",
+    "normal", "mid", "default",
+    "1", "true", "yes", "on", "full", "verbose"};
+inline bool is_verbosity_word(const std::string& w) {
+    std::string lw;
+    for (char c : w) lw.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+    for (const char* v : kVerbosityWords) if (lw == v) return true;
+    return false;
+}
+inline Verbosity verbosity_from_word(const std::string& w) {
+    std::string lw;
+    for (char c : w) lw.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+    if (lw == "off" || lw == "quiet" || lw == "minimal" || lw == "0" || lw == "false" || lw == "no")
+        return Verbosity::Minimal;
+    if (lw == "1" || lw == "true" || lw == "yes" || lw == "on" || lw == "full" || lw == "verbose")
+        return Verbosity::Verbose;
+    return Verbosity::Normal;
+}
+inline const char* verbosity_label(Verbosity v) {
+    return v == Verbosity::Minimal ? "off" : v == Verbosity::Verbose ? "on" : "normal";
+}
 enum class Run { Pending, Running, Ok, Failed };
 
 // A turn recall as its card shows it: one row per memory the block carries.
