@@ -94,7 +94,7 @@ Env open_env(const Args& a) {
     if (!url.empty() && e.setup.maze) {
         e.maze = std::make_shared<context::Maze>(url);
         e.maze->probe();
-        if (!e.maze->up()) std::cerr << "dd: the maze at " << url << " is not answering: the catalogue is the disk's alone\n";
+        if (!e.maze->up()) std::cerr << "ariadne-skills: the maze at " << url << " is not answering: the catalogue is the disk's alone\n";
     }
     e.cat = make_skill_catalogue(e.setup, e.maze);
     e.cat->refresh();
@@ -113,7 +113,7 @@ bool parse_int(const std::string& text, int lo, int hi, int& out) {
 }
 
 int bad_number(const char* flag, const std::string& got) {
-    std::cerr << "dd: " << flag << " takes a whole number, got '" << got << "'\n";
+    std::cerr << "ariadne-skills: " << flag << " takes a whole number, got '" << got << "'\n";
     return 1;
 }
 
@@ -408,8 +408,8 @@ int cmd_import(const Args& a) {
     if (home.root.empty()) { std::cerr << why << "\n"; return 1; }
     const fs::path from = a.from.empty() ? core::platform_default_daedalus_home() : fs::path(a.from);
     std::error_code ec;
-    if (!fs::is_directory(from, ec)) { std::cerr << "dd: no " << from << "\n"; return 1; }
-    if (fs::weakly_canonical(from, ec) == fs::weakly_canonical(home.root, ec)) { std::cerr << "dd: " << from << " is this home already\n"; return 1; }
+    if (!fs::is_directory(from, ec)) { std::cerr << "ariadne-skills: no " << from << "\n"; return 1; }
+    if (fs::weakly_canonical(from, ec) == fs::weakly_canonical(home.root, ec)) { std::cerr << "ariadne-skills: " << from << " is this home already\n"; return 1; }
     core::ensure_home(home, &why);
     const bool all = !a.skills && !a.skins && !a.cfg;
     std::set<fs::path> seen;

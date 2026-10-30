@@ -114,7 +114,7 @@ int main() {
         auto live = Ledger::open(p.learn_dir, {}, &lerr);
         chk(live != nullptr, "a writer can take the ledger: " + lerr);
         const Result busy = forget(p, "fix-quadlet", now);
-        chk(!busy.ok && has(busy.text, "in use by another dd process"), "forget is refused while another process writes: " + busy.text);
+        chk(!busy.ok && has(busy.text, "in use by another ariadne process"), "forget is refused while another process writes: " + busy.text);
         chk(fs::exists(p.skills_root / "ops" / "fix-quadlet" / "SKILL.md") && !fs::exists(p.skills_root / ".retired"), "... and the skill folder is untouched");
         chk(status(p, now).ok && why(p, "fix-quadlet", now).ok, "the views still work beside the writer");
     }

@@ -60,7 +60,7 @@ std::unique_ptr<Ledger> Ledger::open(const fs::path& dir, LedgerOptions opt, std
         }
         ::close(fd);
         if (err)
-            *err = why == EWOULDBLOCK ? "the learn ledger at " + dir.string() + " is in use by another dd process" +
+            *err = why == EWOULDBLOCK ? "the learn ledger at " + dir.string() + " is in use by another ariadne process" +
                                             (pid > 0 ? " (pid " + std::to_string(pid) + ")" : std::string())
                                       : "cannot lock " + lock_path.string() + ": " + std::strerror(why);
         return nullptr;

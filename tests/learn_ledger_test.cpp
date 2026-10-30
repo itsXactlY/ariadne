@@ -509,7 +509,7 @@ static void test_lock_and_health() {
         std::string err2;
         auto b = Ledger::open(d, opts_fast(), &err2);
         chk(!b, "lock: a second writer on the same directory is refused");
-        chk(err2.find("in use by another dd process") != std::string::npos && err2.find("pid " + std::to_string(::getpid())) != std::string::npos,
+        chk(err2.find("in use by another ariadne process") != std::string::npos && err2.find("pid " + std::to_string(::getpid())) != std::string::npos,
             "lock: the refusal names the holder's pid: " + err2);
         struct stat st {};
         chk(::stat((d / "LOCK").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "lock: LOCK is private (0600)");

@@ -617,11 +617,18 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(home.root, boot_ec);
     } else if (!std::filesystem::exists(config_path, boot_ec) && !std::getenv("DD_BASE_URL")) {
         std::cerr << "ariadne: no config at " << config_path << "\n"
-                  << "  " << home.root.string() << " is the home dd picked and it has no config.yaml, so dd\n"
-                  << "  has never been configured there. Start dd from the project folder that owns the\n"
-                  << "  config.yaml, name one with --config FILE / --home DIR, or run ariadne --init to\n"
+                  << "  " << home.root.string() << " is the home ariadne picked and it has no config.yaml,\n"
+                  << "  so ariadne has never been configured there. Start ariadne from the folder that owns\n"
+                  << "  the config.yaml, name one with --config FILE / --home DIR, or run ariadne --init to\n"
                   << "  write one (ariadne --init --from FILE copies an existing config, once). Nothing was\n"
                   << "  created.\n";
+        // The common way here: a copy of the binary on PATH. Its folder owns no config, so the home
+        // falls to wherever it was started -- and the install it was copied from is never found.
+        const std::filesystem::path exe = ddcore::exe_dir();
+        if (!exe.empty() && exe != home.root && !std::filesystem::exists(exe / "config.yaml", boot_ec))
+            std::cerr << "  This binary runs from " << exe.string() << ", which holds no config.yaml either. A\n"
+                      << "  copy of ariadne finds no install; a link to the installed one does:\n"
+                      << "    ln -sf <install>/ariadne " << (exe / "ariadne").string() << "\n";
         return 2;   // the home was never configured: stop before it is built
     }
     if (!ddcore::ensure_home(home, &why)) {
@@ -1650,7 +1657,7 @@ int main(int argc, char** argv) {
                             std::string list;
                             for (const auto& r : engine.recent_sessions("dd-", 8))
                                 list += "\n  " + r.id + " · " + std::to_string(r.turns) + " turns · " + r.last;
-                            scene.note(list.empty() ? std::string("no dd sessions in the maze yet")
+                            scene.note(list.empty() ? std::string("no ariadne sessions in the maze yet")
                                                     : "sessions in the maze (/resume <id>, any auto:turn session works):" + list);
                             return;
                         }

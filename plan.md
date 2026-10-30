@@ -142,10 +142,10 @@ second send instead of ending the turn.
 ## W5 — redact untrusted server text at the point it enters the prompt
 
 **Closed** by `a42b913` (ancestor of HEAD). One rule: a server's prose is masked
-where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:825-827`
+where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:832-834`
 masks the tool `description` through
 `dd::agent::mask_secret_tokens(desc->str, SecretPolicy::ServerProse)`;
-`src/dd_tui.cpp:871-873` masks the server's `instructions` the same way. The
+`src/dd_tui.cpp:878-880` masks the server's `instructions` the same way. The
 `inputSchema` node is deep-copied untouched (`:690`), so names, enums and
 `required` stay byte-identical — a masked schema would make the model call things
 the server never offered. `SecretPolicy::ServerProse` deliberately drops the
@@ -238,7 +238,7 @@ moves code cannot leave a doc pointing somewhere else.
 | the README defers the unwired list to the tool | `README.md:409` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :409 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 119** `src/*.cpp` linked into no product binary, **49 of 144** headers unreached, 16 of 32 header-only ports unreached |
 | a citation must point at the thing it describes | `citations()` | 99 citations checked; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (12 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts (`brief.md`, `report.md`, `tape.jsonl`) are excluded |
 | anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `527`, `790-810`, `1019-1032`, `1177`, `1338-1344`; steering `1159` → `1195`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:71-79`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`src/dd_tui.cpp:903-908,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`src/dd_tui.cpp:910-915,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
 `make doc-audit`: clean — 99 citations, 0 unresolved or drifting, 0 wiring claims.
 
