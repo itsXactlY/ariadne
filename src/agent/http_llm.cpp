@@ -49,6 +49,7 @@ struct StreamSink {
     curl_off_t total = 0;
     bool over = false;
     bool spoke = false;   // a non-empty delta reached the caller: this call can never be sent again
+    bool completed = false;   // the stream reached `data: [DONE]`: the turn is over, the socket may not be
 };
 
 int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
@@ -84,6 +85,11 @@ std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
     s->total += static_cast<curl_off_t>(n);
     if (!s->cs.saw_data() && s->raw.size() < (1u << 24)) s->raw.append(p, n);
     s->cs.feed(p, n);
+    // The terminator is the answer's end, not the socket's. A keep-alive server holds the
+    // connection open for the next request, so a reader that waits for EOF sits on it until
+    // the stall clock fires — every turn costs the stall timeout and is filed as a stall.
+    // Returning past the read count makes curl stop the transfer here.
+    if (s->cs.done()) { s->completed = true; return 0; }
     return s->cs.overflowed() ? 0 : n;
 }
 
@@ -98,6 +104,7 @@ WireResult wire_result(CURLcode rc, long status, const StreamSink& s, bool cance
     r.spoken = s.spoke;
     r.refused = s.over || s.cs.overflowed();
     r.stream_error = !s.cs.error().empty();
+    r.completed = s.completed;
     return r;
 }
 
@@ -263,7 +270,10 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // Only curl stopping counts as a cut: an Esc that lands after the answer arrived
         // still hands back that answer, exactly as it did before the send loop existed.
         const bool flag = cancel && cancel->load(std::memory_order_relaxed);
-        const bool cancelled = (rc == CURLE_ABORTED_BY_CALLBACK && !sink.stalled) || (rc == CURLE_WRITE_ERROR && flag);
+        // A write error with the terminator already seen is the reader stopping on its own,
+        // even if Esc landed in the same instant: the answer arrived, so it is kept.
+        const bool cancelled = (rc == CURLE_ABORTED_BY_CALLBACK && !sink.stalled)
+                            || (rc == CURLE_WRITE_ERROR && flag && !sink.completed);
 
         const WireFailure f = wire_failure(wire_result(rc, status, sink, cancelled));
         if (f == WireFailure::None) {

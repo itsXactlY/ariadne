@@ -56,6 +56,18 @@ int main() {
         if (!ok) { chk(false, "strata stream split at " + std::to_string(cut)); break; }
     }
 
+    {   // the terminator is recorded: a keep-alive server holds the socket after it
+        ChatStream cs;
+        chk(!cs.done(), "no terminator before the stream is fed");
+        const std::string chunk = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n";
+        cs.feed(chunk.data(), chunk.size());
+        chk(!cs.done(), "a chunk is not the end of the stream");
+        const std::string end = "data: [DONE]\n\n";
+        cs.feed(end.data(), end.size());
+        chk(cs.done(), "data: [DONE] ends the stream");
+        chk(cs.message().content == "ok" && cs.error().empty(), "the terminator does not disturb the answer");
+    }
+
     {   // tool calls arrive in pieces, keyed by index
         ChatStream cs;
         const std::string s =

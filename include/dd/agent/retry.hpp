@@ -39,6 +39,10 @@ struct WireResult {
     bool spoken = false;         // reasoning or answer bytes already reached the caller
     bool refused = false;        // the response hit the byte cap, or the stream overflowed
     bool stream_error = false;   // an error chunk arrived inside an otherwise-ok stream
+    // The stream reached its own terminator (`data: [DONE]`). curl then aborts the transfer
+    // — a keep-alive server holds the connection open — so a non-zero curl code here is the
+    // reader stopping, not the server failing. It must never be re-sent.
+    bool completed = false;
 };
 
 WireFailure wire_failure(const WireResult& r);

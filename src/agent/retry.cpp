@@ -44,6 +44,10 @@ WireFailure wire_failure(const WireResult& r) {
     // nobody asked for, and would do so after they had already moved on.
     if (r.cancelled) return WireFailure::Cancelled;
 
+    // The reader stopped at the stream's own terminator: the answer arrived, and curl's
+    // abort code describes the reader, not the server. A re-send would duplicate the words.
+    if (r.completed) return WireFailure::None;
+
     // Both of these are a guard answering, not a hiccup: the byte cap and the stall clock
     // are the limits the caller set, and a second send reaches the same limit.
     if (r.refused || r.stalled) return WireFailure::Answer;

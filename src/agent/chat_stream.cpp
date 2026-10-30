@@ -37,7 +37,7 @@ void ChatStream::line(const std::string& l) {
     if (l.compare(0, 5, "data:") != 0) return;
     std::string payload = l.substr(5);
     if (!payload.empty() && payload[0] == ' ') payload.erase(0, 1);
-    if (payload == "[DONE]") return;
+    if (payload == "[DONE]") { done_ = true; return; }
     Json j;
     try {
         j = core::json_parse(payload);

@@ -45,6 +45,12 @@ struct FakeEndpoint {
     int fd = -1;
     uint16_t port = 0;
     std::thread th;
+    // A keep-alive server holds the socket open after the answer and waits for the next
+    // request on it. Every real backend does this (llama-server, vLLM, OpenAI), so a
+    // reader that ends a turn on the socket rather than on the stream's terminator is
+    // only caught by a server that keeps the connection — which `hold_ms` stages.
+    int hold_ms = 0;
+    std::vector<std::pair<int, std::chrono::steady_clock::time_point>> held_;
 
     FakeEndpoint(std::vector<std::string> a, int answers_after = 1) : answers(std::move(a)) {
         for (int i = 0; i < answers_after; ++i) answers.push_back(kClosed);
@@ -73,10 +79,17 @@ struct FakeEndpoint {
         stop.store(true);
         if (th.joinable()) th.join();
         if (fd >= 0) { ::close(fd); fd = -1; }
+        for (const auto& h : held_) ::close(h.first);
+        held_.clear();
     }
 
     void run() {
         for (;;) {
+            // A held socket that ran out its hold closes: the test cannot hang on one.
+            for (size_t i = 0; i < held_.size();) {
+                if (std::chrono::steady_clock::now() >= held_[i].second) { ::close(held_[i].first); held_.erase(held_.begin() + static_cast<long>(i)); }
+                else ++i;
+            }
             pollfd p{fd, POLLIN, 0};
             if (::poll(&p, 1, 150) <= 0) {
                 if (stop.load()) return;
@@ -112,7 +125,8 @@ struct FakeEndpoint {
             const int n = ++served;
             const std::string& resp = n <= static_cast<int>(answers.size()) ? answers[n - 1] : kClosed;
             if (resp != kClosed) ::send(c, resp.data(), resp.size(), MSG_NOSIGNAL);
-            ::close(c);
+            if (hold_ms > 0 && resp != kClosed) held_.emplace_back(c, std::chrono::steady_clock::now() + std::chrono::milliseconds(hold_ms));
+            else ::close(c);
         }
     }
 };
@@ -174,6 +188,13 @@ int main() {
         "the stall clock answering is not a hiccup");
     chk(dd::agent::wire_failure(WireResult{CURLE_WRITE_ERROR, 0, false, false, false, true, false}) == WireFailure::Answer,
         "the byte cap answering is not a hiccup");
+    // A keep-alive server holds the socket after `data: [DONE]`; curl aborts the transfer
+    // there, so its write error is the reader stopping. A policy that read it as a socket
+    // fact would re-send a stream whose words the caller already has.
+    chk(dd::agent::wire_failure(WireResult{CURLE_WRITE_ERROR, 200, false, false, true, false, false, true}) == WireFailure::None,
+        "a stream that reached its terminator is an answer");
+    chk(!dd::agent::transient(dd::agent::wire_failure(WireResult{CURLE_WRITE_ERROR, 200, false, false, true, false, false, true})),
+        "a completed stream is never re-sent");
     chk(dd::agent::transient(WireFailure::Transient) && !dd::agent::transient(WireFailure::Answer) &&
             !dd::agent::transient(WireFailure::Cancelled) && !dd::agent::transient(WireFailure::None),
         "only Transient is re-sent");
@@ -259,6 +280,29 @@ int main() {
         // the proof is that the server was reached once and no pause was paid — never twice.
         chk(ep.served.load() <= 1, "a cut call never reached the server twice");
         chk(elapsed < 200.0, "a cut call pays no backoff");
+    }
+
+    // ── A keep-alive server: the terminator ends the turn, not the socket ──
+    // No Content-Length, no `Connection: close`, and the socket held open after the last
+    // byte — exactly what llama-server and vLLM do. Without the terminator the transfer
+    // sits on that socket until the stall clock fires, so every turn costs the stall
+    // timeout and is filed as a stalled server.
+    {
+        const std::string body = std::string(kSse);
+        const std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n" + body;
+        FakeEndpoint ep({resp}, 0);
+        ep.hold_ms = 4000;   // longer than the call's 5s stall guard: a hang would show as a stall
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string answer;
+        bool threw = false;
+        try { answer = llm.chat({user("hi")}, json_arr()).content; } catch (const std::exception&) { threw = true; }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(!threw && answer == "2 + 2 = 4", "a keep-alive stream is answered whole");
+        chk(elapsed < 1000.0, "the turn ends at the terminator, not at the stall clock");
+        chk(ep.served.load() == 1, "a completed turn is never re-sent");
     }
 
     // ── DD_WIRE_ATTEMPTS=1 is the old one-shot wire ──

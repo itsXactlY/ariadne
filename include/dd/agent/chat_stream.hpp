@@ -31,6 +31,11 @@ public:
     const core::Json& timings() const { return timings_; }
     const std::string& error() const { return error_; }   // an in-stream {"error":…}, or an overlong line
     bool overflowed() const { return overflow_; }         // stop feeding: error() says why
+    // The stream said the turn is over: a `data: [DONE]` line arrived. A server that keeps
+    // the connection open afterwards (HTTP/1.1 keep-alive — llama-server, vLLM, OpenAI all
+    // do) is not still answering, so a reader that waits for the socket instead of this
+    // flag waits for a byte that will never come.
+    bool done() const { return done_; }
     const std::string& raw_head() const { return head_; } // first bytes, for reports
 
 private:
@@ -41,6 +46,7 @@ private:
     core::Json usage_, timings_;
     long chunks_ = 0;
     bool overflow_ = false;
+    bool done_ = false;
 };
 
 }  // namespace agent
