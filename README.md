@@ -80,7 +80,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
   guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
   before acting, never guess a path or a name, live state is a command and memory is history), a
   catalogue map, and `brief.md` if there is one. A pod's own protocol text is not pasted: it is
-  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:876`), which reads the
+  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:890`), which reads the
   server's instructions at `src/tools/mcp_client.cpp:304` and can be set to `harness`,
   `verbatim` or `off`.
 - **Context tape:** requests reuse a stable prompt prefix within an epoch; rebases are explicit and watermark-driven.
@@ -88,7 +88,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
 - **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
 - **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
-- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken.
+ - **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:45`), never a reason to re-send an answer the caller already holds.
 - **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
 
 ## Execution model
@@ -256,11 +256,12 @@ A tool-enabled agent is a system with side effects. The boundary needs to be exp
 | Terminal | Executes commands with a denylist; **not a sandbox** |
 | MCP | Enabled servers are discovered live; input schemas are registered |
 | HTTP | URL safety checks run before clients connect |
-| Streaming | Response sink is capped; once deltas have been emitted, the call is not replayed |
-| Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not |
+ | Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
+ | Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:45`) — an answer the caller already holds is never re-sent |
 | Tool output | Bounded at production, with omitted bytes/lines accounted for |
 | Paths | Filesystem tools reject `..` path components |
-| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
+ | Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol |
+ | Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
 | Learned skills | Provenance is tracked; model-edited skills are protected from blind draft overwrite |
 
 **Important:** a command denylist is not isolation. Do not expose the terminal tool to untrusted input or treat it as a security boundary. Use operating-system isolation and least privilege when running untrusted workloads.

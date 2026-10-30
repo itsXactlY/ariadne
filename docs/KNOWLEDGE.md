@@ -27,7 +27,7 @@ model; we have 498 skills and a 54.6k rebase mark.
 | # | Finding | Evidence |
 |---|---|---|
 | F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:344`, `src/context/engine.cpp:405`, `src/context/engine.cpp:668` |
-| F2 | Closed. The system prompt once had three voices that contradicted each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). Server prose is now masked, never pasted as authority: tool descriptions and the instructions text go through `SecretPolicy::ServerProse`. | `include/dd/know/prompt.hpp:6`, `src/dd_tui.cpp:912-919`, `src/dd_tui.cpp:964`, `src/tools/mcp_client.cpp:296` |
+ | F2 | Closed. The system prompt once had three voices that contradicted each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). Server prose is now masked, never pasted as authority: tool descriptions and the instructions text go through `SecretPolicy::ServerProse`. | `include/dd/know/prompt.hpp:6`, `src/dd_tui.cpp:932`, `src/dd_tui.cpp:977`, `src/tools/mcp_client.cpp:296` |
 | F3 | Skill matching is blind and noisy. Query = the whole user message; absolute BM25 threshold 12.0 (a sum that grows with message length); ASCII-only tokenizer (ä/ö/ü split words), no stopwords, no German; tags unused; paths stripped, which also strips the strongest signal (`.../my-project/...`). About 9 ms per match (document frequencies rebuilt per call). | `tool_search.cpp:161,294`, `recall.cpp:111,148` |
 | F4 | Closed: the catalogue is not read once. `ariadne` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:910-915,834-836,856`, `src/know/wiring.cpp` |
 | F5 | Catalogue quality. 611 `skill:` rows are 498 skills + 5 notes posing as skills (`fix-i3-services-not-starting` was *offered* as one) + 1 AFE fragment. 107 names exist in both `builtin` and `local` (95 identical sha, 4 differ, 8 unknown). 101 cards have no body slices (`load()` then returns the 650-char card as "the skill"). 96 legacy cards carry raw frontmatter in the text. Only 134 cards have tags. | maze census |
@@ -485,6 +485,12 @@ goes.
 `Home::resolve`: `--home DIR` > `$DD_HOME` > the directory of `/proc/self/exe` (symlinks resolved).
 **Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too. `DAEDALUS_HOME` is the Python
 Daedalus's variable and is not read: `DD_HOME` is the one environment override. The five hard-coded sites go.
+
+**A missing `config.yaml` refuses the start, and `DD_BASE_URL` does not exempt it** (`src/dd_tui.cpp:626`). An
+endpoint names a socket, not a setting: it carries no model id, no tool set and no context budget, so the old
+exemption let a start run a half-configured agent — empty model, the 8 built-in tools instead of the configured
+set — and open `learn/` and `logs/` in a home nothing had ever configured, the exact state the refusal keeps out.
+`--init` is the only path that writes a config; `ensure_home()` is the only path that writes folders.
 
 - `ariadne --init` writes `config.yaml` from `examples/ariadne/config.yaml` and creates the dirs
   (`--from FILE` copies an existing config once).

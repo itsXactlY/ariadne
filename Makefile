@@ -162,6 +162,12 @@ $(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $
 # test: none of them ever runs ariadne's own startup, home resolution, argument parsing,
 # or the serve/gateway paths an operator actually walks. Same source set as `ariadne`,
 # -O1 so the sanitizer's bookkeeping stays affordable.
+#
+# The probe measures two different things apart, because they are two different defects. Whether the BIND lets go
+# within 5s of SIGTERM is the one this file exists to catch -- a bind held while a turn is in flight, which survives
+# process exit and keeps the port. How long the PROCESS takes to leave is a sanitizer cost, not a gateway defect:
+# under host memory pressure it is LeakSanitizer scanning shadow memory at exit (7.8s measured, 2503 leaks at 2.42
+# MB of shadow, ~13.2 GB RSS), which a single ceiling once reported as "ignored SIGTERM".
 $(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	# -O1 with sanitizers makes GCC trace through libstdc++'s <regex> NFA and report a
 	# maybe-uninitialized inside std::function: a compiler false positive in the standard library,
