@@ -22,6 +22,10 @@ LOG_DIR=/tmp/ariadne-runtime-probe
 BASE_URL=${BASE_URL:-}
 PORT=${PROBE_PORT:-18998}
 PUB_PORT=${PROBE_PUB_PORT:-18997}
+# The probe never leans on whatever the operator happens to be running. An unset DD_MAZE_URL
+# falls to :8080, so a probe turn spends its budget recalling from the live server and writes
+# the probe's tape into a maze that is not the probe's — slow, and measuring the wrong system.
+export DD_MAZE_URL=${DD_MAZE_URL:-http://127.0.0.1:9}
 GW_PORT=${PROBE_GW_PORT:-18887}
 STUB_PORT=${PROBE_STUB_PORT:-18784}
 fails=0
@@ -171,7 +175,10 @@ if [ -n "$BASE_URL" ]; then
   fi
   # The CLI turn is the path an empty DD_BASE_URL used to hijack: with an endpoint it must run
   # and produce content, with none it must refuse (checked above, in the home section).
-  timeout 60 "$BIN" --home "$HOME_DIR" -- --say hello > "$LOG_DIR/turn.log" 2>&1
+  # The endpoint has to be named here too: with only DD_HOME set the CLI reads the home's
+  # config.yaml, whose base_url is the operator's live server, and the phase then measures
+  # that system while claiming to measure the stub.
+  DD_BASE_URL=$BASE_URL timeout 60 "$BIN" --home "$HOME_DIR" -- --say hello > "$LOG_DIR/turn.log" 2>&1
   if [ $? -eq 0 ] && grep -q 'stub answer' "$LOG_DIR/turn.log"; then note "cli turn produced content ok"
   else fail "cli turn did not produce a stub answer"; head -6 "$LOG_DIR/turn.log" | sed 's/^/    /'
   fi

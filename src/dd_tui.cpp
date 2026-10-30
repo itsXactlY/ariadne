@@ -620,19 +620,27 @@ int main(int argc, char** argv) {
     ddcore::set_ariadne_home_override(home.root.string());   // the ported modules agree on it
     const std::string config_path = config_flag.empty() ? home.config().string() : config_flag;
 
-    // Config first: an install with no config.yaml runs on defaults with a warning,
-    // not on another install's config. A home dd has never written in is not
-    // created on a plain start — --init is the only path that may make one.
+    // Config first: a home ariadne has never written in is not built on a plain start — --init
+    // is the only path that may make one, and ensure_home() below is what writes folders into
+    // it. The gate is unconditional on a missing config: DD_BASE_URL is not exempt, because an
+    // endpoint is not a config. It carries no model id, no tool set and no context budget, so
+    // exempting it let a start run a half-configured agent (empty model, the 8 built-in tools
+    // instead of the configured set) and open learn/ and logs/ in a home nothing had configured
+    // — the exact state this refusal exists to keep out.
     std::error_code boot_ec;
     if (init) {
         std::filesystem::create_directories(home.root, boot_ec);
-    } else if (!std::filesystem::exists(config_path, boot_ec) && !ddcore::env_present("DD_BASE_URL")) {
+    } else if (!std::filesystem::exists(config_path, boot_ec)) {
         std::cerr << "ariadne: no config at " << config_path << "\n"
                   << "  " << home.root.string() << " is the home ariadne picked and it has no config.yaml,\n"
                   << "  so ariadne has never been configured there. Start ariadne from the folder that owns\n"
                   << "  the config.yaml, name one with --config FILE / --home DIR, or run ariadne --init to\n"
                   << "  write one (ariadne --init --from FILE copies an existing config, once). Nothing was\n"
                   << "  created.\n";
+        if (ddcore::env_present("DD_BASE_URL"))
+            std::cerr << "  DD_BASE_URL is set, and it is not a config: it names an endpoint only, so a\n"
+                      << "  start here would run with no model id and no configured tools. Name the config\n"
+                      << "  that carries them (--config FILE / --home DIR), or run ariadne --init.\n";
         // The common way here: a copy of the binary on PATH. Its folder owns no config, so the home
         // falls to wherever it was started -- and the install it was copied from is never found.
         const std::filesystem::path exe = ddcore::exe_dir();
