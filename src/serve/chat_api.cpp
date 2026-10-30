@@ -55,9 +55,26 @@ bool ChatApi::authorized(const net::Request& req) const {
     return api_key_.empty() || req.header("authorization") == "Bearer " + api_key_;
 }
 
+// A bearer token on a cleartext connection is a secret the wire carries, not a secret the
+// client keeps. `net::Request::tls` and `.peer` say what actually happened, so an off-loopback
+// cleartext request is refused rather than answered with a token in transit. Loopback is not a
+// wire: a local client, or a reverse proxy that terminates TLS and forwards to 127.0.0.1, is
+// answered. `--gateway` serves TLS on its own port, so a paired device never lands here.
+// `/health` stays open above this — a liveness probe carries nothing worth hiding.
+static bool cleartext_off_loopback(const net::Request& req) {
+    if (req.tls) return false;
+    return req.peer != "127.0.0.1" && req.peer != "::1";
+}
+
 void ChatApi::handle(const net::Request& req, net::Conn& conn) {
     if (req.path == "/health") {
         conn.json(200, R"({"status":"ok","agent":"ariadne"})");
+        return;
+    }
+    if (cleartext_off_loopback(req)) {
+        conn.json(403, error_body("this request arrived over plain HTTP from off-loopback, where a bearer token would cross the wire "
+                                  "unread. Serve TLS (--gateway), or terminate TLS in a proxy that forwards to 127.0.0.1",
+                                  "transport_error"));
         return;
     }
     if (!authorized(req)) {

@@ -30,6 +30,7 @@
 #include "dd/context/maze.hpp"
 #include "dd/context/recall.hpp"
 #include "dd/core/config.hpp"
+#include "dd/core/env.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
@@ -250,7 +251,8 @@ static void usage(FILE* f) {
         "  --rules         with --init: also install the starter tripwires\n"
         "  -- words...     one message, cards printed inline; with no words and a tty: the interactive screen\n"
         "  --serve ADDR    no screen: /v1/chat/completions (SSE with stream:true), /v1/models, /health on\n"
-        "                  ADDR (PORT = 127.0.0.1:PORT); a bind past loopback needs serve.api_key or DD_SERVE_KEY\n"
+        "                  ADDR (PORT = 127.0.0.1:PORT); a bind past loopback needs serve.api_key or DD_SERVE_KEY,\n"
+        "                  and answers loopback only — off-loopback needs TLS in front (--gateway, or a proxy)\n"
         "  --gateway ADDR  TLS on ADDR (PORT = 0.0.0.0:PORT) for paired devices: /command (session, pod, bridge,\n"
         "                  llm; AES-GCM inside TLS), /bridge/stream, and the agent's /v1 surface per device scope;\n"
         "                  gateway.relay_url dials out to a relay for phones away from the LAN\n"
@@ -338,8 +340,10 @@ void size(int& cols, int& rows) {
         cols = ws.ws_col;
         rows = ws.ws_row;
     }
-    if (const char* v = std::getenv("DD_TUI_COLS")) cols = std::max(1, std::atoi(v));
-    if (const char* v = std::getenv("DD_TUI_ROWS")) rows = std::max(1, std::atoi(v));
+    // An empty DD_TUI_COLS is not a one-column terminal: `atoi("")` is 0, and `max(1,0)` then
+    // pins the UI to a single column. A var set to nothing means "no override".
+    if (const char* v = std::getenv("DD_TUI_COLS"); v && *v) cols = std::max(1, std::atoi(v));
+    if (const char* v = std::getenv("DD_TUI_ROWS"); v && *v) rows = std::max(1, std::atoi(v));
 }
 
 }  // namespace term
@@ -385,7 +389,7 @@ static std::vector<std::string> arg_matches(const std::string& typed, const std:
     else if (cmd == "/effort") all = efforts;
     else if (cmd == "/reasoning") {
         all = efforts;
-        all.insert(all.end(), {"show", "tail", "full", "hide"});
+        all.insert(all.end(), dd::ui::kReasonViewWords, dd::ui::kReasonViewWords + 4);   // exactly what the handler accepts
     } else return m;
     for (const auto& a : all)
         if (a.rfind(pre, 0) == 0) m.push_back(a);
@@ -427,6 +431,13 @@ static int run_serve(const std::string& addr, const std::string& key, dd::agent:
         std::cerr << "ariadne: serving on " << host << " runs a shell for whoever connects; set serve.api_key or DD_SERVE_KEY\n";
         return 2;
     }
+    // The listener is plain HTTP: a bind past loopback can only be reached through something that
+    // terminates TLS in front of it, because ChatApi refuses a cleartext request from off-loopback
+    // rather than carry a bearer token across the wire.
+    if (!loopback(host))
+        std::cerr << "ariadne: this listener is plain HTTP; requests arriving from off " << host
+                  << " are refused (403). Run --gateway for TLS on this port, or terminate TLS in a\n"
+                  << "         proxy that forwards to 127.0.0.1.\n";
 
     AgentTurns turns(agent);
     dd::serve::ApiInfo info;
@@ -615,7 +626,7 @@ int main(int argc, char** argv) {
     std::error_code boot_ec;
     if (init) {
         std::filesystem::create_directories(home.root, boot_ec);
-    } else if (!std::filesystem::exists(config_path, boot_ec) && !std::getenv("DD_BASE_URL")) {
+    } else if (!std::filesystem::exists(config_path, boot_ec) && !ddcore::env_present("DD_BASE_URL")) {
         std::cerr << "ariadne: no config at " << config_path << "\n"
                   << "  " << home.root.string() << " is the home ariadne picked and it has no config.yaml,\n"
                   << "  so ariadne has never been configured there. Start ariadne from the folder that owns\n"
@@ -723,7 +734,9 @@ int main(int argc, char** argv) {
     {   // verbosity: config, then DD_VERBOSE, then /verbose at runtime
         using dd::ui::Verbosity;
         std::string v = cfg.has("display.verbose") ? cfg.get_string("display.verbose") : "normal";
-        if (const char* e = std::getenv("DD_VERBOSE")) v = e;
+        // An empty DD_VERBOSE must not override the config: "" matches none of the words below,
+        // so it would silently drop the configured verbosity level.
+        if (const char* e = std::getenv("DD_VERBOSE"); e && *e) v = e;
         if (v == "off" || v == "quiet" || v == "minimal") scene.set_verbosity(Verbosity::Minimal);
         else if (v == "full" || v == "verbose") scene.set_verbosity(Verbosity::Verbose);
     }
@@ -919,7 +932,7 @@ int main(int argc, char** argv) {
                         e.toolset = srvname;
                         e.schema = std::move(entry_schema);
                         // DD_NO_SOAK: the model's own writes are off too; the schema stays, so the prompt is the real one
-                        e.handler = [m = mcp.get(), tname, ro = std::getenv("DD_NO_SOAK") && maze_write(tname)](const Json& a) {
+                        e.handler = [m = mcp.get(), tname, ro = ddcore::env_present("DD_NO_SOAK") && maze_write(tname)](const Json& a) {
                             return ro ? jerr("DD_NO_SOAK: this run writes nothing to the maze") : m->call(tname, a);
                         };
                         add_tool(e);
@@ -1092,7 +1105,7 @@ int main(int argc, char** argv) {
         lo.skills_root = home.skills();
         lo.overlay = learn_overlay;
         lo.project_dir = std::filesystem::current_path().string();
-        if (const char* h = std::getenv("HOME")) lo.home_dir = h;
+        if (const char* h = std::getenv("HOME"); h && *h) lo.home_dir = h;
         lo.feedback = !cfg.has("learn.feedback") || cfg.get_bool("learn.feedback");
         lo.author = cfg.has("learn.author") && cfg.get_bool("learn.author");   // drafting skills is opt-in
         lo.govern = !cfg.has("learn.govern") || cfg.get_bool("learn.govern");   // governing them is not: quiet by default
@@ -1239,7 +1252,9 @@ int main(int argc, char** argv) {
         u.attempts = st.attempts;
         scene.llm_end(u);
         engine.on_call(st);
-        if (const char* log = std::getenv("DD_TAPE_LOG")) {   // one line per call: is the prefix reused?
+        // fopen("") fails and the line is dropped; an empty DD_TAPE_LOG means "no log", not
+        // "a log at the empty path".
+        if (const char* log = std::getenv("DD_TAPE_LOG"); log && *log) {   // one line per call: is the prefix reused?
             const auto t = engine.stats();
             if (std::FILE* f = std::fopen(log, "a")) {
                 std::fprintf(f, "{\"epoch\":%d,\"tape\":%zu,\"history\":%zu,\"prompt\":%ld,\"cached\":%ld,"
@@ -1465,12 +1480,16 @@ int main(int argc, char** argv) {
 
     std::function<void()> learn_pin;   // /learn: null while learning is off
     if (learner) learn_pin = [&learner] { learner->pin(); };
-    auto effort_cmd = [&](const std::string& arg) {
+    auto effort_levels = [&] {
         std::string levels;
         for (const auto& e : efforts) levels += (levels.empty() ? "" : " ") + e;
+        return levels.empty() ? std::string("no reasoning switch in its template") : levels;
+    };
+
+    auto effort_cmd = [&](const std::string& arg) {
+        const std::string levels = effort_levels();
         if (arg.empty()) {
-            scene.note("effort " + effort_label(effort.load()) + " · this model: " +
-                       (levels.empty() ? std::string("no reasoning switch in its template") : levels));
+            scene.note("effort " + effort_label(effort.load()) + " · this model: " + levels);
             return;
         }
         const int i = effort_index(arg);
@@ -1478,7 +1497,7 @@ int main(int argc, char** argv) {
             scene.note("unknown effort '" + arg + "' · off low medium high xhigh max ultra");
         } else if (!offered(i)) {
             scene.note("this model's template has no '" + std::string(kEfforts[i]) + "' (the server would answer 500) · it offers: " +
-                       (levels.empty() ? std::string("nothing") : levels));
+                       levels);
         } else {
             effort = i;
             scene.set_effort(kEfforts[i]);
@@ -1518,7 +1537,7 @@ int main(int argc, char** argv) {
             return;
         }
         const std::string wire = sv.wire.count(tool) ? tool : sv.cmd.substr(1) + "_" + tool;   // a bare alias -> its wire name
-        if (std::getenv("DD_NO_SOAK") && maze_write(wire)) {
+        if (ddcore::env_present("DD_NO_SOAK") && maze_write(wire)) {
             scene.error(sv.cmd + " " + tool + ": DD_NO_SOAK: this run writes nothing to the maze");
             return;
         }
@@ -1607,10 +1626,25 @@ int main(int argc, char** argv) {
             } else if (cmd == "/effort" || cmd == "/reasoning") {
                 const std::string arg = trim_ws(p.substr(cmd.size()));
                 using dd::ui::ReasonView;
-                if (cmd == "/reasoning" && (arg == "show" || arg == "tail" || arg == "full" || arg == "hide")) {
-                    const ReasonView v = arg == "full" ? ReasonView::Full : arg == "hide" ? ReasonView::Hide : ReasonView::Tail;
-                    scene.set_reason_view(v);
-                    scene.note(std::string("reasoning ") + (v == ReasonView::Full ? "shown in full" : v == ReasonView::Hide ? "hidden" : "shown as a live tail"));
+                if (cmd == "/reasoning") {
+                    // Bare or mistyped /reasoning used to fall through to effort_cmd, so asking
+                    // about the reasoning pane moved the effort knob and answered with the effort
+                    // vocabulary. A view word sets the pane; an effort level still means the level
+                    // (that is what the palette offers), and anything else reports this command's
+                    // own vocabulary instead of another command's.
+                    if (arg.empty()) {
+                        const ReasonView v = scene.reason_view();
+                        scene.note(std::string("reasoning ") + dd::ui::reason_view_label(v) +
+                                   " · /reasoning show full hide tail, or a level: " + effort_levels());
+                    } else if (dd::ui::is_reason_view_word(arg)) {
+                        const ReasonView v = dd::ui::reason_view_from_word(arg);
+                        scene.set_reason_view(v);
+                        scene.note(std::string("reasoning ") + dd::ui::reason_view_label(v));
+                    } else if (effort_index(arg) >= 0) {
+                        effort_cmd(arg);
+                    } else {
+                        scene.note("unknown reasoning '" + arg + "' · show full hide tail, or a level: " + effort_levels());
+                    }
                 } else {
                     effort_cmd(arg);
                 }

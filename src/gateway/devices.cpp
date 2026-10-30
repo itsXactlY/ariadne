@@ -7,6 +7,8 @@
 
 #include <sys/stat.h>
 
+#include <sys/file.h>
+#include <unistd.h>
 #include <algorithm>
 #include <ctime>
 #include <fstream>
@@ -30,6 +32,26 @@ const std::vector<std::string>& Devices::default_scopes() {
 bool Devices::known_scope(std::string_view scope) {
     return scope == "chat" || scope == "memory" || scope == "tools" || scope == "admin";
 }
+
+namespace {
+// One writer at a time, across processes. `pair`, `revoke` and `--gateway-adopt` can run
+// at once -- two shells, or the CLI while the gateway adopts -- and each reads the whole
+// file, edits it, writes it. Without a lock the last writer overwrites the other's rows
+// and a paired phone's token silently disappears.
+struct FileLock {
+    explicit FileLock(const fs::path& file) {
+        std::error_code ec;
+        fs::create_directories(file.parent_path(), ec);
+        fd_ = ::open((file.string() + ".lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd_ >= 0) ::flock(fd_, LOCK_EX);
+    }
+    ~FileLock() {
+        if (fd_ >= 0) ::close(fd_);   // closing releases the lock
+    }
+    bool ok() const { return fd_ >= 0; }
+    int fd_ = -1;
+};
+}  // namespace
 
 std::vector<Device> Devices::list() const {
     std::vector<Device> out;
@@ -93,7 +115,9 @@ bool Devices::save(const std::vector<Device>& all, std::string& error) const {
     std::error_code ec;
     fs::create_directories(file_.parent_path(), ec);
     ::chmod(file_.parent_path().c_str(), 0700);
-    const fs::path tmp = file_.string() + ".tmp";
+    // Two writers must not rename over each other's half-written temp.
+    const fs::path tmp = file_.string() + ".tmp-" + std::to_string(::getpid()) + "-" +
+                         crypto::hex(crypto::random_bytes(4));
     {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) { error = "cannot write " + tmp.string(); return false; }
@@ -111,6 +135,10 @@ std::optional<Device> Devices::add(const std::string& name, const std::vector<st
     for (const auto& s : scopes)
         if (!known_scope(s)) { error = "unknown scope '" + s + "' (chat, memory, tools, admin)"; return std::nullopt; }
     if (token.empty()) token = crypto::hex(crypto::random_bytes(32));
+    // Read, edit and write as one critical section: a row another process added just now
+    // is in `all`, and ours cannot evict it.
+    FileLock lock(file_);
+    if (!lock.ok()) { error = "cannot lock " + file_.string() + ".lock"; return std::nullopt; }
     auto all = list();
     const std::string hash = crypto::hex(crypto::sha256(token));
     for (const auto& d : all)
@@ -130,7 +158,12 @@ namespace {
 constexpr const char* kPairingName = "mazemaker pairing";
 }
 
-std::optional<std::string> Devices::pairing_token(bool create, std::string& error) {
+    std::optional<std::string> Devices::pairing_token(bool create, std::string& error) {
+    // The read and the write are one critical section: two processes that both see an
+    // empty pairing file each mint a token, and the file ends up naming whichever wrote
+    // last -- the other QR code is a token whose row exists but is no longer advertised.
+    FileLock lock(pairing_file());
+    if (!lock.ok()) { error = "cannot lock " + pairing_file().string() + ".lock"; return std::nullopt; }
     {
         std::ifstream f(pairing_file());
         std::string token;
@@ -158,7 +191,10 @@ bool Devices::set_pairing_token(const std::string& token, std::string& error) {
     }
     std::error_code ec;
     fs::create_directories(pairing_file().parent_path(), ec);
-    const fs::path tmp = pairing_file().string() + ".tmp";
+    // Same rule as save(): a fixed temp name lets two writers rename over each other's
+    // half-written file, and one rename then moves the other's bytes into place.
+    const fs::path tmp = pairing_file().string() + ".tmp-" + std::to_string(::getpid()) + "-" +
+                         crypto::hex(crypto::random_bytes(4));
     {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) { error = "cannot write " + tmp.string(); return false; }
@@ -172,10 +208,18 @@ bool Devices::set_pairing_token(const std::string& token, std::string& error) {
 }
 
 bool Devices::revoke(std::string_view id, std::string& error) {
+    // Same critical section as add: revoking must not clobber a row added concurrently.
+    FileLock lock(file_);
+    if (!lock.ok()) { error = "cannot lock " + file_.string() + ".lock"; return false; }
     auto all = list();
-    const auto it = std::remove_if(all.begin(), all.end(), [&](const Device& d) { return d.id == id; });
-    if (it == all.end()) { error = "no device " + std::string(id); return false; }
-    all.erase(it, all.end());
+    // erase/remove_if, in that order: remove_if returns the first slot past the survivors,
+    // which is NOT an end() iterator when something matched, so comparing it to end() is
+    // undefined behaviour -- the size has already shrunk. Erasing the range from a
+    // find_if hit to end() is worse: revoking the first device deletes every device after
+    // it. Only rows with this id go; a miss is detected by the size, not the iterator.
+    const size_t before = all.size();
+    all.erase(std::remove_if(all.begin(), all.end(), [&](const Device& d) { return d.id == id; }), all.end());
+    if (all.size() == before) { error = "no device " + std::string(id); return false; }
     return save(all, error);
 }
 

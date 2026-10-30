@@ -264,6 +264,22 @@ int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, 
 enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory };
 // How reasoning cards show: a fixed-height live tail, every line, or one line.
 enum class ReasonView { Tail, Full, Hide };
+
+// /reasoning takes a view word or, as before, an effort level. The word list lives here once: the
+// completion palette in dd_tui offers exactly these, and the dispatcher accepts exactly these, so
+// the two cannot drift. A word outside this set is never a view — it goes to the level handler or
+// gets reported, and never changes the pane.
+inline const char* const kReasonViewWords[] = {"show", "tail", "full", "hide"};
+inline bool is_reason_view_word(const std::string& w) {
+    for (const char* v : kReasonViewWords) if (w == v) return true;
+    return false;
+}
+inline ReasonView reason_view_from_word(const std::string& w) {
+    return w == "full" ? ReasonView::Full : w == "hide" ? ReasonView::Hide : ReasonView::Tail;
+}
+inline const char* reason_view_label(ReasonView v) {
+    return v == ReasonView::Full ? "shown in full" : v == ReasonView::Hide ? "hidden" : "shown as a live tail";
+}
 // How much a card shows: Minimal folds a card to its headline, Normal is the
 // default glance, Verbose opens arguments, results, reasoning and accounting.
 enum class Verbosity { Minimal, Normal, Verbose };

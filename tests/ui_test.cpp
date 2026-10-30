@@ -842,6 +842,31 @@ int main() {
         chk(find_row("\xE2\x9C\x93 tool_1_29") >= 0, "back at the top the newest call shows");
     }
 
+    // ---- /reasoning's vocabulary: one table, so the palette and the handler cannot drift ----
+    {
+        // A bare or mistyped /reasoning must never be read as a view word: it reports, or goes to
+        // the level handler. It used to fall through to /effort, so asking about the pane moved
+        // the effort knob and answered with another command's vocabulary.
+        chk(!is_reason_view_word(""), "a bare /reasoning is not a view word");
+        chk(!is_reason_view_word("nonsense"), "an unknown word is not a view word");
+        chk(!is_reason_view_word("high"), "an effort level is not a view word");
+        chk(is_reason_view_word("show") && is_reason_view_word("tail") &&
+            is_reason_view_word("full") && is_reason_view_word("hide"),
+            "every word the palette offers is one the handler accepts");
+        chk(reason_view_from_word("full") == ReasonView::Full &&
+            reason_view_from_word("hide") == ReasonView::Hide &&
+            reason_view_from_word("show") == ReasonView::Tail &&
+            reason_view_from_word("tail") == ReasonView::Tail,
+            "each word maps to exactly one view");
+        // The label is what the operator reads back, and the read-back must describe the state set.
+        Scene s{Theme{}};
+        for (const char* w : kReasonViewWords) {
+            s.set_reason_view(reason_view_from_word(w));
+            chk(std::string(reason_view_label(s.reason_view())) == reason_view_label(reason_view_from_word(w)),
+                std::string(w) + " reads back as itself");
+        }
+    }
+
     // ---- a streaming card keeps at most 512 KiB, cut at a character ----
     {
         Scene s{Theme{}};

@@ -173,9 +173,21 @@ int main() {
         auto svc = LearnService::start(opts(base / "burst"));
         if (svc) {
             for (int i = 0; i < 200000; ++i) svc->sink()->emit(ev(know::Event::Type::Rebase, 1, 1));
-            svc->wait_idle(std::chrono::seconds(10));
+            // The ceiling is a safety net, not a performance assumption: wait_idle returns the
+            // moment the queue is empty. A 10s bound was a silent bet on how fast one event is
+            // handled, and a sanitizer build handles it 20x slower, so the test failed at 10s
+            // while nothing was wrong. The label carries the numbers so a slow drain is visible.
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool drained = svc->wait_idle(std::chrono::seconds(120));
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
             const auto st = svc->status();
-            chk(st.processed == st.pushed, "the burst drained");
+            chk(drained && st.processed == st.pushed,
+                "the burst drained (pushed " + std::to_string(st.pushed) + " dropped " +
+                std::to_string(st.dropped) + " processed " + std::to_string(st.processed) +
+                " in " + std::to_string(ms) + "ms)");
+            chk(st.dropped > 0, "past the ring cap the overflow is counted, never blocking");
+            chk(st.pushed < 200000, "the ring refuses instead of growing");
             svc->stop();
         }
     }

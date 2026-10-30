@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -156,6 +157,26 @@ int main() {
     auto unk = open_reply(key, gw.command(enc_cmd(key, sid, "shell", "ls"), "", false));
     chk(str(unk, "code") == "unknown_command", "shell and the other hermes commands do not exist here");
 
+    auto killed = open_reply(key, gw.command(enc_cmd(key, sid, "kill", ""), "", false));
+    chk(str(killed, "destroyed") == sid, "kill names the session it destroyed");
+    chk(gw.command(enc_cmd(key, sid, "status", ""), "", false).status == 400,
+        "a killed session decrypts nothing, so the app renegotiates on Decryption failed");
+    // The mark must outlive the session's TTL, not the FIFO's cap: the session is gone at
+    // ttl, but a client that still holds the key can keep talking with it until the mark
+    // expires too. With the old fixed-size FIFO the mark was dropped at ttl, so `kill`
+    // answered "destroyed" while the session kept decrypting.
+    cfg.session_ttl_s = 1;
+    DeviceGateway short_ttl(cfg, devices);
+    auto r3 = short_ttl.command(R"({"cmd":"session"})", tok_full, false);
+    Json c3 = *dd::core::json_get(parse(r3.body), "created");
+    const std::string sid3 = str(c3, "session_id");
+    const auto key3 = c::unb64(str(c3, "client_key")).value_or("");
+    chk(str(open_reply(key3, short_ttl.command(enc_cmd(key3, sid3, "kill", ""), "", false)), "destroyed") == sid3,
+        "kill on a short-TTL gateway");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    chk(short_ttl.command(enc_cmd(key3, sid3, "status", ""), "", false).status == 400,
+        "the kill outlives the session TTL");
+
     auto r2 = gw.command(R"({"cmd":"session"})", tok_chat, false);
     Json c2 = *dd::core::json_get(parse(r2.body), "created");
     const auto key2 = c::unb64(str(c2, "client_key")).value_or("");
@@ -184,6 +205,9 @@ int main() {
         const auto ekey_b64 = c::open(DeviceGateway::e2e_wrap_key(tok_full, nonce_raw), str(ec, "key_box"));
         const auto ekey = c::unb64(ekey_b64.value_or("")).value_or("");
         chk(ekey.size() == 32, "the phone opens the key_box with what only it and the gateway hold");
+        const auto replay = gw.command(body, "", true);
+        chk(replay.status == 401 && str(parse(replay.body), "code") == "replay",
+            "the same handshake answered twice is refused: a captured proof cannot mint a second session");
         auto est = open_reply(ekey, gw.command(enc_cmd(ekey, str(ec, "session_id"), "status", ""), "", true));
         chk(str(est, "device") == "full phone", "and drives encrypted commands through the relay");
 
@@ -326,6 +350,40 @@ int main() {
         chk(pdev && pd.revoke(pdev->id, err) && !pd.pairing_token(false, err), "a revoked pairing token is not handed out again");
         const std::string fresh = str(parse(c::unb64(str(parse(body_of(call(g2, "/pair.json", "127.0.0.1"))), "code")).value_or("")), "token");
         chk(!fresh.empty() && fresh != str(doc, "token"), "the next /pair mints a new pairing token");
+    }
+    {
+    // ---- cmd:kill is a durable mark: the id must stop decrypting for good ----
+        using Reply = dd::gateway::Reply;
+        // `kill` by id, from the bearer path (the CLI and the relay's unsealed route reach
+        // it without a session object). The mark has to outlive the request: without it the
+        // id keeps decrypting until its expiry and the kill is a lie to the app.
+        dd::gateway::Devices kd(dir / "kill" / "devices.json");
+        std::string tok;
+        const auto dev = kd.add("killer", {"chat"}, tok, err);
+        if (!dev) { std::fprintf(stderr, "add failed: %s\n", err.c_str()); g_fail++; }
+        DeviceGateway kg(cfg, kd);
+        auto r = kg.command(R"({"cmd":"session"})", tok, false);
+        Json created = *dd::core::json_get(parse(r.body), "created");
+        const std::string sid = str(created, "session_id");
+        const auto key = c::unb64(str(created, "client_key")).value_or("");
+        chk(!sid.empty() && key.size() == 32, "a bearer session opens for the kill test");
+        const auto alive = kg.command(enc_cmd(key, sid, "status", ""), "", false);
+        chk(alive.status == 200, "the sealed session answers before the kill");
+        const std::string kill_body = "{\"cmd\":\"kill\",\"session_id\":\"" + sid + "\"}";
+        const Reply killed = kg.command(kill_body, tok, false);
+        chk(killed.status == 200 && killed.body.find(sid) != std::string::npos,
+            "kill names the id it destroyed");
+        const auto after = kg.command(enc_cmd(key, sid, "status", ""), "", false);
+        chk(after.status == 400 && after.body.find("Decryption failed") != std::string::npos,
+            "the marked session decrypts nothing, even though it is still inside its expiry");
+        // Killing the same id again is still a kill: the answer is the mark, not the agent.
+        const Reply again = kg.command(kill_body, tok, false);
+        chk(again.status == 200 && again.body.find("\"destroyed\"") != std::string::npos,
+            "kill twice still reports the destroyed id");
+        // A kill with no id marks nothing and must not pretend it did.
+        const Reply bare = kg.command(R"({"cmd":"kill"})", tok, false);
+        chk(bare.status == 200 && str(parse(bare.body), "destroyed").empty(),
+            "kill with no session_id destroys nothing");
     }
 
     fs::remove_all(dir);

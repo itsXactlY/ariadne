@@ -18,11 +18,49 @@
 #include <atomic>
 #include <string>
 
+#include <chrono>
+
 #include "dd/gateway/device_gateway.hpp"
 #include "dd/gateway/identity.hpp"
+#include "dd/core/slot_ring.hpp"
 
 namespace dd {
 namespace gateway {
+
+// The relay's two wait policies, pulled out of relay.cpp. Neither is reachable from a
+// unit test through a live socket -- both are only wrong when the peer stops sending --
+// so the decision itself is the thing under test.
+namespace relay_detail {
+
+// The most a forwarded request may be. A relayed /command body is one sealed JSON; a
+// peer that streams past this is broken, or holding a worker open on purpose.
+constexpr size_t kMaxRelayMessage = 1u << 20;
+
+struct AgainPolicy {
+    bool give_up;   // end this request now
+    int wait_ms;    // otherwise: how long to wait for more bytes
+};
+
+// What to do when curl has read every byte the socket holds and would block.
+// The deadline is absolute: bytes that stop arriving end the request, even mid-frame.
+// Holding onto a partial frame past the deadline is what parked the socket thread
+// forever -- an idle relay with one half-delivered request never answered the next.
+// Bytes that keep arriving may keep the frame going, up to kMaxRelayMessage.
+AgainPolicy again_policy(std::chrono::steady_clock::time_point deadline,
+                         std::chrono::steady_clock::time_point now, size_t have);
+
+struct Outbox {
+    core::SlotRing<64, std::string> ring{64};
+    std::atomic<int> inflight{0};
+    std::atomic<int> dead{0};   // set when the session ends: nothing can be sent any more
+};
+
+// Hand a worker's reply to the socket thread, waiting only while the session is alive.
+// false when the reply is dropped: the caller still counts the request down, so a
+// session that ended mid-request cannot leave its worker spinning on a ring no one drains.
+bool publish_reply(Outbox& out, const std::string& frame, const std::atomic<int>& stop, int timeout_ms);
+
+}  // namespace relay_detail
 
 class RelayClient {
 public:

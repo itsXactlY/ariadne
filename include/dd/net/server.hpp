@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -76,18 +77,29 @@ public:
     // for the server's life. Ignored (returns false) in a build without TLS.
     bool set_tls(void* ssl_ctx);
     int port() const { return port_; }
-    // Accept until `stop` is non-zero, then wait for the live connections.
+    // Connections still answering a turn.
+    int live() const { return rig_->live.load(std::memory_order_acquire); }
+    // Accept until `stop` is non-zero, then wait for the live connections -- for a grace
+    // of five seconds only. A handler that never returns would otherwise never let the
+    // process exit; its thread is left running, and it holds what it needs by shared_ptr.
     void serve(const std::atomic<int>& stop);
 
 private:
-    void handle(int fd, const std::string& peer);
+    // Everything a connection thread needs, behind a shared_ptr. A thread that outlives
+    // serve() must not reach through the Server: its owner may have freed the Server while
+    // the thread is still answering a turn that never honours the interrupt.
+    struct Rig {
+        Handler handler;
+        size_t max_body;
+        void* tls = nullptr;
+        std::atomic<int> live{0};   // counted by the threads themselves, so a thread that
+                                    // outlives serve() never decrements a freed Server
+    };
+    static void handle(int fd, const std::string& peer, std::shared_ptr<Rig> rig);
     std::string host_;
     int port_;
-    Handler handler_;
-    size_t max_body_;
+    std::shared_ptr<Rig> rig_;
     int listen_fd_ = -1;
-    std::atomic<int> live_{0};
-    void* tls_ = nullptr;
 };
 
 const char* reason_phrase(int status);

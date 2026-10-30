@@ -10,8 +10,9 @@
 #include <poll.h>
 
 #include <chrono>
-#include <cstdio>
-#include <memory>
+#include <string>
+#include <thread>
+#include <algorithm>
 #include <thread>
 
 namespace dd {
@@ -31,11 +32,9 @@ struct Handle {
 };
 
 // What the worker threads hand back: whole frames ready to send. Shared, so a worker
-// that outlives one relay session still has somewhere to put its reply.
-struct Outbox {
-    core::SlotRing<64, std::string> ring{64};
-    std::atomic<int> inflight{0};
-};
+// that outlives one relay session still has somewhere to put its reply -- until the
+// session marks the outbox dead, which is the only way a reply can stop waiting.
+using Outbox = relay_detail::Outbox;
 
 curl_socket_t sock_of(CURL* c) {
     curl_socket_t s = CURL_SOCKET_BAD;
@@ -58,6 +57,10 @@ bool send_frame(CURL* c, const std::string& text, unsigned flags = CURLWS_TEXT) 
             continue;
         }
         if (rc != CURLE_OK) return false;
+        // CURLE_OK with sent == 0 advances nothing: the loop would spin forever at 100%
+        // CPU on the socket thread, never draining the outbox and stalling every worker.
+        // No progress is a failed send, not a retryable one.
+        if (sent == 0) return false;
         off += sent;
         if (text.empty()) break;
     }
@@ -76,9 +79,9 @@ std::string recv_message(CURL* c, int ms, bool& got, bool& closed) {
         const struct curl_ws_frame* meta = nullptr;
         const CURLcode rc = curl_ws_recv(c, buf, sizeof buf, &n, &meta);
         if (rc == CURLE_AGAIN) {
-            const int left = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count());
-            if (left <= 0 && msg.empty()) return {};
-            if (!wait_fd(c, POLLIN, left > 0 ? left : 50) && msg.empty()) return {};
+            const auto p = relay_detail::again_policy(deadline, Clock::now(), msg.size());
+            if (p.give_up) return {};
+            if (!wait_fd(c, POLLIN, p.wait_ms)) return {};
             continue;
         }
         if (rc != CURLE_OK) { closed = true; return {}; }
@@ -95,6 +98,33 @@ std::string recv_message(CURL* c, int ms, bool& got, bool& closed) {
 std::string str_of(const Json* v) { return v && v->type == Json::Str ? v->str : std::string(); }
 
 }  // namespace
+
+namespace relay_detail {
+
+// A worker's reply waits for the socket thread only while its session can still send it.
+bool publish_reply(Outbox& out, const std::string& frame, const std::atomic<int>& stop, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    // The liveness check comes FIRST. Checking it only after a failed publish lets a
+    // session that already ended accept the reply: nothing is left to drain the ring, so
+    // the frame is held forever instead of dropped, and the timeout never elapses.
+    for (;;) {
+        if (stop.load(std::memory_order_acquire) || out.dead.load(std::memory_order_acquire)) return false;
+        if (out.ring.publish_any(frame)) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+AgainPolicy again_policy(std::chrono::steady_clock::time_point deadline, std::chrono::steady_clock::time_point now,
+                         size_t have) {
+    if (have >= kMaxRelayMessage) return {true, 0};
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    // A frame that stopped arriving does not extend the deadline.
+    if (left.count() <= 0) return {true, 0};
+    return {false, static_cast<int>(std::min<long>(left.count(), 250))};
+}
+
+}  // namespace relay_detail
 
 std::string RelayClient::phone_base(const std::string& relay_ws_url, const Identity& id) {
     std::string base = relay_ws_url;
@@ -174,12 +204,26 @@ bool RelayClient::session(const std::atomic<int>& stop, std::string& why) {
         std::thread([out, answer, body = str_of(core::json_get(f, "body")), this] {
             const Reply r = gw_.command(body, std::string(), true);
             std::string frame = answer(r.status, r.body);
-            while (!out->ring.publish_any(std::string(frame)))   // full: the socket thread drains it
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            // A reply the session can no longer send is dropped, not held: the ring has
+            // no drainer once session() returns, and spinning on it is a leaked thread.
+            // `stop` is not capturable here: this thread outlives session(), and `stop` is
+            // the caller's atomic. The outbox's own dead flag is the lifetime-safe signal,
+            // set when session() returns.
+            relay_detail::publish_reply(*out, frame, out->dead, 5000);
             out->inflight.fetch_sub(1, std::memory_order_acq_rel);
         }).detach();
     }
     why = "stopping";
+    // Anything still in flight finds a dead outbox and drops rather than waiting forever.
+    out->dead.store(1, std::memory_order_release);
+    // `dead` only stops a worker from *sending*: the thread that is still inside
+    // gw_.command captured `this`, so returning here lets the caller destroy the
+    // RelayClient (and its gateway) underneath a live worker. The outbox is shared_ptr'd,
+    // the gateway is not — wait for the in-flight count to drain before unwinding.
+    const auto drain = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (out->inflight.load(std::memory_order_acquire) > 0 &&
+           std::chrono::steady_clock::now() < drain)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     return true;
 }
 

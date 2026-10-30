@@ -1,6 +1,6 @@
 BUILD ?= build
 .DEFAULT_GOAL := $(BUILD)/ariadne
-.PHONY: all test clean install install-all doc-audit tsan
+.PHONY: all test clean install install-all doc-audit tsan runtime-probe
 all: $(BUILD)/ariadne
 # The install is the folder the operator runs ariadne from, the one that owns
 # config.yaml; build/ is make's output and never a home (ariadne refuses it).
@@ -155,8 +155,29 @@ install: $(BUILD)/ariadne-install
 install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
+$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
+
+# The shipped binary itself, under ASan+UBSan. Every sanitizer target so far is a module
+# test: none of them ever runs ariadne's own startup, home resolution, argument parsing,
+# or the serve/gateway paths an operator actually walks. Same source set as `ariadne`,
+# -O1 so the sanitizer's bookkeeping stays affordable.
+$(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	# -O1 with sanitizers makes GCC trace through libstdc++'s <regex> NFA and report a
+	# maybe-uninitialized inside std::function: a compiler false positive in the standard library,
+	# not a dd bug. The TSan targets already suppress the same diagnostic.
+	$(CXX) $(CXXFLAGS) -fopenmp -O1 -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne_asan
+
+# Walks that binary through the paths a module test never touches. Needs a backend for
+# the turn and the serve bind; without one those two probes skip and say so.
+asan-product: $(BUILD)/ariadne_asan
+	@BIN=$(BUILD)/ariadne_asan ASAN_BASE_URL=$(ASAN_BASE_URL) ASAN_HOME=$(ASAN_HOME) sh tests/asan_product_probe.sh
+
+# The release binary through the same product paths, unsanitized: what a start with no config
+# does, what --init writes, what each bind answers and what its transport refuses. Needs a
+# backend for the turn phases; without RUNTIME_BASE_URL those skip and say so.
+runtime-probe: $(BUILD)/ariadne
+	@BIN=$(BUILD)/ariadne BASE_URL=$(RUNTIME_BASE_URL) PROBE_HOME=$(RUNTIME_HOME) sh tests/runtime_probe.sh
 
 $(BUILD)/dd_maze_tests: $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP) $(wildcard include/dd/context/*.hpp include/dd/know/*.hpp) tests/maze_test.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(CORE) $(TOOLS) $(TSEARCH) $(MCP) $(AGENT) $(NET) $(HTTPLLM) $(CONTEXT) $(KNOWDEP)) tests/maze_test.cpp -pthread -lcurl -o $(BUILD)/dd_maze_tests
@@ -243,6 +264,11 @@ $(BUILD)/dd_tool_limits_tests: $(CORE) $(COREHOME) $(CONFIG) $(TOOLLIMITS) tests
 
 $(BUILD)/dd_env_passthrough_tests: $(CORE) $(COREHOME) $(CONFIG) $(ENVPT) tests/tools_env_passthrough_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(CONFIG) $(ENVPT) tests/tools_env_passthrough_test.cpp -o $(BUILD)/dd_env_passthrough_tests
+
+# The env conventions themselves: three ways to read a var, and the one that drifts — presence —
+# is the one that decides whether an unconfigured home runs or refuses.
+$(BUILD)/dd_env_tests: $(ENV) tests/core_env_test.cpp
+	$(CXX) $(CXXFLAGS) $(ENV) tests/core_env_test.cpp -o $(BUILD)/dd_env_tests
 
 $(BUILD)/dd_backend_helpers_tests: $(CORE) $(COREHOME) $(CONFIG) $(ENV) $(BACKENDHELPERS) tests/tools_backend_helpers_test.cpp
 	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(CONFIG) $(ENV) $(BACKENDHELPERS) tests/tools_backend_helpers_test.cpp -o $(BUILD)/dd_backend_helpers_tests
@@ -431,6 +457,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_budget_tests \
   $(BUILD)/dd_tool_limits_tests \
   $(BUILD)/dd_env_passthrough_tests \
+  $(BUILD)/dd_env_tests \
   $(BUILD)/dd_backend_helpers_tests \
   $(BUILD)/dd_audio_container_tests \
   $(BUILD)/dd_sha1_tests \
@@ -512,8 +539,8 @@ TEST_BINS := $(BUILD)/dd_tests \
 # -fsanitize=thread and run, not folded into `make test` (TSan costs the suite more than the
 # claim is worth on every run). halt_on_error=1 makes a race a failed target rather than a
 # warning that scrolls past.
-tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan
-	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan; do \
+tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan
+	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan; do \
 		echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp TSAN_OPTIONS=halt_on_error=1 ./$$t || { echo "TSAN FAILED: $$t"; fail=$$((fail+1)); }; done; \
 		echo "$$fail tsan binary(ies) failed"; [ $$fail -eq 0 ]
 

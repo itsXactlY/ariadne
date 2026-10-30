@@ -742,6 +742,10 @@ class Guard {
 public:
     explicit Guard(const ShellPolicy& p) : extra_(p.extra_deny.begin(), p.extra_deny.end()) {
         if (const char* h = std::getenv("HOME")) home_ = h;
+        // An empty HOME leaves home_ empty, and the deny patterns that expand `~` against it then
+        // name the cwd instead of the home. Same rule as everywhere else: unset and set-to-nothing
+        // are the same state.
+        if (const char* h = std::getenv("HOME"); h && *h) home_ = h;
     }
 
     std::string check(const std::string& s, int depth) {

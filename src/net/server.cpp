@@ -178,7 +178,11 @@ bool Conn::sse_data(std::string_view data) {
 }
 
 Server::Server(std::string host, int port, Handler handler, size_t max_body)
-    : host_(std::move(host)), port_(port), handler_(std::move(handler)), max_body_(max_body) {}
+    // Not make_shared: Rig is a private nested type, so std::construct_at -- instantiated
+    // outside Server -- cannot reach its constructor and the translation unit fails to
+    // compile. `new Rig{…}` is constructed here, inside Server, and shared_ptr owns it.
+    : host_(std::move(host)), port_(port),
+      rig_(std::shared_ptr<Rig>(new Rig{std::move(handler), max_body, nullptr})) {}
 
 Server::~Server() {
     if (listen_fd_ >= 0) ::close(listen_fd_);
@@ -224,7 +228,7 @@ bool Server::set_tls(void* ssl_ctx) {
     // that hangs up after its handshake (the app's certificate fetch does exactly that) would
     // raise SIGPIPE and end the whole process. Ignored, a dead peer is a failed write instead.
     std::signal(SIGPIPE, SIG_IGN);
-    tls_ = ssl_ctx;
+    rig_->tls = ssl_ctx;
     return ssl_ctx != nullptr;
 #else
     (void)ssl_ctx;
@@ -248,25 +252,33 @@ void Server::serve(const std::atomic<int>& stop) {
             ::inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&from)->sin6_addr, text, sizeof text);
         std::string peer = text;
         if (peer.rfind("::ffff:", 0) == 0) peer = peer.substr(7);   // a v4 client on a dual-stack socket
-        live_.fetch_add(1, std::memory_order_acq_rel);
-        std::thread([this, fd, peer = std::move(peer)] {
-            handle(fd, peer);
-            live_.fetch_sub(1, std::memory_order_acq_rel);
+        rig_->live.fetch_add(1, std::memory_order_acq_rel);
+        std::thread([fd, peer = std::move(peer), rig = rig_] {
+            handle(fd, peer, rig);
+            rig->live.fetch_sub(1, std::memory_order_acq_rel);
         }).detach();
     }
     // A connection still streaming a turn ends when the turn does; the owner
-    // interrupts the agent before it sets `stop`.
-    while (live_.load(std::memory_order_acquire) > 0)
+    // interrupts the agent before it sets `stop`. That is the contract, but a handler
+    // that ignores it must not be able to hold the process open forever.
+    const auto grace = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rig_->live.load(std::memory_order_acquire) > 0 && std::chrono::steady_clock::now() < grace)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (rig_->live.load(std::memory_order_acquire) > 0)
+        std::fprintf(stderr, "ariadne serve: %d connection(s) still open after 5s; exiting with them\n",
+                     rig_->live.load(std::memory_order_acquire));
 }
 
-void Server::handle(int fd, const std::string& peer) {
+void Server::handle(int fd, const std::string& peer, std::shared_ptr<Rig> rig) {
     timeval tv{30, 0};   // a client that stops sending mid-request (or mid-handshake) does not hold a thread
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    // The same bound on writing: a peer that stops reading would otherwise park this
+    // thread in send() for as long as it likes, `stop` notwithstanding.
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     void* ssl = nullptr;
 #ifndef DD_NO_TLS
-    if (tls_) {
-        SSL* s = SSL_new(static_cast<SSL_CTX*>(tls_));
+    if (rig->tls) {
+        SSL* s = SSL_new(static_cast<SSL_CTX*>(rig->tls));
         if (!s) { ::close(fd); return; }
         SSL_set_fd(s, fd);
         if (SSL_accept(s) != 1) {   // a scanner, a client that does not pin us, plain HTTP on the TLS port
@@ -292,7 +304,7 @@ void Server::handle(int fd, const std::string& peer) {
         if (n < 0 && errno == EINTR && !ssl) continue;
         if (n <= 0) return;
         raw.append(buf, static_cast<size_t>(n));
-        switch (parse_request(raw, req, max_body_)) {
+        switch (parse_request(raw, req, rig->max_body)) {
             case Parse::Incomplete: continue;
             case Parse::Bad: conn.json(400, R"({"error":{"message":"malformed request"}})"); return;
             case Parse::TooLarge: conn.json(413, R"({"error":{"message":"request body too large"}})"); return;
@@ -303,7 +315,7 @@ void Server::handle(int fd, const std::string& peer) {
     req.peer = peer;
     req.tls = ssl != nullptr;
     try {
-        handler_(req, conn);
+        rig->handler(req, conn);
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "ariadne serve: %s %s: %s\n", req.method.c_str(), req.path.c_str(), ex.what());
         conn.json(500, R"({"error":{"message":"internal error, see the server log"}})");

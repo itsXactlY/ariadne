@@ -42,7 +42,9 @@ bool paths_overlap(const std::string& a, const std::string& b) {
 // _extract_parallel_scope_path + expanduser/abspath normalization.
 std::string norm_path(std::string p) {
     if (!p.empty() && p[0] == '~') {
-        if (const char* h = std::getenv("HOME")) p = std::string(h) + p.substr(1);
+        // HOME set to nothing is not a home: expanding `~` against it would silently rewrite a
+        // `~/x` path to a path under the cwd, which is a different file than the operator named.
+        if (const char* h = std::getenv("HOME"); h && *h) p = std::string(h) + p.substr(1);
     }
     std::filesystem::path pp(p);
     if (!pp.is_absolute()) pp = std::filesystem::current_path() / pp;

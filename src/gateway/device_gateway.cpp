@@ -8,6 +8,7 @@
 
 #include <curl/curl.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,17 @@ namespace {
 constexpr long kSkewS = 300;
 constexpr const char* kProofLabel = "ariadne-e2e-session|";
 constexpr const char* kWrapInfo = "ariadne-e2e-session-key";
+// How many killed sessions and answered handshakes one gateway remembers. A mark set
+// that grew without bound is a leak an authenticated client could drive.
+constexpr size_t kMarkCap = 1024;
+
+void remember(std::unordered_set<std::string>& seen, std::vector<std::string>& order, const std::string& v) {
+    if (seen.insert(v).second) order.push_back(v);
+    while (order.size() > kMarkCap) {
+        seen.erase(order.front());
+        order.erase(order.begin());
+    }
+}
 
 Json jerr(const std::string& msg, const char* code = nullptr) {
     Json o = core::json_obj();
@@ -75,6 +87,39 @@ std::string DeviceGateway::e2e_wrap_key(const std::string& token, const std::str
     return crypto::hkdf_sha256(crypto::sha256(token), nonce_raw, kWrapInfo, 32);
 }
 
+void DeviceGateway::mark_killed(const std::string& session_id) const {
+    std::lock_guard<std::mutex> l(marks_.mu);
+    const long long now = now_s();
+    // A kill mark only needs to outlive the session it killed, so it ages out when that
+    // session would have expired anyway. A FIFO cap here is the hole: 1024 later kills
+    // push the first mark out and the killed session resumes decrypting.
+    for (auto it = marks_.killed.begin(); it != marks_.killed.end();)
+        if (it->second <= now) it = marks_.killed.erase(it);
+        else ++it;
+    marks_.killed[crypto::hex(crypto::sha256(session_id))] = now + cfg_.session_ttl_s;
+    // Backstop for a clock that never advances: drop the marks that expire soonest.
+    while (marks_.killed.size() > kMarkCap) {
+        const auto soonest = std::min_element(marks_.killed.begin(), marks_.killed.end(),
+                                             [](const std::pair<std::string, long long>& a,
+                                              const std::pair<std::string, long long>& b) { return a.second < b.second; });
+        marks_.killed.erase(soonest);
+    }
+}
+
+bool DeviceGateway::is_killed(const std::string& session_id) const {
+    std::lock_guard<std::mutex> l(marks_.mu);
+    const auto it = marks_.killed.find(crypto::hex(crypto::sha256(session_id)));
+    return it != marks_.killed.end() && it->second > now_s();
+}
+
+bool DeviceGateway::nonce_replayed(const std::string& nonce_b64) const {
+    std::lock_guard<std::mutex> l(marks_.mu);
+    const std::string h = crypto::hex(crypto::sha256(nonce_b64));
+    if (marks_.used_nonces.count(h) != 0) return true;
+    remember(marks_.used_nonces, marks_.nonce_order, h);
+    return false;
+}
+
 std::string DeviceGateway::open_session(const Device& d, std::string& key_out) const {
     key_out = crypto::random_bytes(32);
     Json s = core::json_obj();
@@ -94,6 +139,9 @@ std::optional<DeviceGateway::Session> DeviceGateway::resume(const std::string& s
     auto d = devices_.by_id(str_of(core::json_get(s, "d")));   // revoked since: the session dies with the row
     auto key = crypto::unb64(str_of(core::json_get(s, "k")));
     if (!d || !key || key->size() != 32) return std::nullopt;
+    // `kill` is this process's to honour: the id is self-describing, so without a mark a
+    // killed session keeps decrypting until its expiry and the command is a lie.
+    if (is_killed(session_id)) return std::nullopt;
     return Session{std::move(*d), std::move(*key)};
 }
 
@@ -151,6 +199,9 @@ Reply DeviceGateway::command(const std::string& body, const std::string& bearer,
                 if (crypto::equal(want, *proof) && !who) { who = d; token_hash = *th; }
             }
             if (!who) return reply(401, jerr("Unauthorized: no paired device made that proof"));
+            // The proof is valid for five minutes, so without this a captured handshake is
+            // replayable inside the skew -- each replay mints a fresh session for the attacker.
+            if (nonce_replayed(nonce)) return reply(401, jerr("e2e: this handshake was already answered", "replay"));
             const std::string sid_new = open_session(*who, key);
             // The wrap key is derived from sha256(token) -- what both ends hold -- and the
             // client's nonce, so the relay sees a box it has no key for.
@@ -218,6 +269,7 @@ Json DeviceGateway::dispatch(const std::string& cmd, const Json& args, const Dev
     }
     if (cmd == "kill") {
         Json o = core::json_obj();
+        if (!session_id.empty()) mark_killed(session_id);
         core::obj_set(o, "destroyed", core::json_str(session_id));
         return o;
     }

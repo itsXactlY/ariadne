@@ -32,5 +32,15 @@ bool env_var_enabled(const std::string& name, const std::string& def) {
     return is_truthy_value(value);
 }
 
+bool env_present(const std::string& name) {
+    const char* raw = std::getenv(name.c_str());
+    if (!raw) return false;
+    // A value of only whitespace is the same nothing as an empty one: `DD_BASE_URL=" "` is a
+    // var set to no endpoint, not an endpoint with a space in it.
+    for (const char* c = raw; *c; ++c)
+        if (*c != ' ' && *c != '\t' && *c != '\n' && *c != '\r') return true;
+    return false;
+}
+
 }  // namespace core
 }  // namespace dd
