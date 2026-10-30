@@ -68,17 +68,30 @@ ready() { # ready <url> <pid>
   return 1
 }
 
-term_exit() { # term_exit <pid> -> prints ms until the process is gone; 1 = never
+# What a shutdown bug is here: the BIND keeps accepting after SIGTERM. Leaving the process is
+# a different thing -- LeakSanitizer scans the sanitizer's shadow memory at exit, and under
+# host memory pressure that scan takes seconds -- so the two are measured apart, in
+# milliseconds, and only the bind has the tight ceiling. Measuring the process as the bind
+# reported a wedged accept loop that was really a slow sanitizer teardown.
+term_shutdown() { # term_shutdown <pid> <url> -> "bind_ms process_ms"; rc 1 bind never let go, 2 process never left
   t0=$(date +%s%N)
   kill -TERM "$1" 2>/dev/null
   i=0
+  while [ $i -lt 20 ]; do
+    curl -sk -m 1 "$2" >/dev/null 2>&1 || break
+    i=$((i + 1)); sleep 0.25
+  done
+  if [ $i -ge 20 ]; then return 1; fi
+  bind_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  j=0
   while kill -0 "$1" 2>/dev/null; do
-    i=$((i + 1))
-    if [ $i -gt 20 ]; then return 1
+    j=$((j + 1))
+    if [ $j -gt 80 ]; then echo "$bind_ms never"; return 2
     fi
     sleep 0.25
   done
-  echo $(( ($(date +%s%N) - t0) / 1000000 ))
+  echo "$bind_ms $(( ($(date +%s%N) - t0) / 1000000 ))"
+  return 0
 }
 
 server_probe() { # server_probe <label> <flag> <port> <path> [turn-url]
@@ -87,10 +100,16 @@ server_probe() { # server_probe <label> <flag> <port> <path> [turn-url]
   scheme=http
   if [ "$flag" = gateway ]; then scheme=https; fi
   log=$HOME_DIR/$label.log
-  DD_HOME=$HOME_DIR DD_BASE_URL=$BASE_URL "$BIN" --home "$HOME_DIR" "$flag" 127.0.0.1:"$port" > "$log" 2>&1 &
+  # `--serve` / `--gateway`, not the bare word: as a positional argument the text becomes the
+  # prompt, the binary answers a headless turn and exits, and the probe reports on a bind it
+  # never started.
+  DD_HOME=$HOME_DIR DD_BASE_URL=$BASE_URL "$BIN" --home "$HOME_DIR" "--$flag" 127.0.0.1:"$port" > "$log" 2>&1 &
   pid=$!
-  if ! ready "$scheme://127.0.0.1:$port$path" "$pid"; then
-    fail "$label never answered $path"
+  url="$scheme://127.0.0.1:$port$path"
+  if ! ready "$url" "$pid"; then
+    if kill -0 "$pid" 2>/dev/null; then fail "$label never answered $path -- still alive after the 60s ceiling"
+    else fail "$label died before answering $path"
+    fi
     kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null; no_report "$log"; return
   fi
   turn_pid=""
@@ -100,14 +119,22 @@ server_probe() { # server_probe <label> <flag> <port> <path> [turn-url]
     turn_pid=$!
     sleep 0.4
   fi
-  if ! ms=$(term_exit $pid); then
-    fail "$label ignored SIGTERM for >5s"
+  out=$(term_shutdown $pid "$url"); rc=$?
+  if [ $rc -eq 1 ]; then
+    fail "$label kept the bind accepting after SIGTERM (>5s)"
+    kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
+    if [ -n "$turn_pid" ]; then wait $turn_pid 2>/dev/null; fi
+    no_report "$log"; return
+  elif [ $rc -eq 2 ]; then
+    fail "$label never left after SIGTERM (>20s)"
     kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
     if [ -n "$turn_pid" ]; then wait $turn_pid 2>/dev/null; fi
     no_report "$log"; return
   fi
-  if [ "$ms" -gt 5000 ]; then fail "$label took ${ms}ms to exit after SIGTERM"
-  else note "$label ok (exited ${ms}ms after SIGTERM)"
+  bind=$(echo "$out" | cut -d' ' -f1); proc=$(echo "$out" | cut -d' ' -f2)
+  if [ "$bind" -gt 5000 ]; then fail "$label took ${bind}ms to stop accepting after SIGTERM"
+  elif [ "$proc" -gt 20000 ]; then fail "$label took ${proc}ms to leave after SIGTERM"
+  else note "$label ok (bind refused ${bind}ms, process gone ${proc}ms after SIGTERM)"
   fi
   wait $pid 2>/dev/null
   if [ -n "$turn_pid" ]; then wait $turn_pid 2>/dev/null; fi
@@ -125,6 +152,7 @@ serve_surface() { # serve_surface <port>
   if ! ready "http://127.0.0.1:$port/health" "$pid"; then
     fail "serve-surface never answered"; kill -9 $pid 2>/dev/null; no_report "$log"; return
   fi
+  url="http://127.0.0.1:$port/health"
   body='{"model":"probe","messages":[{"role":"user","content":"hello"}]}'
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$port/v1/chat/completions" -X POST -H 'Content-Type: application/json' -d "$body")
   if [ "$code" = 401 ]; then note "no key rejected (401)"
@@ -149,9 +177,14 @@ serve_surface() { # serve_surface <port>
   if curl -s -m 3 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then note "hangup left the bind responsive"
   else fail "hangup mid-stream killed or wedged the bind"
   fi
-  if ! ms=$(term_exit $pid); then fail "serve-surface ignored SIGTERM for >5s"; kill -9 $pid 2>/dev/null
-  elif [ "$ms" -gt 5000 ]; then fail "serve-surface took ${ms}ms to exit after SIGTERM"
-  else note "serve-surface ok (exited ${ms}ms after SIGTERM)"
+  out=$(term_shutdown $pid "$url"); rc=$?
+  if [ $rc -eq 1 ]; then fail "serve-surface kept the bind accepting after SIGTERM (>5s)"; kill -9 $pid 2>/dev/null
+  elif [ $rc -eq 2 ]; then fail "serve-surface never left after SIGTERM (>20s)"; kill -9 $pid 2>/dev/null
+  else
+    bind=$(echo "$out" | cut -d' ' -f1); proc=$(echo "$out" | cut -d' ' -f2)
+    if [ "$bind" -gt 5000 ]; then fail "serve-surface took ${bind}ms to stop accepting after SIGTERM"
+    else note "serve-surface ok (bind refused ${bind}ms, process gone ${proc}ms after SIGTERM)"
+    fi
   fi
   wait $pid 2>/dev/null
   no_report "$log"
@@ -165,6 +198,7 @@ gateway_surface() { # gateway_surface <port>
   if ! ready "https://127.0.0.1:$port/health" "$pid"; then
     fail "gw-surface never answered"; kill -9 $pid 2>/dev/null; no_report "$log"; return
   fi
+  url="https://127.0.0.1:$port/health"
   curl -sk -m 5 "https://127.0.0.1:$port/pair.json" > "$HOME_DIR/gw.pair" 2>&1
   has "$HOME_DIR/gw.pair" '"code"' "pairing page"
   has "$HOME_DIR/gw.pair" '"fp"' "fingerprint on the pairing page"
@@ -176,9 +210,14 @@ gateway_surface() { # gateway_surface <port>
   if [ "$code" = 401 ]; then note "bridge without a device token rejected (401)"
   else fail "bridge without a device token accepted ($code)"
   fi
-  if ! ms=$(term_exit $pid); then fail "gw-surface ignored SIGTERM for >5s"; kill -9 $pid 2>/dev/null
-  elif [ "$ms" -gt 5000 ]; then fail "gw-surface took ${ms}ms to exit after SIGTERM"
-  else note "gw-surface ok (exited ${ms}ms after SIGTERM)"
+  out=$(term_shutdown $pid "$url"); rc=$?
+  if [ $rc -eq 1 ]; then fail "gw-surface kept the bind accepting after SIGTERM (>5s)"; kill -9 $pid 2>/dev/null
+  elif [ $rc -eq 2 ]; then fail "gw-surface never left after SIGTERM (>20s)"; kill -9 $pid 2>/dev/null
+  else
+    bind=$(echo "$out" | cut -d' ' -f1); proc=$(echo "$out" | cut -d' ' -f2)
+    if [ "$bind" -gt 5000 ]; then fail "gw-surface took ${bind}ms to stop accepting after SIGTERM"
+    else note "gw-surface ok (bind refused ${bind}ms, process gone ${proc}ms after SIGTERM)"
+    fi
   fi
   wait $pid 2>/dev/null
   no_report "$log"
@@ -248,7 +287,8 @@ fi
 server_probe gateway gateway "$GW_PORT" /health
 gateway_surface "$((GW_PORT + 1))"
 
-rm -rf "$HOME_DIR"
+ paths=$(ls "$HOME_DIR"/*.log 2>/dev/null | wc -l)   # count before the home is removed
+ rm -rf "$HOME_DIR"
 if [ -n "$stub_pid" ]; then kill -9 "$stub_pid" 2>/dev/null; fi
 if [ $fails -ne 0 ]; then echo "asan-product: $fails FAILED"; exit 1; fi
-echo "asan-product: all probes passed"
+echo "asan-product: all probes passed (runtime sanitizers clean: 0 reports across $paths walked paths)"
