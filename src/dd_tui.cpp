@@ -872,6 +872,28 @@ int main(int argc, char** argv) {
     std::string maze_url;                           // the server that answers mazemaker_recall
     // One file for every server, mode 0600, rewritten whole (dd/tools/mcp_schema_cache.cpp).
     const std::filesystem::path schema_cache_file = dd::tools::cache_path(home.cache());
+    // Boot is not instant on a live pod: every configured server is dialed, and the skills
+    // catalogue waits for the maze's first answer. The wait is bounded by that round-trip count,
+    // so its length is a property of the maze, not of the deck: measured 4.58s from exec to the
+    // first frame when the maze answers boot with a full recall payload (strace: ~3.8s of MCP
+    // traffic at ~200ms a round trip), 0.78s cold with the schema cache absent, 0.2s with the pod
+    // down. Whatever its length, it used to be silent — a blank terminal was indistinguishable
+    // from a hung process. Boot reports on the screen it still owns: one line, rewritten in place,
+    // cleared before the deck takes the terminal. A pipe keeps its contract: progress is a
+    // terminal's thing, not something to write into a stream someone parses.
+    auto boot_progress = [&](const std::string& step) {
+        if (!interactive) return;
+        const std::string line = "\x1b[2K\rariadne " + step;
+        std::fwrite(line.data(), 1, line.size(), stdout);
+        std::fflush(stdout);
+    };
+    auto boot_clear = [&] {
+        if (!interactive) return;
+        const std::string line = "\x1b[2K\r";
+        std::fwrite(line.data(), 1, line.size(), stdout);
+        std::fflush(stdout);
+    };
+    boot_progress("discovering servers");
     if (const Json* srvs = cfg.get_map("mcp_servers"); srvs && srvs->type == Json::Obj) {
         for (const auto& [srvname, sroot] : srvs->obj) {
             if (!sroot || sroot->type != Json::Obj) continue;
@@ -958,6 +980,7 @@ int main(int argc, char** argv) {
                 }
                 sources.push_back(srvname + "  " + std::to_string(registered) +
                               (served ? " (cache)" : ""));   // cache: no tools/list was paid for
+                boot_progress("found " + sources.back());
                 {   // the server drives itself from the input line, unless the name is a built-in command
                     const std::string cmdname = "/" + srvname;
                     const bool taken = std::any_of(std::begin(kCommands), std::end(kCommands), [&](const char* c) { return cmdname == c; });
@@ -1108,6 +1131,7 @@ int main(int argc, char** argv) {
     if (skill_cat) {
         start_refresher(skill_cat);
         skill_cat->wait_ready(std::chrono::seconds(4));
+        boot_progress("skills ready");
     }
     if (memory_cat) start_refresher(memory_cat);
     std::unique_ptr<dd::learn::LearnService> learner;
@@ -1397,6 +1421,7 @@ int main(int argc, char** argv) {
     // ---- interactive: keys + frames on main, agent.run on a worker ----
     const char* mouse_env = std::getenv("DD_TUI_MOUSE");
     const bool mouse = !(mouse_env && std::strcmp(mouse_env, "0") == 0);
+    boot_clear();   // the boot line is the ordinary screen's; the alt-screen starts with nothing left over
     const int saved_err = term::hide_stderr(home.logs().string());
     if (!term::enter(mouse)) {
         term::show_stderr(saved_err);
