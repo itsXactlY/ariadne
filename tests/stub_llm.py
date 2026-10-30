@@ -14,7 +14,7 @@ will not let go while a turn is in flight) visible rather than hidden behind tra
 """
 import json
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = "stub-model"
 
@@ -80,4 +80,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18777
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    # Threading, not single-threaded: protocol_version HTTP/1.1 means a streamed response ends at
+    # [DONE] while the handler stays in the socket waiting for the next request, exactly as a real
+    # llama-server does. A single-threaded stub would then refuse the turn after it and the probe
+    # would measure the stub's queue instead of the product's busy_ release.
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

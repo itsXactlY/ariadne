@@ -22,12 +22,14 @@ LOG_DIR=/tmp/ariadne-runtime-probe
 BASE_URL=${BASE_URL:-}
 PORT=${PROBE_PORT:-18998}
 PUB_PORT=${PROBE_PUB_PORT:-18997}
-# The probe never leans on whatever the operator happens to be running. An unset DD_MAZE_URL
-# falls to :8080, so a probe turn spends its budget recalling from the live server and writes
-# the probe's tape into a maze that is not the probe's — slow, and measuring the wrong system.
-export DD_MAZE_URL=${DD_MAZE_URL:-http://127.0.0.1:9}
-GW_PORT=${PROBE_GW_PORT:-18887}
+# The probe never leans on whatever the operator happens to be running. The pod an ariadne
+# recalls from is named in the home's config.yaml (mcp_servers.mazemaker.url), not in the
+# environment: DD_MAZE_URL is read by nothing in the binary, so exporting it neutralizes
+# nothing and a probe turn spent its whole knowledge.deep_ms budget recalling from the live
+# pod — slow, and measuring the operator's system while claiming to measure the stub's. The
+# probe rewrites the home it made instead; see the init gate below.
 STUB_PORT=${PROBE_STUB_PORT:-18784}
+GW_PORT=${PROBE_GW_PORT:-18887}
 fails=0
 pids=""
 
@@ -132,6 +134,18 @@ if [ -f "$HOME_DIR/config.yaml" ]; then note "config.yaml written ok"
 else fail "--init wrote no config.yaml"
 fi
 
+# Point the home's maze at a dead port. Left as shipped it names the live pod, so a probe turn
+# waits knowledge.deep_ms for a recall that has nothing to do with the stub, and its remembers
+# land in the operator's maze. A dead port also walks the degraded path — the tape must still
+# work when the pod is not answering — and it makes the timing gates below measure the wire.
+if [ -f "$HOME_DIR/config.yaml" ]; then
+  sed -i 's#url: http://127.0.0.1:8765/mcp#url: http://127.0.0.1:9/mcp#' "$HOME_DIR/config.yaml"
+  if grep -q 'url: http://127.0.0.1:9/mcp' "$HOME_DIR/config.yaml"
+  then note "the home's maze points at a dead port: the probe measures the stub, not the pod"
+  else fail "the probe's home still points at a live pod, so its turns lean on the operator's maze"
+  fi
+fi
+
 # A named config outside the home is honoured without the agent running (--devices reads the
 # device store, so it needs no endpoint), and the home it names is not rewritten by it.
 mkdir -p /tmp/ariadne-runtime-other
@@ -172,6 +186,28 @@ if [ -n "$BASE_URL" ]; then
     -d '{"model":"probe","stream":true,"messages":[{"role":"user","content":"hello"}]}' > "$LOG_DIR/serve.sse" 2>&1
   if grep -q 'data:' "$LOG_DIR/serve.sse"; then note "loopback SSE streamed chunks ok"
   else fail "loopback SSE produced no data: lines"; head -3 "$LOG_DIR/serve.sse" | sed 's/^/    /'
+  fi
+  # The stub speaks HTTP/1.1 and holds the socket after `data: [DONE]`, exactly like llama-server
+  # waiting for the next request. So a turn that ends at its terminator comes back in milliseconds,
+  # and one that ends at the stall clock comes back in seconds — status alone cannot tell them
+  # apart, and a busy_ held by the stalled socket answers the next request with 409. Both halves
+  # are gated: wall time for the stream, status for the turn after it.
+  t0=$(date +%s%N)
+  curl -s -N -m 30 "http://127.0.0.1:$PORT/v1/chat/completions" -X POST -H 'Content-Type: application/json' \
+    -d '{"model":"probe","stream":true,"messages":[{"role":"user","content":"hello again"}]}' > "$LOG_DIR/serve.sse2" 2>&1
+  sse_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+  if [ "$sse_ms" -lt 500 ] && grep -q '\[DONE\]' "$LOG_DIR/serve.sse2"; then
+    note "streamed turn ended at its terminator in ${sse_ms}ms ok"
+  elif grep -q '\[DONE\]' "$LOG_DIR/serve.sse2"; then
+    fail "streamed turn took ${sse_ms}ms after [DONE]: the reader held the socket past the terminator"
+  else fail "second streamed turn never reached [DONE]"
+  fi
+  second=$(curl -s -m 30 -o "$LOG_DIR/serve.turn2" -w '%{http_code}' \
+    "http://127.0.0.1:$PORT/v1/chat/completions" -X POST -H 'Content-Type: application/json' \
+    -d '{"model":"probe","messages":[{"role":"user","content":"second turn"}]}')
+  if [ "$second" = 200 ] && grep -q '"content"' "$LOG_DIR/serve.turn2"; then note "turn after a streamed one accepted ok"
+  elif [ "$second" = 409 ]; then fail "turn after a streamed one refused 409: busy_ never released"
+  else fail "turn after a streamed one returned $second"
   fi
   # The CLI turn is the path an empty DD_BASE_URL used to hijack: with an endpoint it must run
   # and produce content, with none it must refuse (checked above, in the home section).
