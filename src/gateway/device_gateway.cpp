@@ -165,6 +165,20 @@ Reply DeviceGateway::command(const std::string& body, const std::string& bearer,
     }
 
     const std::string cmd = str_of(core::json_get(inner, "cmd"));
+    // Identify the caller before reading the request for anything that is not explicitly
+    // open. `status`/`health` answer anyone (the hermes-crypto compat liveness call), and a
+    // session handshake authenticates through its proof, so both are answered below.
+    // Everything else -- a tool, a session, a read of state -- must not answer a *shape*
+    // question to a caller with no device: until this gate a tokenless POST learned "No 'cmd'
+    // field" and thus the protocol's shape from outside the trust boundary. Now an
+    // unauthenticated request learns one thing only: Unauthorized.
+    const bool open_cmd = cmd == "status" || cmd == "health";
+    if (!open_cmd && cmd != "session" && !sess) {
+        if (via_relay)
+            return reply(401, jerr("Unauthorized: through the relay every command rides an e2e session", "e2e_required"));
+        if (!devices_.by_token(bearer))
+            return reply(401, jerr("Unauthorized: this command requires a gateway token"));
+    }
     if (cmd.empty()) return reply(400, jerr("No 'cmd' field"));
 
     if (cmd == "status" || cmd == "health") {   // open, as on hermes-crypto: liveness for anyone

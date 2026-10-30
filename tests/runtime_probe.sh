@@ -248,6 +248,19 @@ if [ "$(code https://127.0.0.1:$GW_PORT/command -X POST -H 'Content-Type: applic
   note "gateway refuses an unpaired /command ok"
 else fail "gateway answered /command with no device token"
 fi
+# Identity before shape. A body with no cmd at all used to be answered as a malformed request
+# (400 "No 'cmd' field"), which told anyone sitting on the port what the protocol looks like
+# before they had proven who they are. The refusal must be about the caller, not the body.
+if [ "$(code https://127.0.0.1:$GW_PORT/command -X POST -H 'Content-Type: application/json' -d '{"tool":"read_file","args":{}}')" = 401 ]; then
+  note "a tokenless /command with no cmd is refused as unauthorized ok"
+else fail "a tokenless /command answered a shape question -- the protocol reads from outside the trust boundary"
+fi
+# The identity-first rule must not close what is deliberately open: /command status is the
+# hermes-crypto liveness call and answers anyone.
+if [ "$(code https://127.0.0.1:$GW_PORT/command -X POST -H 'Content-Type: application/json' -d '{"cmd":"status"}')" = 200 ]; then
+  note "tokenless /command status stays open ok"
+else fail "the identity-first gate closed the open status command"
+fi
 if ms=$(term_exit "$pid"); then note "gateway let go in ${ms}ms ok"
 else fail "gateway ignored SIGTERM for >5s"; kill -9 "$pid" 2>/dev/null
 fi
