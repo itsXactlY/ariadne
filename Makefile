@@ -105,6 +105,11 @@ $(BUILD)/dd_snap_cell_tests: include/dd/core/snap_cell.hpp tests/core_snap_cell_
 $(BUILD)/dd_park_tests: include/dd/core/park.hpp tests/core_park_test.cpp
 	$(CXX) $(CXXFLAGS) tests/core_park_test.cpp -pthread -o $(BUILD)/dd_park_tests
 
+# The signal-to-exit-code contract at the process boundary: a supervisor's SIGTERM must leave
+# as 0, or systemd calls a deliberate stop a failure and respawns the gateway.
+$(BUILD)/dd_exit_status_tests: include/dd/core/exit_status.hpp tests/core_exit_status_test.cpp
+	$(CXX) $(CXXFLAGS) tests/core_exit_status_test.cpp -o $(BUILD)/dd_exit_status_tests
+
 # The ring's whole claim is that racing threads hand a payload over once each. That is a
 # data race to prove, so the target the suite runs is not the only one: the TSan build
 # below is what falsifies it. `make tsan` builds and runs it.
@@ -464,6 +469,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_tool_limits_tests \
   $(BUILD)/dd_env_passthrough_tests \
   $(BUILD)/dd_env_tests \
+  $(BUILD)/dd_exit_status_tests \
   $(BUILD)/dd_backend_helpers_tests \
   $(BUILD)/dd_audio_container_tests \
   $(BUILD)/dd_sha1_tests \

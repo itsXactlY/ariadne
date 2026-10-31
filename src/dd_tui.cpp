@@ -31,6 +31,7 @@
 #include "dd/context/recall.hpp"
 #include "dd/core/config.hpp"
 #include "dd/core/env.hpp"
+#include "dd/core/exit_status.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
@@ -469,7 +470,7 @@ static int run_serve(const std::string& addr, const std::string& key, dd::agent:
     server.serve(g_sig);
     dd::tools::shell_kill_all();
     const int sig = g_sig.load();
-    return sig ? 128 + sig : 0;
+    return sig ? dd::core::exit_status_for(sig) : 0;   // teardown done: a supervisor's SIGTERM is a clean stop
 }
 
 // The device gateway's tool scope. A device paired without `tools` gets the agent's answers
@@ -568,7 +569,7 @@ static int run_gateway(const std::string& addr, const ddcore::Config& cfg, const
     dd::tools::shell_kill_all();
     dd::gateway::free_server_ctx(tls);
     const int sig = g_sig.load();
-    return sig ? 128 + sig : 0;
+    return sig ? dd::core::exit_status_for(sig) : 0;   // relay joined, children killed, ctx freed: a clean stop
 }
 
 int main(int argc, char** argv) {
@@ -1414,7 +1415,7 @@ int main(int argc, char** argv) {
             }
         }
         dd::tools::shell_kill_all();
-        if (const int sig = g_sig.load()) return 128 + sig;
+        if (const int sig = g_sig.load()) return dd::core::exit_status_for(sig);
         return failed ? 1 : 0;
     }
 
@@ -1976,8 +1977,10 @@ int main(int argc, char** argv) {
     }
     const int exit_sig = g_sig.load();
     dd::tools::shell_kill_all();
+    // A teardown that could not finish keeps a nonzero code whatever the signal was: exit 0 claims an
+    // orderly stop, and a thread still holding a live call is not one.
     if (busy()) std::_Exit(exit_sig ? 128 + exit_sig : 0);   // a call that would not stop still holds a thread
     if (worker.joinable()) worker.join();
     if (cmd_thread.joinable()) cmd_thread.join();
-    return exit_sig ? 128 + exit_sig : 0;
+    return exit_sig ? dd::core::exit_status_for(exit_sig) : 0;
 }
