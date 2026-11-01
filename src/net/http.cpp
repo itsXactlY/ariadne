@@ -33,8 +33,25 @@ int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     return flag && flag->load(std::memory_order_relaxed) ? 1 : 0;
 }
 
-Response perform(const std::string& url, const std::string* body, long timeout_ms, const std::atomic<bool>* cancel,
-                 size_t max_bytes) {
+// A stream's sink: bytes go out as they arrive. 0 stops the transfer, which libcurl reports
+// as CURLE_WRITE_ERROR — for a reader that saw enough, that is the end, not a failure.
+struct StreamSink {
+    const std::function<bool(std::string_view)>& on;
+    bool stop = false;
+};
+
+std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
+    auto* s = static_cast<StreamSink*>(ud);
+    if (s->stop) return 0;
+    if (!s->on(std::string_view(p, n))) {
+        s->stop = true;
+        return 0;
+    }
+    return n;
+}
+
+Response perform(const std::string& url, const std::string* body, long timeout_ms,
+                 const std::atomic<bool>* cancel, size_t max_bytes, StreamSink* stream = nullptr) {
     Response r;
     if (!dd::tools::is_safe_url(url)) {
         r.error = "url rejected: " + url;
@@ -48,9 +65,18 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
     Sink out{&r.body, max_bytes};
     struct curl_slist* hdrs = nullptr;
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, timeout_ms);
+    if (stream) {
+        // A stream is never buffered and never bounded by a wall clock: the transfer is
+        // abandoned only when it produces nothing for `timeout_ms`, which is a dead server.
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, stream_sink);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, stream);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, std::max(1L, timeout_ms / 1000));
+    } else {
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, timeout_ms);
+    }
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, std::min(timeout_ms, 3000L));
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
@@ -73,6 +99,9 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
     if (rc == CURLE_ABORTED_BY_CALLBACK) {
         r.cancelled = true;
         r.error = "cancelled";
+    } else if (rc == CURLE_WRITE_ERROR && stream && stream->stop) {
+        // The reader asked for the end mid-stream. The server answered fine; nothing is wrong.
+        r.ended_early = true;
     } else if (rc == CURLE_WRITE_ERROR && out.over) {
         r.error = "response over " + std::to_string(max_bytes) + " bytes";
     } else if (rc != CURLE_OK) {
@@ -92,6 +121,15 @@ Response get(const std::string& url, long timeout_ms, size_t max_bytes) {
 Response post(const std::string& url, const std::string& json_body, long timeout_ms, const std::atomic<bool>* cancel,
               size_t max_bytes) {
     return perform(url, &json_body, timeout_ms, cancel, max_bytes);
+}
+
+Response post_stream(const std::string& url, const std::string& json_body, long timeout_ms,
+                     const std::atomic<bool>* cancel, const std::function<bool(std::string_view)>& on_chunk) {
+    StreamSink stream{on_chunk};
+    // max_bytes 0: nothing is buffered, so no body ceiling applies.
+    Response r = perform(url, &json_body, timeout_ms, cancel, 0, &stream);
+    if (stream.stop && r.error.empty()) r.ended_early = true;
+    return r;
 }
 
 }  // namespace net

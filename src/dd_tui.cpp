@@ -46,6 +46,7 @@
 #include "dd/know/tripwire.hpp"
 #include "dd/learn/service.hpp"
 #include "dd/know/wiring.hpp"
+#include "dd/limbo/level.hpp"
 #include "dd/tools/fs_tools.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
@@ -258,6 +259,7 @@ static void usage(FILE* f) {
     std::fputs(
         "usage: ariadne [--home DIR | --config FILE | FILE] [-- message words...]\n"
         "       ariadne [--home DIR | --config FILE] --serve [HOST:]PORT   the agent as an OpenAI-compatible server\n"
+        "       ariadne [--home DIR] --limbo [HOST:]PORT   run the agent on its own inference engine: the limbo level\n"
         "       ariadne [--home DIR] --gateway [HOST:]PORT     the agent, its memory and model for paired phones (TLS)\n"
         "       ariadne [--home DIR] --pair [--name N] [--scopes LIST] [--host HOST:PORT] | --devices | --revoke ID\n"
         "       ariadne [--home DIR] --gateway-adopt DIR   take over a hermes-crypto gateway's identity and token\n"
@@ -275,10 +277,14 @@ static void usage(FILE* f) {
         "  --gateway ADDR  TLS on ADDR (PORT = 0.0.0.0:PORT) for paired devices: /command (session, pod, bridge,\n"
         "                  llm; AES-GCM inside TLS), /bridge/stream, and the agent's /v1 surface per device scope;\n"
         "                  gateway.relay_url dials out to a relay for phones away from the LAN\n"
+        "  --limbo ADDR    the limbo level on ADDR (PORT = 127.0.0.1:PORT): one front, the dwellers config.yaml\n"
+        "                  names (limbo.strata_exe, limbo.llama_server / limbo.llama_base_url), and the harness's\n"
+        "                  endpoint pointed at it — the harness answers itself instead of dialling out to a server\n"
         "  --pair          mint a device token and print its pairing code (scopes: chat,memory,tools,admin)\n"
         "  --devices       list paired devices    --revoke ID   end one\n"
         "\n"
-        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n",
+        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n"
+        "     DD_STRATA_EXE DD_LLAMA_SERVER DD_LIMBO_LLAMA_URL   the dwellers --limbo spawns or adopts\n",
         f);
 }
 
@@ -592,7 +598,7 @@ static int run_gateway(const std::string& addr, const ddcore::Config& cfg, const
 
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_DEFAULT);   // before any thread touches curl
-    std::string home_flag, config_flag, init_from, serve_addr, gateway_addr, gw_action, gw_arg;
+    std::string home_flag, config_flag, init_from, serve_addr, gateway_addr, limbo_addr, gw_action, gw_arg;
     dd::gateway::PairOptions pair_opt;
     bool init = false, init_rules = false;
     std::vector<std::string> msg_words;
@@ -620,6 +626,7 @@ int main(int argc, char** argv) {
         else if (a == "--rules") init_rules = true;
         else if (a == "--from") init_from = value("--from");
         else if (a == "--serve") serve_addr = value("--serve");
+        else if (a == "--limbo") limbo_addr = value("--limbo");
         else if (a == "--gateway") gateway_addr = value("--gateway");
         else if (a == "--pair") gw_action = "pair";
         else if (a == "--devices") gw_action = "devices";
@@ -745,8 +752,103 @@ int main(int argc, char** argv) {
     }
     int max_iterations = (mt > 0) ? (int)mt : 50;
 
-    if (base_url.empty()) { std::cerr << "no model.base_url and DD_BASE_URL unset\n"; return 2; }
+    if (base_url.empty()) { std::cerr << "no model.base_url and DD_BASE_URL unset\\n"; return 2; }
     dd::tools::admit_configured_url(base_url);   // the operator's model may sit on the LAN (a phone's does)
+
+    // The limbo level: the harness's own inference engine, in this process. --limbo is the
+    // declaration of intent, so when it is given the endpoint IS the level — a harness that
+    // dials out to someone else's server while owning its own dwellers is two engines pretending
+    // to be one. The level outlives main's scope by destructor: every return path ends it.
+    std::unique_ptr<dd::limbo::LimboLevel> limbo;
+    if (!limbo_addr.empty()) {
+        dd::limbo::LimboConfig lc;
+        lc.bind = "127.0.0.1";
+        lc.port = 0;
+        if (const auto colon = limbo_addr.rfind(':'); colon != std::string::npos) {
+            lc.bind = limbo_addr.substr(0, colon);
+            try { lc.port = std::stoi(limbo_addr.substr(colon + 1)); } catch (const std::exception&) {
+                std::cerr << "ariadne: --limbo '" << limbo_addr << "' has no numeric port\n"; return 2;
+            }
+        } else if (!limbo_addr.empty()) {
+            try { lc.port = std::stoi(limbo_addr); } catch (const std::exception&) {
+                std::cerr << "ariadne: --limbo '" << limbo_addr << "' is not a port\n"; return 2;
+            }
+        }
+        if (lc.port <= 0 || lc.port > 65535) { std::cerr << "ariadne: --limbo needs a port in 1..65535\n"; return 2; }
+        if (cfg.has("limbo.respawn_budget")) lc.respawn_budget = cfg.get_int("limbo.respawn_budget");
+
+        // A YAML list of strings becomes the dweller's argv, in order. Keys that name no list
+        // are no arguments, not a silently empty argv the engine would read as a bad flag.
+        auto list_of = [&cfg](const std::string& key) {
+            std::vector<std::string> out;
+            if (const ddcore::Json* l = cfg.get_list(key)) {
+                for (const auto& v : l->arr) if (v->type == ddcore::Json::Str) out.push_back(v->str);
+            }
+            return out;
+        };
+        const std::string log = cfg.get_string("limbo.log").empty()
+                                    ? (home.logs() / "limbo.log").string()
+                                    : cfg.get_string("limbo.log");
+        const std::string dweller_model = model.empty() ? "limbo" : model;
+        const int n_ctx = static_cast<int>(cfg.get_int("limbo.n_ctx"));
+        const int ready_s = static_cast<int>(cfg.get_int("limbo.ready_timeout_s"));
+        const int silence_s = static_cast<int>(cfg.get_int("limbo.silence_s"));
+
+        const std::string strata_exe = env_or("DD_STRATA_EXE", cfg.get_string("limbo.strata_exe"));
+        if (!strata_exe.empty()) {
+            dd::limbo::ShadeSpec s;
+            s.kind = dd::limbo::ShadeKind::Strata;
+            s.name = "strata";
+            s.model_id = dweller_model;
+            s.exe = strata_exe;
+            s.args = list_of("limbo.strata_args");
+            s.cwd = cfg.get_string("limbo.strata_cwd");
+            s.log = log;
+            s.n_ctx = n_ctx;
+            s.ready_timeout_s = ready_s;
+            s.silence_s = silence_s > 0 ? silence_s : 120;
+            lc.shades.push_back(std::move(s));
+        }
+        const std::string llama_exe = env_or("DD_LLAMA_SERVER", cfg.get_string("limbo.llama_server"));
+        const std::string llama_url = env_or("DD_LIMBO_LLAMA_URL", cfg.get_string("limbo.llama_base_url"));
+        if (!llama_exe.empty() || !llama_url.empty()) {
+            dd::limbo::ShadeSpec s;
+            s.kind = dd::limbo::ShadeKind::Llama;
+            s.name = "llama";
+            s.model_id = dweller_model;
+            s.exe = llama_exe;          // empty: adopted, not owned — this level never ends a server it did not spawn
+            s.args = list_of("limbo.llama_args");
+            s.cwd = cfg.get_string("limbo.llama_cwd");
+            s.log = log;
+            s.base_url = llama_url;
+            s.n_ctx = n_ctx;
+            s.ready_timeout_s = ready_s > 0 ? ready_s : 120;
+            s.silence_s = silence_s > 0 ? silence_s : 120;
+            lc.shades.push_back(std::move(s));
+        }
+        if (lc.shades.empty()) {
+            std::cerr << "ariadne: --limbo has no dweller to admit.\n"
+                      << "  set limbo.strata_exe (the packed-MoE engine) and/or limbo.llama_server\n"
+                      << "  (or limbo.llama_base_url to adopt a llama-server someone else started);\n"
+                      << "  DD_STRATA_EXE / DD_LLAMA_SERVER / DD_LIMBO_LLAMA_URL say the same thing.\n"
+                      << "  Nothing was started and the endpoint stayed " << base_url << ".\n";
+            return 2;
+        }
+        limbo = std::make_unique<dd::limbo::LimboLevel>(std::move(lc));
+        std::string started;
+        if (!limbo->start(started)) {
+            std::cerr << "ariadne: the limbo level could not come up: " << started << "\n";
+            limbo.reset();
+            return 2;
+        }
+        // A dweller that failed its load is said, and the level keeps serving with the rest.
+        // Swallowing it would make a missing engine look like a working one.
+        if (!started.empty()) std::cerr << "ariadne limbo: " << started;
+        base_url = "http://127.0.0.1:" + std::to_string(limbo->port()) + "/v1";
+        dd::tools::admit_configured_url(base_url);
+        std::fprintf(stderr, "ariadne limbo: %s:%d — %zu dweller(s) admitted, endpoint now %s\n",
+                     limbo->bind().c_str(), limbo->port(), limbo->minos().count(), base_url.c_str());
+    }
 
     const bool to_tty = isatty(STDOUT_FILENO);
     const bool serving = !serve_addr.empty() || !gateway_addr.empty();

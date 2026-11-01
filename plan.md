@@ -310,6 +310,10 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 - `env_passthrough` — which variables cross the shell boundary is a policy choice
 - `budget_config`, `usage_pricing`, `state_scrub` spend/pricing — spend is the operator's
 - `gateway`, `cron` — whole subsystems, not modules
+- the inference engine — **not this tree**. The standalone engine lives at
+  `/home/alca/projects/limbo/plan.md` (llama adaptive base + strata expert-streaming
+  machinery, its own build). The 14 untracked `limbo/` files here are parked, not the
+  target: the harness must not dial its own socket.
 - `delegation_output_schema`, `osv_package_parse` — no consumer in the shipping harness
 - remote-backend levers (`prompt_caching`, `prompt_cache_boundary`, `payload_tape`,
   `classification`, `backend_kind`, `retry` beyond transient) — no lever against this

@@ -5,3 +5,4 @@ learn/
 logs/
 state/
 bench/__pycache__/
+.claude/

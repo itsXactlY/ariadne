@@ -66,6 +66,11 @@ SERVE := src/net/server.cpp src/serve/chat_api.cpp
 GWDEV := src/gateway/crypto.cpp src/gateway/identity.cpp src/gateway/devices.cpp src/gateway/device_gateway.cpp src/gateway/relay.cpp src/gateway/cli.cpp
 HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
 CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
+# The limbo level: the harness's own inference engine. One front, the dwellers it admits, and
+# no Python holding the pipe open. server.cpp/http.cpp ride along because the level speaks HTTP
+# on a socket and proxies a llama-server over curl.
+LIMBO := src/limbo/shade.cpp src/limbo/spawn.cpp src/limbo/charon.cpp src/limbo/shade_strata.cpp src/limbo/shade_llama.cpp \
+         src/limbo/minos.cpp src/limbo/level.cpp src/net/http.cpp src/net/server.cpp $(CORE) $(URLSAFE)
 MCPSCHEMA := src/tools/mcp_schema_cache.cpp $(SHA256)   # the staleness key is a sha256 of the config
 MCP := src/tools/mcp_client.cpp $(URLSAFE)
 DELEG := src/tools/delegation_output_schema.cpp
@@ -170,8 +175,8 @@ install: $(BUILD)/ariadne-install
 install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
+$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
 
 # The shipped binary itself, under ASan+UBSan. Every sanitizer target so far is a module
 # test: none of them ever runs ariadne's own startup, home resolution, argument parsing,
@@ -183,11 +188,11 @@ $(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $
 # process exit and keeps the port. How long the PROCESS takes to leave is a sanitizer cost, not a gateway defect:
 # under host memory pressure it is LeakSanitizer scanning shadow memory at exit (7.8s measured, 2503 leaks at 2.42
 # MB of shadow, ~13.2 GB RSS), which a single ceiling once reported as "ignored SIGTERM".
-$(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+$(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	# -O1 with sanitizers makes GCC trace through libstdc++'s <regex> NFA and report a
 	# maybe-uninitialized inside std::function: a compiler false positive in the standard library,
 	# not a dd bug. The TSan targets already suppress the same diagnostic.
-	$(CXX) $(CXXFLAGS) -fopenmp -O1 -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne_asan
+	$(CXX) $(CXXFLAGS) -fopenmp -O1 -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne_asan
 
 # Walks that binary through the paths a module test never touches. Needs a backend for
 # the turn and the serve bind; without one those two probes skip and say so.
@@ -554,6 +559,9 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_turn_context_tests \
   $(BUILD)/dd_usage_pricing_tests
 
+# The race-detector list is a variable, not a hardcoded target: a level added by an mk fragment
+# adds its own racing binaries here, and `make tsan` runs whatever the tree actually contains.
+TSAN_BINS := $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_mark_set_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan $(BUILD)/dd_devices_race_tsan $(BUILD)/dd_device_gateway_tsan $(BUILD)/dd_relay_policy_tsan
 -include $(wildcard mk/*.mk)
 
 # Every hand-off in the tree is a claim about racing threads, and the tree has no lock left to hide
@@ -563,10 +571,8 @@ TEST_BINS := $(BUILD)/dd_tests \
 # scrolls past. The gateway suites belong here as much as the ring does: the nonce marks, the
 # device vector and the status snapshot are written from worker threads, and a plain unsanitized
 # binary run under this target would prove nothing.
-tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_mark_set_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan \
-      $(BUILD)/dd_devices_race_tsan $(BUILD)/dd_device_gateway_tsan $(BUILD)/dd_relay_policy_tsan
-	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_mark_set_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan \
-		$(BUILD)/dd_devices_race_tsan $(BUILD)/dd_device_gateway_tsan $(BUILD)/dd_relay_policy_tsan; do \
+tsan: $(TSAN_BINS)
+	@fail=0; for t in $(TSAN_BINS); do \
 		echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp TSAN_OPTIONS=halt_on_error=1 ./$$t || { echo "TSAN FAILED: $$t"; fail=$$((fail+1)); }; done; \
 		echo "$$fail tsan binary(ies) failed"; [ $$fail -eq 0 ]
 
