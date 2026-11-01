@@ -48,6 +48,7 @@
 #include "dd/know/wiring.hpp"
 #include "dd/limbo/level.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/interrupt.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
 #include "dd/tools/skill_provenance.hpp"
@@ -199,13 +200,11 @@ static std::string h_read_file(const Json& args) {
 static std::string h_write_file(const Json& args) { return dd::tools::fs_write(args); }
 static std::string h_list_dir(const Json& args) { return dd::tools::fs_list(args, g_fs_limits); }
 
-// the agent's interrupt flag: Esc, and a SIGINT/SIGTERM/SIGHUP, reach a running shell command through it
-static std::atomic<std::atomic<bool>*> g_cancel{nullptr};
 static std::atomic<int> g_sig{0};
 
 static void on_term(int sig) {   // async-signal-safe: two atomic stores, the loops do the rest
     g_sig.store(sig, std::memory_order_relaxed);
-    if (std::atomic<bool>* c = g_cancel.load(std::memory_order_relaxed)) c->store(true, std::memory_order_relaxed);
+    dd::tools::interrupt::signal();   // the flag the running call watches, whoever owns it
 }
 
 static void install_term_handlers() {   // no SA_RESTART: a blocking poll/read wakes and sees g_sig
@@ -226,7 +225,7 @@ static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     if (bg && bg->type == Json::Bool && bg->b) return dd::tools::with_job_notices(dd::tools::start_job(c->str, policy));
     dd::tools::ShellOptions opt;
     opt.max_output = g_shell_max_output;
-    opt.cancel = g_cancel.load(std::memory_order_relaxed);
+    opt.cancel = dd::tools::interrupt::current();
     return dd::tools::with_job_notices(dd::tools::run_shell(c->str, opt, policy));
 }
 
@@ -242,7 +241,7 @@ static std::string job_tool(const Json& args) {
     };
     dd::tools::JobOptions opt;
     opt.max_output = g_shell_max_output;
-    opt.cancel = g_cancel.load(std::memory_order_relaxed);
+    opt.cancel = dd::tools::interrupt::current();
     return dd::tools::with_job_notices(dd::tools::job_call(str("action"), num("job"), num("wait_s"), opt));
 }
 
@@ -429,10 +428,10 @@ struct AgentTurns : dd::serve::TurnRunner {
     dd::agent::Agent& agent;
     explicit AgentTurns(dd::agent::Agent& a) : agent(a) {}
     std::string run(const std::string& msg) override {
-        agent.interrupt_requested = false;
+        dd::tools::interrupt::clear();
         return agent.run(msg);
     }
-    void interrupt() override { agent.interrupt_requested = true; }
+    void interrupt() override { dd::tools::interrupt::signal(); }
 };
 
 bool loopback(const std::string& host) {
@@ -490,7 +489,7 @@ static int run_serve(const std::string& addr, const std::string& key, dd::agent:
     for (const auto& e : boot_errors) std::cerr << "ariadne: " << e << "\n";
     std::cerr << "ariadne serve: http://" << host << ":" << server.port() << " · " << model << " · " << tool_count
               << " tools" << (key.empty() ? "" : " · bearer token required") << "\n";
-    install_term_handlers();   // a signal interrupts a running turn through g_cancel and ends the accept loop
+    install_term_handlers();   // a signal interrupts a running turn through tools::interrupt and ends the accept loop
     server.serve(g_sig);
     dd::tools::shell_kill_all();
     const int sig = g_sig.load();
@@ -1318,12 +1317,12 @@ int main(int argc, char** argv) {
 
     // ---- the transport ----
     dd::agent::Agent agent;
-    g_cancel.store(&agent.interrupt_requested);
+    dd::tools::interrupt::bind(&agent.interrupt_requested);   // the flag Esc and a signal flip
     dd::agent::HttpLLM llm;
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;
-    llm.cancel = &agent.interrupt_requested;
+    llm.cancel = dd::tools::interrupt::current();   // the transport stops on the same flag
     // Sends per call: a restarting server is answered by the second send. 1 turns the
     // retry off, which is what a wire that must fail on the first try needs.
     if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
@@ -1377,7 +1376,7 @@ int main(int argc, char** argv) {
     dd::context::TapeEngine engine(ec, system_prompt, ep, maze, soak ? &soaker : nullptr, deck, llm,
                                    work + "/spill", &router);
     router.set_ratio([&engine] { return engine.ratio(); });   // notes are counted in the server's tokens
-    router.cancelled = [&agent] { return agent.interrupt_requested.load(); };
+    router.cancelled = [] { return dd::tools::interrupt::is_interrupted(); };
     router.on_log = [path = (home.logs() / "knowledge.jsonl").string()](const std::string& line) {   // what was offered, and what was opened
         std::ofstream(path, std::ios::app) << line << "\n";
     };
@@ -1542,7 +1541,7 @@ int main(int argc, char** argv) {
             scene.user(msg);
             scene.turn_begin();
             flush_inline();
-            agent.interrupt_requested = false;
+            dd::tools::interrupt::clear();
             try { agent.run(msg); }
             catch (const std::exception& ex) {
                 if (!g_sig.load()) scene.error(std::string("agent: ") + ex.what());
@@ -1626,7 +1625,7 @@ int main(int argc, char** argv) {
 
     auto interrupt = [&] {
         if (!running.load()) return;
-        if (!agent.interrupt_requested.exchange(true)) scene.note("interrupting…");
+        if (!dd::tools::interrupt::signal()) scene.note("interrupting…");
     };
 
     auto start_turn = [&](const std::string& prompt) {
@@ -1634,16 +1633,16 @@ int main(int argc, char** argv) {
         scene.user(prompt);
         scene.turn_begin();
         scene.scroll_end();
-        agent.interrupt_requested = false;
+        dd::tools::interrupt::clear();
         publish_plan();   // fresh ledger for this turn; clears a stale one
         running = true;
         worker = std::thread([&, prompt] {
             try {
                 agent.run(prompt);
             } catch (const std::exception& ex) {
-                if (!agent.interrupt_requested.load()) scene.error(ex.what());
+                if (!dd::tools::interrupt::is_interrupted()) scene.error(ex.what());
             }
-            if (agent.interrupt_requested.load()) scene.note("⏹ interrupted");
+            if (dd::tools::interrupt::is_interrupted()) scene.note("⏹ interrupted");
             scene.turn_end();
             running = false;
         });
@@ -2106,7 +2105,7 @@ int main(int argc, char** argv) {
     // Quit: the turn stops at its next step (and a running command's process group with it), a command gets the same
     // two seconds; whatever still holds on is killed, then the process leaves.
     auto busy = [&] { return running.load() || cmd_busy.load(); };
-    agent.interrupt_requested = true;
+    dd::tools::interrupt::signal();
     for (int i = 0; i < 40 && busy(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (busy()) {
         dd::tools::shell_kill_all();

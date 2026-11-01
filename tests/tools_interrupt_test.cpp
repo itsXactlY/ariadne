@@ -18,12 +18,31 @@ static int failures = 0;
     } while (0)
 
 int main() {
-    // --- interrupt ---
-    CHECK(!is_interrupted(), "default not interrupted");
-    set_interrupt(true);
-    CHECK(is_interrupted(), "set -> interrupted");
-    set_interrupt(false);
-    CHECK(!is_interrupted(), "clear -> not interrupted");
+    // --- interrupt: the flag belongs to the call, the module holds the hand-off ---
+    CHECK(!interrupt::is_interrupted(), "nothing bound -> not interrupted");
+    CHECK(interrupt::current() == nullptr, "nothing bound -> no flag to flip");
+
+    std::atomic<bool> first{false}, second{false};
+    interrupt::bind(&first);
+    CHECK(interrupt::current() == &first, "the bound flag is the one handed back");
+    CHECK(!interrupt::signal(), "the first signal reports the flag was not set");
+    CHECK(interrupt::is_interrupted(), "signal -> interrupted");
+    CHECK(first.load(), "signal wrote the caller's own flag, not a module bool");
+    CHECK(interrupt::signal(), "a second signal reports it was already set");
+    interrupt::clear();
+    CHECK(!interrupt::is_interrupted(), "clear -> not interrupted");
+    CHECK(!first.load(), "clear cleared the caller's flag");
+
+    // The invariant the live path needs: Esc stops the call that is running and must not
+    // cancel the next one. A global flag would fail exactly this check.
+    interrupt::bind(&first);
+    interrupt::signal();
+    interrupt::bind(&second);
+    CHECK(!interrupt::is_interrupted(), "a new call is not cancelled by the previous call's Esc");
+    CHECK(first.load(), "the previous call keeps what its Esc wrote");
+    interrupt::bind(nullptr);
+    CHECK(!interrupt::signal(), "Esc with nothing running flips nothing");
+    CHECK(!second.load(), "a signal with no bound flag flips nothing");
 
     // --- skill_provenance ---
     CHECK(get_current_write_origin() == "foreground", "default foreground");

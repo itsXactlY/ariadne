@@ -111,13 +111,31 @@ skipped calls). Constraint found by reading, not assumed: the module models a
 running command a **per-call** `std::atomic<bool>*` through `g_cancel`. The fold
 must keep the per-call flag, or Esc stops one command and cancels the next one
 too.
-Rebased 2026-10-29 against `84ab649`: the live cancel path is `src/dd_tui.cpp:200` (`g_cancel` holds an atomic pointer to the **current call's** flag), `:200` (signal handler), `:219` (`opt.cancel`), `:973` (`g_cancel.store(&agent.interrupt_requested)`). `dd::tools::interrupt` still has no call site outside its own TU (`src/tools/interrupt.cpp:2`). **The fold is open — this wave is not landed.**
+**Landed 2026-11-01.** The live cancel path in `src/dd_tui.cpp` now goes through the module: `CallFlags`
+is `tools::Interrupt` (the per-call half stays in `g_cancel`, the global half is the module's),
+`install_term_handlers()` installs `tools::install_signal_handlers()`, `interrupt_for_current_call()`
+raises the **module's** flag too so `run_terminal` sees one interrupt from either door, and
+`run_turn()` raises it with `tools::interrupt_current_call()`. What the fold made visible: the module's
+own `install_signal_handlers()` had never run, so an interrupt arriving as a plain signal set a flag
+nothing read — with a real handler installed the note is printed on the signal thread, before the
+blocked read returns, instead of after it (`interrupt_note_written`). The module still has no caller
+other than these, and the per-call pointer is still what the running command holds.
 
 Invariant that must survive the move: **every tool call the loop skipped gets a
 result message**. That is what keeps the tape legal. Proof: existing tests stay
 green plus a UI test asserting a cancelled batch has a result for every call id.
 Behavior must be byte-identical before and after — this wave is a refactor, and
 if the reply JSON changes it is not a refactor.
+
+Measured, not assumed: `tests/tools_interrupt_test.cpp` is now 17 checks, and the batch invariant is
+proven as *bytes* rather than as a count — the interrupted `run_terminal` returns its cancelled
+envelope and the skipped sibling returns the envelope the dispatcher synthesises, and the two dumps
+are asserted equal apart from the `id` field that legitimately differs. `tests/interrupt_live_probe.py`
+drives the real binary on a real pty against a stub that issues a batch of two shell calls and sleeps
+6 s: Esc (byte `0x1b`) lands mid-call, the stream ends `interrupted`, and the second call's result
+comes back carrying `"cancelled"` and `"interrupted"` — a repaint cannot fake a message the run never
+produced. Both green. Full suite after the fold: **109 test binaries, 0 failed** (`make -j4 test`,
+2026-11-01), the same count as before the change.
 
 ## W4 — transient retry on the wire (reliability)
 
