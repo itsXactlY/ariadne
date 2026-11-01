@@ -97,7 +97,7 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
 typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1400`) and `Agent::steer_hook`
- (`src/dd_tui.cpp:1479`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+ (`src/dd_tui.cpp:1507-1509`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:380`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
@@ -130,7 +130,12 @@ and every refusal is a number a test reads: **44 refused of 300** events posted 
 router's **6 of 70** opens (`opened_lost`, each refused open still emitted to the sink), the soak's
 **44 of 300** (`unledgered`, the 256 held slots still claimable), and **0** at all three on a live turn
 with tools firing and a drained soak. `src` and `include` now hold no mutex, no `lock_guard`, no
-`condition_variable`, and no queue (`make tsan`: no race reported).
+`condition_variable`, and no queue. `make tsan` builds and runs nine instrumented binaries —
+`slot_ring`, `mark_set`, `ui`, `learn_credit`, `context`, `serve_concurrency`, `devices_race`,
+`device_gateway`, `relay_policy` — under `TSAN_OPTIONS=halt_on_error=1`, and exits non-zero if
+any one reports a race or a leak. The gateway's replay and kill marks are atomic words in
+`dd::core::MarkSet` (`include/dd/core/mark_set.hpp:76-82`), not a map behind a mutex: a
+mutex had come back there when replay was added, and this seam deleted it again.
 
 ### Sub-agents
  None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:103`, applied at `:359`) caps
@@ -173,7 +178,7 @@ that second half — a saved call leaves no trace in the log.
 
 The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
 becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
-nothing (`src/dd_tui.cpp:1023`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:354`). The hand-off seam is the same
+nothing (`src/dd_tui.cpp:1064`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:253`). The hand-off seam is the same
 object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
 
 ```mermaid

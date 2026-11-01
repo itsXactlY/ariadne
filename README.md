@@ -80,7 +80,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
   guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
   before acting, never guess a path or a name, live state is a command and memory is history), a
   catalogue map, and `brief.md` if there is one. A pod's own protocol text is not pasted: it is
-  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:890`), which reads the
+  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:870`), which reads the
   server's instructions at `src/tools/mcp_client.cpp:304` and can be set to `harness`,
   `verbatim` or `off`.
 - **Context tape:** requests reuse a stable prompt prefix within an epoch; rebases are explicit and watermark-driven.
@@ -158,6 +158,7 @@ flowchart LR
 - **Never discard the live working group first.** When the tail must shrink, older complete tool groups yield before the newest group.
 - **Count every cut.** Tool output limits and context-window cuts report what was omitted and how to continue.
 - **Memory and live state are different things.** Commands describe the current machine; memory describes prior experience.
+- **No thread lock on the request path.** Gateway replay and kill marks are one atomic word per bucket (`include/dd/core/mark_set.hpp:76-82`): `dd::core::MarkSet` claims a slot with `fetch_add`, sweeps from a watermark instead of scanning the table, and rebases its minute offsets under a generation instead of growing without bound. Sweeping runs where the space is needed, never on a timer. The only locks the gateway still takes are `FileLock` flocks over the store files themselves — the device store (`src/gateway/devices.cpp:140`) and the pairing file (`src/gateway/devices.cpp:165`) — they guard a file against another process, not a request against a thread.
 
 The supplied live measurements on a Strata endpoint with Qwen3.8-Flash-Next IQ1_M showed 88% prompt-token reuse over 11 calls across three turns. In a forced-watermark test, the next epoch was prewarmed during the idle interval and its first call reused 99.1% of the prompt. These are environment-specific measurements, not universal performance guarantees.
 
@@ -256,12 +257,12 @@ A tool-enabled agent is a system with side effects. The boundary needs to be exp
 | Terminal | Executes commands with a denylist; **not a sandbox** |
 | MCP | Enabled servers are discovered live; input schemas are registered |
 | HTTP | URL safety checks run before clients connect |
- | Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
- | Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:45`) — an answer the caller already holds is never re-sent |
+| Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
+| Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:45`) — an answer the caller already holds is never re-sent |
 | Tool output | Bounded at production, with omitted bytes/lines accounted for |
 | Paths | Filesystem tools reject `..` path components |
- | Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol |
- | Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
+| Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
+| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
 | Learned skills | Provenance is tracked; model-edited skills are protected from blind draft overwrite |
 
 **Important:** a command denylist is not isolation. Do not expose the terminal tool to untrusted input or treat it as a security boundary. Use operating-system isolation and least privilege when running untrusted workloads.
