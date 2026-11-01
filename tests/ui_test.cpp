@@ -1500,6 +1500,42 @@ int main() {
         chk(o.ansi.find(o.kw) == std::string::npos, "a command that names no file says no language");
     }
 
+    {   // a shell call's command colours in the shell's grammar -- the operator's ask: echo, grep and the
+        // rest of a command line read as one muted `cmd="..."` string while the file it read lit up
+        const std::string yaml =
+            "languages:\n"
+            "  bash:\n    aliases: [sh]\n    keywords: [if, then, fi]\n    builtins: [echo, grep]\n"
+            "    line_comment: [\"#\"]\n    capital_is_type: false\n";
+        const std::string args = R"({"cmd":"echo hi && grep -n x notes.txt","intent":"find x"})";
+        auto card = [&](bool with_bash) {
+            Scene s{Theme{}};
+            if (with_bash) s.set_grammars(GrammarSet::from_yaml(yaml, "test"));
+            s.turn_begin();
+            s.tool_call("c1", "run_terminal", args);
+            s.tool_result("c1", R"({"exit":0,"stdout":"3:x\n"})");
+            s.turn_end();
+            return std::make_pair(s.drain_inline(100, true, true), s.theme());
+        };
+        // what a ```bash fence makes of `echo` and `grep`, against the scene's reconciled palette
+        GrammarSet same = GrammarSet::from_yaml(yaml, "test");
+        const auto [ansi, th] = card(true);
+        same.reconcile(th);
+        CodeCtx fx;
+        fx.set = &same;
+        highlight_row("```bash", th, fx);
+        std::string echo_sgr, grep_sgr;
+        for (const auto& sp : highlight_row("echo hi && grep -n x", th, fx)) {
+            if (sp.text == "echo") echo_sgr = sgr(sp.st, true) + "echo";
+            if (sp.text == "grep") grep_sgr = sgr(sp.st, true) + "grep";
+        }
+        chk(!echo_sgr.empty() && ansi.find(echo_sgr) != std::string::npos, "run_terminal: `echo` in the command colours as a shell builtin");
+        chk(!grep_sgr.empty() && ansi.find(grep_sgr) != std::string::npos, "run_terminal: `grep` in the command colours as a shell builtin");
+        chk(ansi.find("cmd=\"") == std::string::npos, "the command stands on its own rows, not inside cmd=\"...\"");
+        chk(ansi.find(sgr(Style{th.muted}, true) + "intent=\"find x\"") != std::string::npos, "the other arguments follow, muted");
+        const auto [plain, th2] = card(false);
+        chk(plain.find("cmd=\"echo hi") != std::string::npos, "no shell grammar loaded: the card shows cmd=\"...\" as before");
+    }
+
     {   // a block opened on one row runs on: a docstring's prose is string, a /* comment's body is comment
         const GrammarSet set = GrammarSet::from_yaml(
             "languages:\n"

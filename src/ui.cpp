@@ -213,6 +213,28 @@ std::string flat_args(const std::string& raw, int val_w) {
     return o;
 }
 
+// A shell call's command is code, not a value: run_terminal's `cmd` comes out of the key="v" row
+// so the card can paint it in the shell's own grammar (echo, grep, pipes, quotes, $VARS) instead
+// of one muted string. `rest` is every other argument, flattened as flat_args would. Empty when
+// the call carries no string `cmd` -- the card then shows flat_args as it always did.
+std::string shell_cmd(const std::string& raw, int val_w, std::string& rest) {
+    rest.clear();
+    bool repaired = false;
+    const core::Json j = core::json_parse_args(raw, repaired);
+    if (j.type != core::Json::Obj) return {};
+    const core::Json* c = core::json_get(j, "cmd");
+    if (!c || c->type != core::Json::Str || c->str.empty()) return {};
+    for (const auto& [k, v] : j.obj) {
+        if (k == "cmd" || !v) continue;
+        if (!rest.empty()) rest += "  ";
+        rest += k + "=";
+        if (v->type == core::Json::Str) rest += "\"" + clip(v->str, val_w) + "\"";
+        else rest += clip(core::json_dump(*v), val_w);
+    }
+    if (repaired) rest += rest.empty() ? "…cut" : "  …cut";
+    return clip(c->str, val_w);
+}
+
 // What a result actually carried. The counts come from the reply's own accounting
 // (tools/shell.cpp, tools/fs_tools.cpp), so a cut is reported by the tool that made
 // it. Inferring one from how much the card happened to render would report the
@@ -2009,8 +2031,24 @@ Canvas Scene::render(const Entry& e, int w) const {
         // then wrap: long args get their rows instead of one clipped line.
         const int arg_rows = verb_ == Verbosity::Minimal ? 2 : verbose ? 20 : 6;
         const int arg_w = verbose ? 240 : verb_ == Verbosity::Minimal ? 40 : 60;
-        auto alines = wrap(flat_args(e.text, arg_w), aw, arg_rows);
-        while (alines.size() > 1 && alines.front().empty()) alines.erase(alines.begin());
+        // A shell call shows its command on rows of its own, in the shell's grammar; the other
+        // arguments (intent, timeout...) follow muted. No bash grammar loaded, or no cmd: as before.
+        std::vector<std::string> alines;
+        size_t cmd_rows = 0;
+        const Grammar* const sh = e.name == "run_terminal" ? grammars_.find("bash") : nullptr;
+        if (sh) {
+            std::string rest;
+            if (const std::string cmd = shell_cmd(e.text, arg_w, rest); !cmd.empty()) {
+                alines = wrap(cmd, aw, arg_rows);
+                cmd_rows = alines.size();
+                if (!rest.empty())
+                    for (auto& l : wrap(rest, aw, verb_ == Verbosity::Minimal ? 1 : 2)) alines.push_back(std::move(l));
+            }
+        }
+        if (alines.empty()) {
+            alines = wrap(flat_args(e.text, arg_w), aw, arg_rows);
+            while (alines.size() > 1 && alines.front().empty()) alines.erase(alines.begin());
+        }
         bool err = false;
         ResultFacts f;
         std::vector<std::string> rlines;
@@ -2070,9 +2108,14 @@ Canvas Scene::render(const Entry& e, int w) const {
         CodeCtx args_ctx;
         args_ctx.diff_body = looks_like_diff(e.text);
         const bool args_code = args_ctx.diff_body || e.text.find("```") != std::string::npos;
+        CodeCtx sh_ctx;   // one context across the command's rows: a quote opened on one closes on the next
+        sh_ctx.fence = true;
+        sh_ctx.set = &grammars_;
+        sh_ctx.lang = sh;
         for (size_t k = 0; k < alines.size(); ++k, ++ry) {
             if (alines[k].empty()) continue;
-            if (args_code) paint_row(c, 2, ry, alines[k], th_, args_ctx, Style{th_.muted}, w - 4);
+            if (k < cmd_rows) paint_row(c, 2, ry, alines[k], th_, sh_ctx, Style{th_.text}, w - 4);
+            else if (args_code) paint_row(c, 2, ry, alines[k], th_, args_ctx, Style{th_.muted}, w - 4);
             else c.text(2, ry, alines[k], Style{th_.muted});
         }
         if (e.resolved) {
