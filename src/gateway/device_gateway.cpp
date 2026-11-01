@@ -8,7 +8,6 @@
 
 #include <curl/curl.h>
 
-#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -24,16 +23,25 @@ namespace {
 constexpr long kSkewS = 300;
 constexpr const char* kProofLabel = "ariadne-e2e-session|";
 constexpr const char* kWrapInfo = "ariadne-e2e-session-key";
-// How many killed sessions and answered handshakes one gateway remembers. A mark set
-// that grew without bound is a leak an authenticated client could drive.
-constexpr size_t kMarkCap = 1024;
+// How many marks each kind can hold at once. Fixed at construction, never grown: both tables are
+// allocated once and the steady state allocates nothing, so a client that drives marks cannot make
+// the gateway leak. 4096 killed sessions is far past any device set that could produce them inside
+// one session TTL; 4096 answered handshakes is ~13 per second sustained across the five-minute
+// proof window, past what a pair of phones and a relay can generate. Past either bound the gateway
+// refuses rather than forgets: a refused handshake costs an attacker nothing it wanted, whereas a
+// forgotten nonce lets a captured handshake mint a fresh session and a forgotten kill lets a killed
+// session keep decrypting.
+constexpr size_t kKilledCap = 4096;
+constexpr size_t kNonceCap = 4096;
 
-void remember(std::unordered_set<std::string>& seen, std::vector<std::string>& order, const std::string& v) {
-    if (seen.insert(v).second) order.push_back(v);
-    while (order.size() > kMarkCap) {
-        seen.erase(order.front());
-        order.erase(order.begin());
-    }
+// The mark for a thing: a digest of it, never the thing itself. 64 bits of sha256, reduced to
+// MarkSet's digest field. The gateway hands out session ids and accepts client nonces, so neither
+// raw value may sit in a set an attacker could read back out of a heap dump.
+uint64_t mark_of(const std::string& s) {
+    const std::string h = crypto::sha256(s);
+    uint64_t v = 0;
+    for (size_t i = 0; i < 8 && i < h.size(); ++i) v = (v << 8) | static_cast<unsigned char>(h[i]);
+    return core::MarkSet::digest_of(v);
 }
 
 Json jerr(const std::string& msg, const char* code = nullptr) {
@@ -73,7 +81,9 @@ std::string bearer_of(const net::Request& req) {
 }
 
 DeviceGateway::DeviceGateway(GatewayConfig cfg, Devices devices)
-    : cfg_(std::move(cfg)), devices_(std::move(devices)), secret_(crypto::random_bytes(32)) {
+    : cfg_(std::move(cfg)), devices_(std::move(devices)), secret_(crypto::random_bytes(32)),
+      killed_(kKilledCap, static_cast<long long>(std::time(nullptr))),
+      nonces_(kNonceCap, static_cast<long long>(std::time(nullptr))) {
     // These are the operator's own servers, named in the config: url_safety admits them by name.
     for (const auto* u : {&cfg_.pod_url, &cfg_.bridge_url, &cfg_.llm_url})
         if (!u->empty()) tools::admit_configured_url(*u);
@@ -88,36 +98,46 @@ std::string DeviceGateway::e2e_wrap_key(const std::string& token, const std::str
 }
 
 void DeviceGateway::mark_killed(const std::string& session_id) const {
-    std::lock_guard<std::mutex> l(marks_.mu);
     const long long now = now_s();
-    // A kill mark only needs to outlive the session it killed, so it ages out when that
-    // session would have expired anyway. A FIFO cap here is the hole: 1024 later kills
-    // push the first mark out and the killed session resumes decrypting.
-    for (auto it = marks_.killed.begin(); it != marks_.killed.end();)
-        if (it->second <= now) it = marks_.killed.erase(it);
-        else ++it;
-    marks_.killed[crypto::hex(crypto::sha256(session_id))] = now + cfg_.session_ttl_s;
-    // Backstop for a clock that never advances: drop the marks that expire soonest.
-    while (marks_.killed.size() > kMarkCap) {
-        const auto soonest = std::min_element(marks_.killed.begin(), marks_.killed.end(),
-                                             [](const std::pair<std::string, long long>& a,
-                                              const std::pair<std::string, long long>& b) { return a.second < b.second; });
-        marks_.killed.erase(soonest);
+    const uint64_t m = mark_of(session_id);
+    // A kill mark only needs to outlive the session it killed, so it expires when that session
+    // would have expired anyway — and while it still matters it is displaced *last*, so later
+    // kills can never push it out and let the killed session decrypt again.
+    switch (killed_.insert(m, now + cfg_.session_ttl_s, now)) {
+        case core::MarkSet::Outcome::kNew:
+            break;
+        case core::MarkSet::Outcome::kAlready:
+            break;   // already killed: `kill` is idempotent, and the second answer is still true
+        case core::MarkSet::Outcome::kDisplacedLive:
+            // This kill is recorded; an older one that still mattered is not. The newest intent is
+            // the one honoured, and the operator is told the promise was broken rather than being
+            // handed a silent "destroyed".
+            std::fprintf(stderr, "ariadne gateway: kill marks are full (%zu live); a killed session "
+                                 "may still decrypt\n", killed_.size());
+            break;
+        case core::MarkSet::Outcome::kHeld:
+            std::fprintf(stderr, "ariadne gateway: a kill mark could not be recorded\n");
+            break;
     }
 }
 
 bool DeviceGateway::is_killed(const std::string& session_id) const {
-    std::lock_guard<std::mutex> l(marks_.mu);
-    const auto it = marks_.killed.find(crypto::hex(crypto::sha256(session_id)));
-    return it != marks_.killed.end() && it->second > now_s();
+    // Never waits, never allocates: one atomic read per slot on the probe walk.
+    return killed_.live(mark_of(session_id), now_s());
 }
 
 bool DeviceGateway::nonce_replayed(const std::string& nonce_b64) const {
-    std::lock_guard<std::mutex> l(marks_.mu);
-    const std::string h = crypto::hex(crypto::sha256(nonce_b64));
-    if (marks_.used_nonces.count(h) != 0) return true;
-    remember(marks_.used_nonces, marks_.nonce_order, h);
-    return false;
+    // true = this handshake was answered before. A proof is only valid inside the skew window, so a
+    // nonce mark stops mattering exactly when the request carrying it would be refused for skew
+    // anyway: now + kSkewS is the bound, not a count. Anything but kNew answers refused — a replay,
+    // and a mark the table could not hold — because forgetting a nonce is what lets a captured
+    // handshake mint a fresh session, and refusing costs an attacker nothing it wanted.
+    const long long now = now_s();
+    const auto out = nonces_.insert(mark_of(nonce_b64), now + kSkewS, now);
+    if (out == core::MarkSet::Outcome::kDisplacedLive || out == core::MarkSet::Outcome::kHeld)
+        std::fprintf(stderr, "ariadne gateway: handshake marks are full (%zu live); a new handshake "
+                             "is refused rather than forgotten\n", nonces_.size());
+    return out != core::MarkSet::Outcome::kNew;
 }
 
 std::string DeviceGateway::open_session(const Device& d, std::string& key_out) const {

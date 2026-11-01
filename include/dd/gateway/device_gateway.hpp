@@ -47,12 +47,8 @@
 #include <optional>
 #include <string>
 
-#include <mutex>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include "dd/core/json.hpp"
+#include "dd/core/mark_set.hpp"
 #include "dd/gateway/devices.hpp"
 #include "dd/net/server.hpp"
 
@@ -108,18 +104,6 @@ private:
         Device device;
         std::string key;   // 32 raw bytes
     };
-    // Marks are hashes, never the id or the nonce: the set must not hold a thing an
-    // attacker can use. A nonce falls out when the cap is reached; a killed session's mark
-    // lives until that session would have expired anyway. Evicting kill marks by an
-    // insertion cap is a hole: enough later kills push the mark out and the killed session
-    // keeps decrypting until its expiry, so `kill` becomes a lie.
-    struct Marks {
-        std::mutex mu;
-        std::unordered_set<std::string> used_nonces;
-        std::vector<std::string> nonce_order;
-        std::unordered_map<std::string, long long> killed;   // hash -> unix time it stops mattering
-    };
-    mutable Marks marks_;
     void mark_killed(const std::string& session_id) const;
     bool is_killed(const std::string& session_id) const;
     bool nonce_replayed(const std::string& nonce_b64) const;   // records it; true when already answered
@@ -135,6 +119,18 @@ private:
     GatewayConfig cfg_;
     Devices devices_;
     std::string secret_;   // seals session ids; drawn once, never leaves the process
+    // Two marks, one set each, because they expire for different reasons and must not compete for
+    // the same room. Both hold digests, never the id or the nonce: the set must not hold a thing an
+    // attacker can use. A killed session's mark carries the second the session stops decrypting, so
+    // it lives exactly as long as the kill has to be honoured — a FIFO count over an unordered_set
+    // was the hole that made `kill` a lie. A nonce's mark carries the second the proof falls outside
+    // the skew window, which is when replaying it stops being possible at all.
+    // Any thread reads either set and any thread writes it, and none of them wait: dd::core::MarkSet
+    // is one atomic word per slot, with the CAS as the ownership, as SlotRing's claim is (§3.6).
+    // mutable: the three mark methods are const, and reading a mark and recording one happen on the
+    // request path, from a const command handler.
+    mutable core::MarkSet killed_;
+    mutable core::MarkSet nonces_;
     std::string pair_fp_, pair_relay_;
 };
 

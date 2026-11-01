@@ -119,6 +119,16 @@ $(BUILD)/dd_slot_ring_tests: include/dd/core/slot_ring.hpp tests/core_slot_ring_
 $(BUILD)/dd_slot_ring_tsan: include/dd/core/slot_ring.hpp tests/core_slot_ring_test.cpp
 	$(CXX) $(CXXFLAGS) -pipe -g -fsanitize=thread tests/core_slot_ring_test.cpp -pthread -o $(BUILD)/dd_slot_ring_tsan
 
+# The mark set is what `kill` and replay protection stand on. Its claims are that a reader never
+# waits, that a mark which matters longer is never pushed out by marks that matter less, and that
+# no write empties a slot a walk in flight is crossing — the last two are what the FIFO cap got
+# wrong, and the race is what a mutex used to hide. TSan is the build that falsifies a lock-free lie.
+$(BUILD)/dd_mark_set_tests: include/dd/core/mark_set.hpp tests/core_mark_set_test.cpp
+	$(CXX) $(CXXFLAGS) tests/core_mark_set_test.cpp -pthread -o $(BUILD)/dd_mark_set_tests
+
+$(BUILD)/dd_mark_set_tsan: include/dd/core/mark_set.hpp tests/core_mark_set_test.cpp
+	$(CXX) $(CXXFLAGS) -pipe -g -fsanitize=thread tests/core_mark_set_test.cpp -pthread -o $(BUILD)/dd_mark_set_tsan
+
 $(BUILD)/dd_know_scan_tests: src/know/scan.cpp include/dd/know/scan.hpp tests/know_scan_test.cpp
 	$(CXX) $(CXXFLAGS) src/know/scan.cpp tests/know_scan_test.cpp -o $(BUILD)/dd_know_scan_tests
 
@@ -517,6 +527,7 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_snap_cell_tests \
   $(BUILD)/dd_park_tests \
   $(BUILD)/dd_slot_ring_tests \
+  $(BUILD)/dd_mark_set_tests \
   $(BUILD)/dd_know_scan_tests \
   $(BUILD)/dd_know_tokenizer_tests \
   $(BUILD)/dd_know_bm25_tests \
@@ -545,14 +556,17 @@ TEST_BINS := $(BUILD)/dd_tests \
 
 -include $(wildcard mk/*.mk)
 
-# Every hand-off in the tree is a claim about racing threads, and the tree has no lock left to
-# hide a race behind — so a race detector is the only thing that can falsify it. These four are
-# the owners the audit names: the ring itself, the Scene, the sink, the Soaker. Built with
-# -fsanitize=thread and run, not folded into `make test` (TSan costs the suite more than the
-# claim is worth on every run). halt_on_error=1 makes a race a failed target rather than a
-# warning that scrolls past.
-tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan
-	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan; do \
+# Every hand-off in the tree is a claim about racing threads, and the tree has no lock left to hide
+# a race behind — so a race detector is the only thing that can falsify it. Built with
+# -fsanitize=thread and run, not folded into `make test` (TSan costs the suite more than the claim
+# is worth on every run). halt_on_error=1 makes a race a failed target rather than a warning that
+# scrolls past. The gateway suites belong here as much as the ring does: the nonce marks, the
+# device vector and the status snapshot are written from worker threads, and a plain unsanitized
+# binary run under this target would prove nothing.
+tsan: $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_mark_set_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan \
+      $(BUILD)/dd_devices_race_tsan $(BUILD)/dd_device_gateway_tsan $(BUILD)/dd_relay_policy_tsan
+	@fail=0; for t in $(BUILD)/dd_slot_ring_tsan $(BUILD)/dd_mark_set_tsan $(BUILD)/dd_ui_tsan $(BUILD)/dd_learn_credit_tsan $(BUILD)/dd_context_tsan $(BUILD)/dd_serve_concurrency_tsan \
+		$(BUILD)/dd_devices_race_tsan $(BUILD)/dd_device_gateway_tsan $(BUILD)/dd_relay_policy_tsan; do \
 		echo "== $$t"; DD_TEST_TMP=$(BUILD)/tmp TSAN_OPTIONS=halt_on_error=1 ./$$t || { echo "TSAN FAILED: $$t"; fail=$$((fail+1)); }; done; \
 		echo "$$fail tsan binary(ies) failed"; [ $$fail -eq 0 ]
 
