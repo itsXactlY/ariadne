@@ -221,10 +221,28 @@ static std::string run_terminal(const Json& args, const ddcore::Config& cfg) {
     if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
         for (const auto& sp : d->arr)
             if (sp && sp->type == Json::Str) policy.extra_deny.push_back(sp->str);
+    const Json* bg = json_get(args, "background");
+    if (bg && bg->type == Json::Bool && bg->b) return dd::tools::with_job_notices(dd::tools::start_job(c->str, policy));
     dd::tools::ShellOptions opt;
     opt.max_output = g_shell_max_output;
     opt.cancel = g_cancel.load(std::memory_order_relaxed);
-    return dd::tools::run_shell(c->str, opt, policy);
+    return dd::tools::with_job_notices(dd::tools::run_shell(c->str, opt, policy));
+}
+
+// The job tool: a background command looked at, not waited on (dd/tools/shell.hpp).
+static std::string job_tool(const Json& args) {
+    auto str = [&](const char* k) {
+        const Json* v = json_get(args, k);
+        return v && v->type == Json::Str ? v->str : std::string();
+    };
+    auto num = [&](const char* k) {
+        const Json* v = json_get(args, k);
+        return v && v->type == Json::Num ? static_cast<int>(v->num) : 0;
+    };
+    dd::tools::JobOptions opt;
+    opt.max_output = g_shell_max_output;
+    opt.cancel = g_cancel.load(std::memory_order_relaxed);
+    return dd::tools::with_job_notices(dd::tools::job_call(str("action"), num("job"), num("wait_s"), opt));
 }
 
 // cut at n bytes, never inside a UTF-8 sequence
@@ -481,7 +499,7 @@ struct DeviceToolGate : dd::agent::ToolGate {
     std::atomic<bool> allow_tools{true};
     std::string device;
     std::optional<std::string> veto(const dd::core::ToolCall& call) override {
-        static const std::set<std::string> local{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "find"};
+        static const std::set<std::string> local{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "job", "find"};
         if (!allow_tools.load(std::memory_order_acquire) && local.count(call.name))
             return "this device (" + device + ") was not paired for local tools; pair it with --scopes ...,tools";
         return inner ? inner->veto(call) : std::nullopt;
@@ -832,15 +850,46 @@ int main(int argc, char** argv) {
             Json cmdp = json_obj({{"type", jsp(json_str("string"))},
                                   {"description", jsp(json_str("command to run"))}});
             Json props = json_obj({{"cmd", jsp(std::move(cmdp))},
+                                   {"background", jsp(json_obj({{"type", jsp(json_str("boolean"))},
+                                                                {"description", jsp(json_str("true: start it and return at once with a job id; for builds, test suites, servers, anything that may take longer than a minute"))}}))},
                                    {"intent", jsp(json_obj({{"type", jsp(json_str("string"))},
                                                             {"description", jsp(json_str("what you are doing, in a few words (optional)"))}}))}});
             Json params = json_obj({{"type", jsp(json_str("object"))},
                                     {"properties", jsp(std::move(props))},
                                     {"required", jsp(std::move(rt))}});
-            e.schema = json_obj({{"description", jsp(json_str("Run a shell command. A guard refuses obviously destructive commands (sudo, recursive rm on broad paths, force-push, ...); it is not a sandbox. Returns exit code + stdout."))},
+            e.schema = json_obj({{"description", jsp(json_str(
+                "Run a shell command. A guard refuses obviously destructive commands (sudo, recursive rm on broad paths, "
+                "force-push, ...); it is not a sandbox. Returns exit code + stdout. A foreground command is killed after "
+                + std::to_string(dd::tools::kForegroundTimeoutMs / 1000) + " s, and a foreground sleep over "
+                + std::to_string(dd::tools::kForegroundSleepMaxS) + " s is refused. Anything long (make, a test suite, a "
+                "server, a download) runs with background:true: it returns a job id at once, you keep working, and the "
+                "job's end is announced on your next run_terminal or job call. Never sleep to wait for something."))},
                                  {"parameters", jsp(std::move(params))}});
         }
         e.handler = [&cfg](const Json& a) { return run_terminal(a, cfg); };
+        add_tool(e);
+    }
+    {
+        ToolEntry e;
+        e.name = "job";
+        Json actions = json_arr();
+        for (const char* a : {"status", "wait", "kill", "list"}) arr_push(actions, json_str(a));
+        Json props = json_obj({{"action", jsp(json_obj({{"type", jsp(json_str("string"))}, {"enum", jsp(std::move(actions))},
+                                                        {"description", jsp(json_str("status: output since your last look; wait: until it ends or wait_s passes; kill; list"))}}))},
+                               {"job", jsp(json_obj({{"type", jsp(json_str("integer"))}, {"description", jsp(json_str("the id run_terminal returned"))}}))},
+                               {"wait_s", jsp(json_obj({{"type", jsp(json_str("integer"))},
+                                                        {"description", jsp(json_str("wait: at most this many seconds (default " +
+                                                             std::to_string(dd::tools::kJobWaitDefaultS) + ", max " + std::to_string(dd::tools::kJobWaitMaxS) +
+                                                             "); returns the moment the job ends"))}}))}});
+        Json rq = json_arr();
+        arr_push(rq, json_str("action"));
+        e.schema = json_obj({{"description", jsp(json_str("Look at a background command started with run_terminal background:true: "
+                                                          "its state, exit code and the output that arrived since you last looked "
+                                                          "(the tail, with the full log's path). Prefer status between other work; "
+                                                          "wait only when nothing else is left to do."))},
+                             {"parameters", jsp(json_obj({{"type", jsp(json_str("object"))}, {"properties", jsp(std::move(props))},
+                                                          {"required", jsp(std::move(rq))}}))}});
+        e.handler = [](const Json& a) { return job_tool(a); };
         add_tool(e);
     }
     std::vector<std::string> sources = {"local  4"};
@@ -1108,7 +1157,7 @@ int main(int argc, char** argv) {
         add_tool(e);
     }
 
-    std::set<std::string> core_set{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "find", "skill_load", "skills_list", "todo"};
+    std::set<std::string> core_set{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "job", "find", "skill_load", "skills_list", "todo"};
     for (const auto& n : disabled_tools) core_set.erase(n);
     deck.arrange(core_set);
     tool_cat->refresh();   // local and instant: searchable at once, and the one catalogue that reads the deck

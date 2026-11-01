@@ -17,6 +17,8 @@
 #include <cstring>
 #include <functional>
 #include <set>
+#include <filesystem>
+#include <sys/stat.h>
 
 #include "dd/core/json.hpp"
 
@@ -1058,14 +1060,33 @@ static int spawn_sh_forked(const char* sh, pid_t* pid, const char* const* argv, 
 }
 #endif
 
-std::string run_shell(const std::string& cmd, const ShellOptions& opt, const ShellPolicy& policy) {
-    if (cmd.empty()) return jerr("cmd required");
-    if (std::string why = shell_danger(cmd, policy); !why.empty()) return jerr("refused: " + why);
-    if (opt.cancel && opt.cancel->load(std::memory_order_relaxed)) return jerr("interrupted");
-    prune_groups();
+// The longest `sleep N` the command runs at its own top level, in seconds (s, m, h, d suffixes; a
+// plain number is seconds). 0 when it sleeps not at all. A guess at how long a build takes, spent
+// blocking the turn, is what job wait replaces.
+static double longest_sleep_s(const std::string& cmd) {
+    double longest = 0;
+    for (size_t at = cmd.find("sleep"); at != std::string::npos; at = cmd.find("sleep", at + 5)) {
+        if (at > 0 && !std::strchr(" \t\n;&|({`", cmd[at - 1])) continue;   // part of another word
+        size_t k = at + 5;
+        if (k >= cmd.size() || (cmd[k] != ' ' && cmd[k] != '\t')) continue;
+        while (k < cmd.size() && (cmd[k] == ' ' || cmd[k] == '\t')) ++k;
+        size_t e = k;
+        while (e < cmd.size() && (std::isdigit(static_cast<unsigned char>(cmd[e])) || cmd[e] == '.')) ++e;
+        if (e == k) continue;
+        double v = std::atof(cmd.substr(k, e - k).c_str());
+        if (e < cmd.size()) {
+            if (cmd[e] == 'm') v *= 60;
+            else if (cmd[e] == 'h') v *= 3600;
+            else if (cmd[e] == 'd') v *= 86400;
+        }
+        longest = std::max(longest, v);
+    }
+    return longest;
+}
 
-    // a group: the child never reads the tty the TUI holds in raw mode, and one trailing comment cannot eat the brace
-    const std::string full = "{ " + cmd + "\n} </dev/null 2>&1";
+// `full` under /bin/sh in a new session: stdin /dev/null, stdout and stderr on `out`, every other
+// descriptor closed, signals default, secrets out of the environment. 0 or an errno, as posix_spawn.
+static int spawn_sh(const std::string& full, int out, pid_t* pid_out) {
     std::vector<std::string> env;
     for (char** e = environ; e && *e; ++e) {
         const std::string kv = *e;
@@ -1082,8 +1103,6 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     for (auto& s : env) envp.push_back(s.data());
     envp.push_back(nullptr);
 
-    int fds[2];
-    if (::pipe2(fds, O_CLOEXEC) != 0) return jerr(std::string("pipe failed: ") + std::strerror(errno));
     const char* argv[] = {"sh", "-c", full.c_str(), nullptr};
     pid_t pid = 0;
 #ifndef __GLIBC__
@@ -1092,13 +1111,13 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
 #else
     constexpr const char* kSh = "/bin/sh";
 #endif
-    const int rc = spawn_sh_forked(kSh, &pid, argv, envp.data(), fds[1]);
+    const int rc = spawn_sh_forked(kSh, &pid, argv, envp.data(), out);
 #else
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+    posix_spawn_file_actions_adddup2(&fa, out, 1);
+    posix_spawn_file_actions_adddup2(&fa, out, 2);
     posix_spawn_file_actions_addclosefrom_np(&fa, 3);
     posix_spawnattr_t at;
     posix_spawnattr_init(&at);
@@ -1112,6 +1131,27 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
 #endif
+    *pid_out = pid;
+    return rc;
+}
+
+std::string run_shell(const std::string& cmd, const ShellOptions& opt, const ShellPolicy& policy) {
+    if (cmd.empty()) return jerr("cmd required");
+    if (std::string why = shell_danger(cmd, policy); !why.empty()) return jerr("refused: " + why);
+    if (opt.cancel && opt.cancel->load(std::memory_order_relaxed)) return jerr("interrupted");
+    if (const double sl = longest_sleep_s(cmd); sl > kForegroundSleepMaxS)
+        return jerr("refused: a foreground `sleep " + std::to_string(static_cast<long>(sl)) + "` blocks the whole turn. "
+                    "To wait for something, run it with background:true and call job with action \"wait\" -- it "
+                    "returns the moment the job ends, at most " + std::to_string(kJobWaitMaxS) + " s per call, "
+                    "and you can do other work in between.");
+    prune_groups();
+
+    // a group: the child never reads the tty the TUI holds in raw mode, and one trailing comment cannot eat the brace
+    const std::string full = "{ " + cmd + "\n} </dev/null 2>&1";
+    int fds[2];
+    if (::pipe2(fds, O_CLOEXEC) != 0) return jerr(std::string("pipe failed: ") + std::strerror(errno));
+    pid_t pid = 0;
+    const int rc = spawn_sh(full, fds[1], &pid);
     ::close(fds[1]);
     if (rc != 0) {
         ::close(fds[0]);
@@ -1135,7 +1175,10 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
         }
         const auto now = Clock::now();
         if (opt.timeout_ms > 0 && now - t0 >= std::chrono::milliseconds(opt.timeout_ms)) {
-            error = "timed out after " + std::to_string(opt.timeout_ms) + " ms";
+            error = "timed out after " + std::to_string(opt.timeout_ms / 1000) + " s and was killed. A command "
+                    "that runs this long belongs in the background: run it again with background:true, keep "
+                    "working, and look at it with the job tool (status, or wait up to " +
+                    std::to_string(kJobWaitMaxS) + " s per call).";
             break;
         }
         if (!eof) {
@@ -1240,6 +1283,226 @@ std::string run_shell(const std::string& cmd, const ShellOptions& opt, const She
         }
     }
     return json_dump(out);
+}
+
+// ---------------- background jobs ----------------
+//
+// One fixed slot per job, never reused inside a process: the thread that starts a job owns its slot by
+// the index fetch_add hands it, writes the strings once, and publishes them with a release store of
+// `state`. Every reader acquires `state` first and only ever reads those strings, so no reader can race
+// a writer. The exit status is collected by whichever thread wins `reaping`, and "this end was told to
+// the model" is a CAS from Done to Reported, so each end is announced exactly once.
+
+namespace {
+
+enum JobState : int { kJobFree = 0, kJobRunning = 2, kJobDone = 3, kJobReported = 4 };
+
+struct Job {
+    std::atomic<int> state{kJobFree};
+    pid_t pid = 0;                       // the group leader; the group id is the same number
+    std::string cmd, log;                // written once before state goes Running
+    Clock::time_point t0{};
+    std::atomic<int> code{-1};           // exit status, 128 + signal for a signalled leader
+    std::atomic<long long> ran_ms{0};    // set with code
+    std::atomic<unsigned long long> seen{0};   // log bytes already handed to the model
+    std::atomic<bool> reaping{false};
+};
+
+constexpr int kJobs = 64;
+Job g_jobs[kJobs];
+std::atomic<int> g_job_next{0};
+
+long long ms_since(Clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t).count();
+}
+
+// Collect the leader's status if it has ended. Never blocks.
+void reap(Job& j) {
+    if (j.state.load(std::memory_order_acquire) != kJobRunning) return;
+    bool idle = false;
+    if (!j.reaping.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) return;
+    int st = 0;
+    if (::waitpid(j.pid, &st, WNOHANG) == j.pid) {
+        j.code.store(WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 128 + WTERMSIG(st) : -1, std::memory_order_relaxed);
+        j.ran_ms.store(ms_since(j.t0), std::memory_order_relaxed);
+        j.state.store(kJobDone, std::memory_order_release);
+        if (!group_alive(j.pid)) forget_group(j.pid);
+    }
+    j.reaping.store(false, std::memory_order_release);
+}
+
+Job* job_at(int id) {
+    if (id < 1 || id > kJobs) return nullptr;
+    Job& j = g_jobs[id - 1];
+    return j.state.load(std::memory_order_acquire) >= kJobRunning ? &j : nullptr;
+}
+
+std::string clip_cmd(const std::string& c, size_t n = 120) { return c.size() <= n ? c : c.substr(0, n) + "…"; }
+
+// What arrived in the log since the model last looked. More than `cap`: its tail, and how much was
+// skipped -- for a build the end is where the verdict is.
+std::string take_new_output(Job& j, size_t cap, unsigned long long* total_out, unsigned long long* skipped_out) {
+    *skipped_out = 0;
+    struct stat sb {};
+    const unsigned long long size = ::stat(j.log.c_str(), &sb) == 0 ? static_cast<unsigned long long>(sb.st_size) : 0;
+    *total_out = size;
+    unsigned long long from = j.seen.load(std::memory_order_relaxed);
+    if (size <= from || !j.seen.compare_exchange_strong(from, size, std::memory_order_acq_rel)) return {};
+    unsigned long long start = from;
+    if (size - from > cap) {
+        start = size - cap;
+        *skipped_out = start - from;
+    }
+    std::string out;
+    const int fd = ::open(j.log.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return {};
+    out.resize(static_cast<size_t>(size - start));
+    const ssize_t n = ::pread(fd, out.data(), out.size(), static_cast<off_t>(start));
+    ::close(fd);
+    out.resize(n > 0 ? static_cast<size_t>(n) : 0);
+    size_t lead = 0;   // a tail cut may start inside a UTF-8 sequence
+    while (*skipped_out && lead < out.size() && lead < 4 && (static_cast<unsigned char>(out[lead]) & 0xC0) == 0x80) ++lead;
+    out.erase(0, lead);
+    trim_partial_utf8(out);
+    return out;
+}
+
+Json job_json(Job& j, int id, bool with_output, size_t cap) {
+    reap(j);
+    Json o = json_obj({{"job", jsp(json_num(id))}, {"cmd", jsp(json_str(clip_cmd(j.cmd)))}});
+    const int st = j.state.load(std::memory_order_acquire);
+    if (st == kJobRunning) {
+        obj_set(o, "running", json_bool(true));
+        obj_set(o, "seconds", json_num(static_cast<double>(ms_since(j.t0) / 100) / 10.0));
+    } else {
+        obj_set(o, "exit", json_num(j.code.load(std::memory_order_relaxed)));
+        obj_set(o, "seconds", json_num(static_cast<double>(j.ran_ms.load(std::memory_order_relaxed) / 100) / 10.0));
+    }
+    if (with_output) {
+        unsigned long long total = 0, skipped = 0;
+        const std::string fresh = take_new_output(j, cap, &total, &skipped);
+        obj_set(o, "new_output", json_str(fresh));
+        obj_set(o, "output_bytes", json_num(static_cast<double>(total)));
+        if (skipped) obj_set(o, "skipped_bytes", json_num(static_cast<double>(skipped)));
+        obj_set(o, "log", json_str(j.log));
+        if (st != kJobRunning) {   // the model has seen this end now
+            int done = kJobDone;
+            j.state.compare_exchange_strong(done, kJobReported, std::memory_order_acq_rel);
+        }
+    }
+    return o;
+}
+
+std::string jobs_dir() {
+    std::error_code ec;
+    std::filesystem::path d = std::filesystem::temp_directory_path(ec);
+    if (ec) d = "/tmp";
+    d /= "ariadne-jobs-" + std::to_string(::getuid());
+    std::filesystem::create_directories(d, ec);
+    ::chmod(d.c_str(), 0700);   // other users on the box do not read a build's output
+    return d.string();
+}
+
+}  // namespace
+
+std::string start_job(const std::string& cmd, const ShellPolicy& policy) {
+    if (cmd.empty()) return jerr("cmd required");
+    if (std::string why = shell_danger(cmd, policy); !why.empty()) return jerr("refused: " + why);
+    const int idx = g_job_next.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= kJobs)
+        return jerr("refused: this session already started " + std::to_string(kJobs) + " background jobs");
+    Job& j = g_jobs[idx];
+    const int id = idx + 1;
+    j.cmd = cmd;
+    j.log = jobs_dir() + "/" + std::to_string(::getpid()) + "-" + std::to_string(id) + ".log";
+    const int out = ::open(j.log.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (out < 0) return jerr("cannot open the job log " + j.log + ": " + std::strerror(errno));
+    const std::string full = "{ " + cmd + "\n} </dev/null 2>&1";
+    pid_t pid = 0;
+    const int rc = spawn_sh(full, out, &pid);
+    ::close(out);
+    if (rc != 0) return jerr(std::string("spawn failed: ") + std::strerror(rc));
+    j.pid = pid;
+    j.t0 = Clock::now();
+    register_group(pid);   // quit kills it like any command still running
+    j.state.store(kJobRunning, std::memory_order_release);
+    Json o = json_obj({{"job", jsp(json_num(id))}, {"pid", jsp(json_num(pid))}, {"cmd", jsp(json_str(clip_cmd(cmd)))},
+                       {"log", jsp(json_str(j.log))}, {"running", jsp(json_bool(true))}});
+    obj_set(o, "hint", json_str("Started in the background. Keep working; its end is announced on your next run_terminal "
+                                "or job call (finished_jobs). To look at it: job {action:\"status\", job:" + std::to_string(id) +
+                                "}, or {action:\"wait\"} to block up to " + std::to_string(kJobWaitMaxS) + " s."));
+    return json_dump(o);
+}
+
+std::string job_call(const std::string& action, int id, int wait_s, const JobOptions& opt) {
+    if (action == "list" || (action.empty() && id <= 0)) {
+        Json arr = json_arr();
+        const int n = std::min(g_job_next.load(std::memory_order_relaxed), kJobs);
+        for (int i = 1; i <= n; ++i)
+            if (Job* j = job_at(i)) arr_push(arr, job_json(*j, i, false, 0));
+        return json_dump(json_obj({{"jobs", jsp(std::move(arr))}}));
+    }
+    Job* j = job_at(id);
+    if (!j) return jerr("no background job " + std::to_string(id) + " (job with action \"list\" shows them)");
+    if (action == "kill") {
+        reap(*j);
+        if (j->state.load(std::memory_order_acquire) == kJobRunning) {
+            kill_group(j->pid, SIGTERM);
+            const auto until = Clock::now() + std::chrono::seconds(2);
+            while (Clock::now() < until && j->state.load(std::memory_order_acquire) == kJobRunning) {
+                ::poll(nullptr, 0, 50);
+                reap(*j);
+            }
+            if (j->state.load(std::memory_order_acquire) == kJobRunning) {
+                kill_group(j->pid, SIGKILL);
+                for (int k = 0; k < 40 && j->state.load(std::memory_order_acquire) == kJobRunning; ++k) {
+                    ::poll(nullptr, 0, 25);
+                    reap(*j);
+                }
+            }
+        } else if (group_alive(j->pid)) {
+            kill_group(j->pid, SIGKILL);   // the leader ended, its children did not
+        }
+        return json_dump(job_json(*j, id, true, opt.max_output));
+    }
+    if (action == "wait") {
+        const int secs = std::clamp(wait_s > 0 ? wait_s : kJobWaitDefaultS, 1, kJobWaitMaxS);
+        const auto until = Clock::now() + std::chrono::seconds(secs);
+        reap(*j);
+        while (Clock::now() < until && j->state.load(std::memory_order_acquire) == kJobRunning) {
+            if (opt.cancel && opt.cancel->load(std::memory_order_relaxed)) break;
+            ::poll(nullptr, 0, 200);
+            reap(*j);
+        }
+        Json o = job_json(*j, id, true, opt.max_output);
+        if (json_get(o, "running"))
+            obj_set(o, "hint", json_str("Still running after this wait. Do other work and look again later, or wait "
+                                        "again; there is no need to sleep."));
+        return json_dump(o);
+    }
+    if (action == "status" || action.empty()) return json_dump(job_json(*j, id, true, opt.max_output));
+    return jerr("unknown action '" + action + "': status, wait, kill or list");
+}
+
+std::string with_job_notices(const std::string& result) {
+    Json ended = json_arr();
+    const int n = std::min(g_job_next.load(std::memory_order_relaxed), kJobs);
+    for (int i = 1; i <= n; ++i) {
+        Job* j = job_at(i);
+        if (!j) continue;
+        reap(*j);
+        int done = kJobDone;
+        if (!j->state.compare_exchange_strong(done, kJobReported, std::memory_order_acq_rel)) continue;
+        arr_push(ended, json_obj({{"job", jsp(json_num(i))}, {"cmd", jsp(json_str(clip_cmd(j->cmd, 80)))},
+                                  {"exit", jsp(json_num(j->code.load(std::memory_order_relaxed)))},
+                                  {"seconds", jsp(json_num(static_cast<double>(j->ran_ms.load(std::memory_order_relaxed) / 100) / 10.0))}}));
+    }
+    if (ended.arr.empty()) return result;
+    Json o;
+    try { o = json_parse(result); } catch (...) { return result; }
+    if (o.type != Json::Obj) return result;
+    obj_set(o, "finished_jobs", std::move(ended));
+    return json_dump(o);
 }
 
 void shell_kill_all() {

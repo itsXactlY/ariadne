@@ -9,10 +9,12 @@
 #include "dd/tools/shell.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 
 using namespace dd;
 using namespace dd::tools;
@@ -218,6 +220,70 @@ int main() {
     CHECK(def.max_output == SHIPPED_MAX_BYTES);
     CHECK(FsLimits{}.max_lines == SHIPPED_MAX_LINES);
     CHECK(FsLimits{}.max_line_length == SHIPPED_MAX_LINE_LENGTH);
+
+    // ---- long work is a job, looked at, not waited on ----
+    // The operator's complaint: the model ran `sleep 240; ps ...` in the foreground and the deck sat
+    // still for four minutes under a ten-minute timeout. A foreground command is now bounded at two
+    // minutes, a long foreground sleep is refused with the way out, and a background job returns at once.
+    CHECK(ShellOptions{}.timeout_ms == kForegroundTimeoutMs && kForegroundTimeoutMs <= 120000);
+    {
+        const auto r = parse(run_shell("sleep 240; echo done"));
+        CHECK(contains(str(r, "error"), "refused") && contains(str(r, "error"), "background:true"));
+        CHECK(absent(parse(run_shell("sleep 1; echo ok")), "error"));            // a short sleep is fine
+        CHECK(contains(str(parse(run_shell("sleep 2m")), "error"), "refused"));   // units count
+        CHECK(absent(parse(run_shell("echo nosleep 999")), "error"));             // a word containing sleep is not sleep
+    }
+    {
+        ShellOptions quick;
+        quick.timeout_ms = 300;
+        const auto r = parse(run_shell("sleep 5", quick));
+        CHECK(contains(str(r, "error"), "timed out") && contains(str(r, "error"), "background:true"));
+    }
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto started = parse(start_job("echo first; sleep 1; echo second; exit 3"));
+        const double start_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const long id = num(started, "job");
+        CHECK(id >= 1 && truth(started, "running") && start_ms < 500);           // returns at once
+        CHECK(contains(str(started, "log"), "ariadne-jobs-"));
+
+        const auto st = parse(job_call("status", static_cast<int>(id), 0));
+        CHECK(truth(st, "running"));
+
+        const auto w = parse(job_call("wait", static_cast<int>(id), 10));     // returns when it ends, not after 10 s
+        CHECK(absent(w, "running") && num(w, "exit") == 3);
+        CHECK(contains(str(w, "new_output"), "second"));                       // what arrived since the status
+        CHECK(num(w, "seconds") < 5);
+        CHECK(!contains(str(parse(job_call("status", static_cast<int>(id), 0)), "new_output"), "second"));   // seen once
+
+        // an end the model already read through status/wait is not announced again
+        CHECK(with_job_notices("{\"exit\":0}") == "{\"exit\":0}");
+
+        // an end nobody looked at is announced on the next call, exactly once
+        const long id2 = num(parse(start_job("exit 7")), "job");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));   // `exit 7` ends; nobody looks at it
+        const auto noted = parse(with_job_notices(run_shell("echo next")));
+        CHECK(array_size(noted, "finished_jobs") == 1 && str(noted, "stdout") == "next\n");
+        const core::Json* fj = core::json_get(noted, "finished_jobs");
+        CHECK(fj && !fj->arr.empty() && num(*fj->arr[0], "job") == id2 && num(*fj->arr[0], "exit") == 7);
+        CHECK(absent(parse(with_job_notices(run_shell("echo again"))), "finished_jobs"));
+
+        // a job is killed with its whole group, and the kill is its end
+        const long id3 = num(parse(start_job("sleep 60 & sleep 60; echo never")), "job");
+        const auto k = parse(job_call("kill", static_cast<int>(id3), 0));
+        CHECK(absent(k, "running") && num(k, "exit") >= 128 && !contains(str(k, "new_output"), "never"));
+
+        // a wait is bounded: a job that outlives it is still running, and says so
+        const long id4 = num(parse(start_job("sleep 30")), "job");
+        const auto t1 = std::chrono::steady_clock::now();
+        const auto w4 = parse(job_call("wait", static_cast<int>(id4), 1));
+        const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+        CHECK(truth(w4, "running") && waited < 3 && contains(str(w4, "hint"), "Still running"));
+        job_call("kill", static_cast<int>(id4), 0);
+
+        CHECK(contains(str(parse(job_call("status", 999, 0)), "error"), "no background job"));
+        CHECK(contains(str(parse(start_job("sudo rm -rf /")), "error"), "refused"));   // the same guard
+    }
 
     fs::remove_all(dir, ec);
     std::printf(failures == 0 ? "envelope: all checks passed\n" : "envelope: %d FAILURES\n", failures);
