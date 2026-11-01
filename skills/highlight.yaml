@@ -256,7 +256,8 @@ languages:
   bash:
     aliases: [sh, shell, zsh, posix]
     keywords: [if, then, elif, else, fi, for, in, do, done, while, until, case, esac, function, return, break, continue, export, local, unset, set, shift, trap, exit]
-    builtins: [echo, printf, cd, read, test, true, false, sleep, wait, source]
+    # builtins, and the programs a shell call runs most: a command line reads by its verbs
+    builtins: [echo, printf, cd, pwd, read, test, true, false, sleep, wait, source, eval, exec, alias, type, command, which, sudo, env, time, nice, timeout, xargs, grep, egrep, fgrep, rg, sed, awk, cat, head, tail, less, nl, tac, ls, find, fd, tree, stat, file, du, df, wc, sort, uniq, cut, tr, tee, diff, cmp, patch, cp, mv, rm, mkdir, rmdir, ln, touch, chmod, chown, tar, gzip, zstd, curl, wget, ssh, scp, rsync, git, gh, make, cmake, ninja, gcc, clang, gdb, strace, python, python3, pip, node, npm, npx, cargo, go, jq, yq, ps, pgrep, pkill, kill, top, free, ss, ip, systemctl, journalctl, podman, date, basename, dirname, realpath, readlink, mktemp, seq, yes]
     line_comment: ["#"]
     capital_is_type: false
 
