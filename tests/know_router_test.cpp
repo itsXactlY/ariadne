@@ -1092,6 +1092,15 @@ static void test_policy() {
     const Policy d = Policy::from(core::Config(core::Json{}));
     chk(d.skills.min_matched == 2 && d.skills.offer_mass == 9.5 && d.skills.offer_score == 0.15 && d.skills.open_score == 0.40 && d.skills.calibrated_at == 502,
         "policy: the defaults are the measured numbers, fitted at 502 skills");
+    {   // a config that pins a mass pins the catalogue size it was fitted at: a moved default may not rescale it
+        const Policy c = Policy::from(core::Config(core::parse_yaml("knowledge:\n  confidence:\n    offer_mass: 6.5\n    calibrated_at: 568\n")));
+        chk(c.skills.offer_mass == 6.5 && c.skills.calibrated_at == 568, "policy: calibrated_at is read beside offer_mass");
+        Policy old_bar = d;
+        old_bar.skills.offer_mass = 6.5;
+        old_bar.skills.calibrated_at = 568;
+        chk(c.skills.needed(568) == old_bar.skills.needed(568) && c.skills.needed(568) == 6.5,
+            "policy: at the size it was fitted at, a pinned mass is the bar as written");
+    }
     Hit h;
     h.matched = 2;
     h.mass = 10.0;

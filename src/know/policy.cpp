@@ -23,6 +23,10 @@ Policy Policy::from(const core::Config& cfg) {
     }
     num("knowledge.confidence.offer_score", p.skills.offer_score);
     num("knowledge.confidence.offer_mass", p.skills.offer_mass);
+    // offer_mass is fitted at a catalogue size: a config that pins a mass pins the size it was
+    // fitted at too, or a new default for one silently rescales the other
+    if (cfg.has("knowledge.confidence.calibrated_at") && cfg.get_double("knowledge.confidence.calibrated_at") >= 0)
+        p.skills.calibrated_at = static_cast<size_t>(cfg.get_double("knowledge.confidence.calibrated_at"));
     num("knowledge.confidence.open_score", p.skills.open_score);
     num("knowledge.confidence.memory_offer_score", p.memory.offer_score);
     num("knowledge.confidence.memory_offer_mass", p.memory.offer_mass);
