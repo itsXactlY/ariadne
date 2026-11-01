@@ -15,6 +15,7 @@
 #include <fstream>
 #include <ctime>
 #include <limits>
+#include <thread>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -929,7 +930,19 @@ void Scene::set_grammars(GrammarSet set) {
 void Scene::post(Event e) {
     e.at = clock::now();
     e.stamp = order_.fetch_add(1, std::memory_order_relaxed) + 1;
-    q_.publish_any(std::move(e));   // the refusal is counted on the ring; dropped_events() reads it
+    // A full ring means the render thread is behind, not gone: it claims everything every frame
+    // (<= 120 ms). Dropping on the first refusal lost llm_end / tool_end / turn_end, which left a
+    // card spinning "running" forever and the streaming pointers aimed at an old card. Wait a few
+    // frames for a slot; only a ring that stays full that long refuses, and that is still counted.
+    // publish_any consumes its argument only when it takes a slot, so a refused `e` is still whole.
+    const auto deadline = e.at + std::chrono::milliseconds(500);
+    while (!q_.publish_any(std::move(e), /*count_refusal=*/false)) {
+        if (clock::now() >= deadline) {
+            q_.count_refused();   // one dropped event, counted once; dropped_events() reads it
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
 }
 
 // The streaming thread's side. The buffer has one writer, so appending is a plain copy — no CAS,
@@ -1505,6 +1518,12 @@ int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, 
 
 Entry& Scene::push(Kind k, const std::string& text) {
     if (entries_.size() >= 400) {
+        // The streaming cards are raw pointers into entries_. A live card that has aged to the
+        // front (its llm_end never arrived, or 400 cards pushed past it) is about to be destroyed:
+        // let go of it first, or the next streamed byte is written into freed memory.
+        Entry* const oldest = &entries_.front();
+        if (live_reason_ == oldest) live_reason_ = nullptr;
+        if (live_say_ == oldest) live_say_ = nullptr;
         entries_.pop_front();
         cache_.pop_front();
         if (printed_ > 0) --printed_;
@@ -2301,6 +2320,7 @@ void Scene::paint_transcript(Frame& f, int x, int y, int w, int h) {
                 c.ver = e.ver;
                 c.spin = e.kind == Kind::Tool && e.run == Run::Running ? tick_ % 10 : -1;
                 c.view = e.kind == Kind::Reason ? static_cast<int>(view_) : -1;
+                c.verb = static_cast<int>(verb_);   // without it every card stays stale and block() renders it again
             }
         }
     }

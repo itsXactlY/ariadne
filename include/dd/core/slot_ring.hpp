@@ -112,8 +112,10 @@ public:
   // `refused()` counted it, and the caller decides what an over-queued hand-off means. A site
   // whose overflow path is real (spool it, count it, name it) needs the payload back, which is
   // why the move happens only after the slot is held.
+  // count_refusal=false: a caller that will retry counts only the refusal it finally gives up on
+  // (count_refused()), so refused() stays the number of payloads that were really dropped.
   template <class P>
-  bool publish_any(P&& payload) {
+  bool publish_any(P&& payload, bool count_refusal = true) {
     const uint64_t seq = stamp_.fetch_add(1, std::memory_order_relaxed) + 1;
     size_t i = static_cast<size_t>(seq % slots_);
     for (size_t k = 0; k < slots_; ++k) {
@@ -128,7 +130,7 @@ public:
       }
       if (++i == slots_) i = 0;
     }
-    refused_.fetch_add(1, std::memory_order_relaxed);   // the payload never left the caller
+    if (count_refusal) refused_.fetch_add(1, std::memory_order_relaxed);   // the payload never left the caller
     return false;
   }
 
@@ -203,6 +205,7 @@ public:
   // Publishes this ring turned away. Every site names this number; none of them lose a payload
   // silently, because the caller keeps what the ring refused.
   uint64_t refused() const { return refused_.load(std::memory_order_relaxed); }
+  void count_refused() { refused_.fetch_add(1, std::memory_order_relaxed); }
 
   // Slots this ring actually admits — N built with none, `slots` built with a runtime cap.
   size_t capacity() const { return slots_; }

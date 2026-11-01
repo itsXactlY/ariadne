@@ -183,6 +183,33 @@ int main() {
         chk(s.dropped_live_bytes() <= static_cast<uint64_t>(fed * 1024), "scene: the refused-byte count cannot exceed what was fed");
     }
 
+    // ---- Scene: a live card that ages off the front is let go, not written through ----
+    // The 2026-11-01 30 GB deck: the ring overflowed, llm_end was refused, so live_reason_ kept
+    // pointing at its card; 400 later cards pushed it off the front of entries_ and the next streamed
+    // bytes were appended into the freed Entry (ASan: heap-use-after-free in flush_run). The card must
+    // be released when push() evicts it, and the next stream must open a fresh card.
+    {
+        Scene s{Theme{}};
+        s.user("go");
+        s.llm_begin();
+        s.llm_reasoning("first thought");
+        s.drain_inline(200, false, false);   // the reasoning card is live now
+        for (int i = 0; i < 300; ++i) s.note("flood " + std::to_string(i));
+        s.llm_end(LlmStats{});                // refused: the ring is full and nobody renders
+        chk(s.dropped_events() > 0, "scene: the flood overflowed the ring, so llm_end was lost");
+        s.drain_inline(200, false, false);
+        for (int k = 0; k < 5; ++k) {         // 500 more cards: the live one falls off the front
+            for (int i = 0; i < 100; ++i) s.note("later " + std::to_string(i));
+            s.drain_inline(200, false, false);
+        }
+        s.llm_reasoning("second thought");    // pre-fix: written into the freed card
+        s.present(120, 40, false);
+        std::string out;
+        for (int y = 0; y < 40; ++y) out += s.row_text(y) + "\n";
+        chk(out.find("second thought") != std::string::npos,
+            "scene: a stream after its card was evicted opens a new card instead of writing freed memory");
+    }
+
 
     // ---- what a hand-off costs: allocations counted, both shapes ----
     // The shipping shape is the stream buffer and the ring's fixed slots; the shape W10b replaced is
