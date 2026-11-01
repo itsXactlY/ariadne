@@ -626,10 +626,24 @@ bool TapeEngine::take_ephemeral(const std::string& prompt) {
     // the next request is an exact extension of the last one; the ephemeral tail message this
     // replaced was never committed, and broke the prefix on every call inside an epoch. One item
     // per state, not one per call: the cost is per epoch, and an unchanged ledger costs nothing.
-    if (prompt.empty() || (plan_item_ && plan_item_->msg.content == prompt)) return true;
+    if (prompt.empty() || (plan_item_ && plan_on_tape_ == prompt)) return true;
+    // Every state stays on the tape -- it is append only -- so the model reads each earlier list
+    // too. Unlabelled, they were N "active task lists" side by side, all but one stale, each
+    // claiming to have survived a compression that never happened, and a small model followed
+    // whichever it met first. Each revision is numbered, and says only the highest one is current.
+    plan_on_tape_ = prompt;
+    ++plan_rev_;
+    std::string body = prompt;
+    if (body.rfind("[Your active task list", 0) == 0) {
+        const size_t nl = body.find('\n');
+        body = nl == std::string::npos ? std::string() : body.substr(nl + 1);
+    }
     Message m;
     m.role = "system";
-    m.content = prompt;
+    // The label must stay true once a later revision exists, because this item is never rewritten.
+    m.content = "[Your active task list, revision " + std::to_string(plan_rev_) +
+                ". Only the highest revision in this conversation is current; it replaces every earlier "
+                "one, and items it no longer lists are done or dropped.]\n" + body;
     plan_item_ = session_->append(std::move(m), true);
     return true;
 }
@@ -788,6 +802,8 @@ void TapeEngine::reset() {
     question_.clear();
     plan_.clear();
     plan_item_.reset();
+    plan_on_tape_.clear();
+    plan_rev_ = 0;
     tokens_ = prompt_ = reused_ = 0;
     tool_chars_ = 0;
     if (router_) router_->on(know::SessionStarted{});

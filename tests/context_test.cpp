@@ -403,6 +403,42 @@ int main() {
         chk(p.size() == 1 + items.size(), "a new epoch renders the rebased history");
         chk(!notes.empty() && notes.back().find("rebase (inside the turn)") != std::string::npos, "rebase announced");
     }
+    {   // every ledger state stays on the append-only tape: each must say which one is current. The
+        // 2026-11-01 regression: two unlabelled "active task lists" side by side, the stale one first,
+        // each claiming it survived a compression that never ran -- and a small model followed it.
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_rev"));
+        const std::string old_hdr = "[Your active task list was preserved across context compression]\n";
+        eng.begin_turn("plan, then work it");
+        eng.take_ephemeral(old_hdr + "- [>] a. read (in_progress)\n- [ ] b. run (pending)");
+        eng.payload();
+        eng.on_assistant(assistant_calls(1, "read_file", "/r1", ""));
+        eng.on_tool_results({tool_result(1, "r1")});
+        eng.take_ephemeral(old_hdr + "- [>] b. run (in_progress)");
+        eng.take_ephemeral(old_hdr + "- [>] b. run (in_progress)");   // unchanged: no third item
+        std::vector<std::string> plans;
+        for (const auto& it : eng.session().items())
+            if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);
+        chk(plans.size() == 2, "one tape item per ledger state, none for an unchanged one (" + std::to_string(plans.size()) + ")");
+        chk(plans.size() == 2 && plans[0].find("revision 1.") != std::string::npos && plans[1].find("revision 2.") != std::string::npos,
+            "each ledger state is numbered in order");
+        bool all_rule = !plans.empty(), none_compress = true;
+        for (const auto& p : plans) {
+            all_rule = all_rule && p.find("Only the highest revision in this conversation is current") != std::string::npos;
+            none_compress = none_compress && p.find("preserved across context compression") == std::string::npos;
+        }
+        chk(all_rule, "every revision says only the highest one is current, so a stale one stays true");
+        chk(none_compress, "no tape revision claims a compression that never ran");
+        chk(plans.size() == 2 && plans[1].find("- [>] b. run (in_progress)") != std::string::npos, "the list itself rides under the label");
+    }
 
     {   // a tail of big results gives way: the new epoch lands under half the rebase point
         tools::ToolRegistry reg;

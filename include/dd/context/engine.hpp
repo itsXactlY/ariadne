@@ -145,6 +145,8 @@ private:
     std::string injection_, question_;
     std::string plan_;   // the loop's ephemeral prompt, for the next epoch's anchor (the worker thread)
     ItemPtr plan_item_;    // the ledger on the tape: appended when it changes, never per call
+    std::string plan_on_tape_;   // the ledger state plan_item_ carries, as the loop handed it over
+    int plan_rev_ = 0;           // revisions appended this epoch: each one names itself the current list
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
     int steered_ = 0;         // prompts folded in at round boundaries since begin_turn
