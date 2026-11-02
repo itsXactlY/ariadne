@@ -18,6 +18,7 @@ namespace agent {
 
 namespace {
 constexpr int kBlankReplyRetries = 2;   // how many times an empty reply is asked for again
+constexpr int kCutReplyContinuations = 3;   // how many times a reply cut off mid-sentence is asked to go on
 // Parallel-safety sets (run_agent.py:246-277).
 const std::vector<std::string> NEVER_PARALLEL = {"clarify"};
 const std::vector<std::string> PARALLEL_SAFE = {
@@ -317,6 +318,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
     api_call_count = 0;
     std::string final_response;
     int blank_replies = 0;   // replies that answered nothing; retried while the turn has tries left
+    int cut_replies = 0;     // replies the budget cut off mid-sentence; asked to go on while tries remain
 
     while (api_call_count < max_iterations && budget->remaining() > 0) {
         if (interrupt_requested) { interrupted = true; break; }
@@ -375,6 +377,19 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
 
         if (!assistant.has_tool_calls()) {
             if (answered) {
+                // finish_reason=length means the answer was cut off mid-sentence, not finished.
+                // The partial reply is already on the tape, so the next call continues from it:
+                // ending here would hand the operator a turn that stops in the middle of a word.
+                if (assistant.finish_reason == "length") {
+                    ++cut_replies;
+                    if (cut_replies <= kCutReplyContinuations &&
+                        !interrupt_requested.load(std::memory_order_acquire))
+                        continue;
+                    final_response = assistant.content +
+                        "\n\n(The reply was cut off by the token budget " + std::to_string(cut_replies) +
+                        " time(s) and could not be continued, so the turn ends here.)";
+                    break;
+                }
                 final_response = assistant.content;
                 break;
             }

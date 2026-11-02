@@ -597,6 +597,54 @@ static core::Message blank(const std::string& finish) {
     return m;
 }
 
+// A reply that started answering and was cut off mid-sentence by the token budget.
+static core::Message cut_mid(const std::string& text) {
+    core::Message m;
+    m.role = "assistant";
+    m.content = text;
+    m.finish_reason = "length";
+    return m;
+}
+
+// A half-answer is not the turn's end: the loop goes on from it, and a turn that cannot be
+// continued still ends with a sentence the operator can read, never a fragment mid-word.
+static void test_cut_reply_continuation() {
+    {
+        Script script;
+        script.replies.push_back(cut_mid("the fix is in engine.cpp because the templ"));
+        script.replies.push_back(answer_here("late renders jinja natively."));
+        Spy spy;
+        agent::Agent agent;
+        agent.max_iterations = 4;
+        agent.llm = &script;
+        agent.context = &spy;
+        const std::string out = agent.run("go");
+        chk(script.calls == 2, "a budget-cut reply continues the turn instead of ending it");
+        chk(out == "late renders jinja natively.", "the turn's end is the finished answer, got '" + out + "'");
+        chk(spy.blank_assistant() == 0, "the tape never receives a blank assistant message");
+        chk(spy.assistant_contents.size() == 2 &&
+            spy.assistant_contents[0] == "the fix is in engine.cpp because the templ",
+            "the cut reply is on the tape, so the next call continues from it");
+    }
+    {
+        Script script;
+        script.replies.push_back(cut_mid("first half"));
+        script.replies.push_back(cut_mid("second half"));
+        script.replies.push_back(cut_mid("third half"));
+        script.replies.push_back(cut_mid("fourth half"));
+        Spy spy;
+        agent::Agent agent;
+        agent.max_iterations = 6;
+        agent.llm = &script;
+        agent.context = &spy;
+        const std::string out = agent.run("go");
+        chk(out.find("fourth half") != std::string::npos, "the last cut reply is what the operator keeps");
+        chk(out.find("cut off by the token budget") != std::string::npos,
+            "a turn that could not be continued says why, got '" + out + "'");
+        chk(script.calls == 4, "continuations stop at the cap, got " + std::to_string(script.calls));
+    }
+}
+
 static void test_reasoning_only_reply() {
     // thinking, no answer, the budget cut it off: the turn is not over, so it asks again
     {
@@ -653,6 +701,7 @@ int main() {
     test_budget();
     test_max_iterations_tool_summary();
     test_ephemeral_prompt_placement();
+    test_cut_reply_continuation();
     test_reasoning_only_reply();
     std::cout << g_pass << " passed, " << g_fail << " failed\n";
     if (g_fail == 0) std::cout << "all agent run tests passed\n";
