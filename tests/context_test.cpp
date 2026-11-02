@@ -428,16 +428,64 @@ int main() {
         for (const auto& it : eng.session().items())
             if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);
         chk(plans.size() == 2, "one tape item per ledger state, none for an unchanged one (" + std::to_string(plans.size()) + ")");
-        chk(plans.size() == 2 && plans[0].find("revision 1.") != std::string::npos && plans[1].find("revision 2.") != std::string::npos,
+        chk(plans.size() == 2 && plans[0].find("revision 1 ") != std::string::npos && plans[1].find("revision 2 ") != std::string::npos,
             "each ledger state is numbered in order");
         bool all_rule = !plans.empty(), none_compress = true;
         for (const auto& p : plans) {
-            all_rule = all_rule && p.find("Only the highest revision in this conversation is current") != std::string::npos;
+            all_rule = all_rule && p.find("A higher revision number wins") != std::string::npos;
             none_compress = none_compress && p.find("preserved across context compression") == std::string::npos;
         }
-        chk(all_rule, "every revision says only the highest one is current, so a stale one stays true");
+        chk(all_rule, "every revision says a higher number wins, so a stale one stays true");
         chk(none_compress, "no tape revision claims a compression that never ran");
-        chk(plans.size() == 2 && plans[1].find("- [>] b. run (in_progress)") != std::string::npos, "the list itself rides under the label");
+        chk(plans.size() == 2 && plans[1].find("- [>] b. run (in_progress)") != std::string::npos, "the change itself rides under the label");
+    }
+    {   // a ticked-off item is appended as what moved, not as a copy of the whole list: revision 1
+        // is the anchor that carries the list once, later revisions only say what changed.
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_delta"));
+        const std::string hdr = "[Your active task list was preserved across context compression]\n";
+        const std::string one = "- [>] 1. read the tape and find where the plan is written (in_progress)\n";
+        const std::string two = "- [>] 2. keep the plan anchored at the epoch head, append only what moved (in_progress)\n";
+        const std::string three = "- [ ] 3. prove the injected plan rides every call exactly once (pending)\n";
+        const std::string four = "- [ ] 4. rerun the context suite and the agent suite (pending)\n";
+        const std::string five = "- [ ] 5. rebuild the deployed binary and check the live turn (pending)";
+        eng.begin_turn("plan, then work it");
+        eng.take_ephemeral(hdr + one + two + three + four + five);
+        eng.payload();
+        eng.on_assistant(assistant_calls(1, "read_file", "/r1", ""));
+        eng.on_tool_results({tool_result(1, "r1")});
+        eng.take_ephemeral(hdr + two + three + four + five);            // item 1 done: it leaves the list
+        eng.payload();
+        eng.on_assistant(assistant_calls(1, "read_file", "/r2", ""));
+        eng.on_tool_results({tool_result(1, "r2")});
+        eng.take_ephemeral(hdr + "- [>] 3. prove the injected plan rides every call exactly once (in_progress)\n" + four + five);
+        std::vector<std::string> plans;
+        for (const auto& it : eng.session().items())
+            if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);
+        chk(plans.size() == 3, "one tape item per ledger state (" + std::to_string(plans.size()) + ")");
+        chk(plans.size() == 3 && plans[0].find("- [>] 1. read the tape") != std::string::npos &&
+            plans[0].find(five) != std::string::npos, "revision 1 is the anchor: the whole list, once");
+        chk(plans.size() == 3 && plans[1].find("- [") == std::string::npos &&
+            plans[1].find("No longer listed") != std::string::npos,
+            "a revision whose list did not change carries only the note, not the list");
+        chk(plans.size() == 3 && plans[1].find("No longer listed") != std::string::npos &&
+            plans[1].find("1. read the tape") != std::string::npos, "an item the list stopped naming is said as done or dropped");
+        chk(plans.size() == 3 && plans[2].find("- [>] 3. prove the injected plan") != std::string::npos &&
+            plans[2].find("No longer listed") != std::string::npos &&
+            plans[2].find("- [ ] 4. rerun") == std::string::npos && plans[2].find("- [ ] 5. rebuild") == std::string::npos,
+            "the next revision names only its own change");
+        long all = 0, anchor = static_cast<long>(plans[0].size());
+        for (const auto& p : plans) all += static_cast<long>(p.size());
+        chk(all < anchor * 3, "three states cost less than three full copies of the list (" +
+                             std::to_string(all) + " vs " + std::to_string(anchor * 3) + " chars)");
     }
 
     {   // a tail of big results gives way: the new epoch lands under half the rebase point

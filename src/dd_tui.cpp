@@ -1235,9 +1235,10 @@ int main(int argc, char** argv) {
         const std::string desc = "Work ledger for a multi-step task. Write the plan before acting, update statuses as "
                                  "you go, keep one item active at a time. Provide `todos` to write the whole list (list "
                                  "position is priority order); omit `todos` to read it back. `merge: true` updates only "
-                                 "the items named and keeps the rest. The list comes back in this tool's result, and in "
-                                 "the anchor after a rebase; it is not restated inside an epoch, so re-read the anchor "
-                                 "and re-write the list if it is gone.";
+                                 "the items named and keeps the rest. The list rides the tape as numbered revisions: "
+                                 "the first of an epoch carries the whole list, a later one only what moved, and a "
+                                 "higher revision wins. After a rebase the list comes back as the anchor of the new "
+                                 "epoch; re-write it if the list is gone.";
         Json item = json_obj({{"id", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("short identifier you choose; keep it stable across merges"))}}))},
                               {"content", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("the step, one line"))}}))},
                               {"status", jsp(json_obj({{"type", jsp(json_str("string"))},

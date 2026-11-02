@@ -171,7 +171,9 @@ std::optional<std::string> TodoStore::format_for_injection() const {
     };
 
     std::vector<std::string> lines;
-    lines.push_back("[Your active task list was preserved across context compression]");
+    // The header is the one line the engine relabels when the list rides the tape, so it states
+    // what it knows and nothing more: these are the open items, and the todo tool is what moves them.
+    lines.push_back("[Your active task list -- the items still open]");
     for (const auto& it : active) {
         lines.push_back("- " + marker(it.status) + " " + it.id + ". " + it.content +
                         " (" + it.status + ")");

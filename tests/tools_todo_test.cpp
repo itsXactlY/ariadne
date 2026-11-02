@@ -33,7 +33,7 @@ static const std::string EXP1 =
     "\"summary\": {\"total\": 3, \"pending\": 3, \"in_progress\": 0, \"completed\": 0, \"cancelled\": 0}}";
 
 static const std::string FMT1 =
-    "[Your active task list was preserved across context compression]\n"
+    "[Your active task list -- the items still open]\n"
     "- [ ] 1. do X (pending)\n"
     "- [ ] 2. spaced (pending)\n"
     "- [ ] ?. (no description) (pending)";
@@ -51,7 +51,7 @@ static const std::string EXP2 =
     "\"summary\": {\"total\": 4, \"pending\": 3, \"in_progress\": 0, \"completed\": 1, \"cancelled\": 0}}";
 
 static const std::string FMT2 =
-    "[Your active task list was preserved across context compression]\n"
+    "[Your active task list -- the items still open]\n"
     "- [ ] 2. spaced (pending)\n"
     "- [ ] ?. (no description) (pending)\n"
     "- [ ] 3. three (pending)";
@@ -70,7 +70,7 @@ static const std::string EXP4 =
     "\"summary\": {\"total\": 4, \"pending\": 1, \"in_progress\": 1, \"completed\": 1, \"cancelled\": 1}}";
 
 static const std::string FMT4 =
-    "[Your active task list was preserved across context compression]\n"
+    "[Your active task list -- the items still open]\n"
     "- [>] a. alpha (in_progress)\n"
     "- [ ] d. delta (pending)";
 

@@ -57,6 +57,67 @@ long index_of(const std::vector<ItemPtr>& v, const ItemPtr& p) {
     return -1;
 }
 
+// The ledger as todo_tool writes it: a header line, then "- [>] id. text (status)".
+std::string plan_body(const std::string& prompt) {
+    if (prompt.rfind("[Your active task list", 0) != 0) return prompt;
+    const size_t nl = prompt.find('\n');
+    return nl == std::string::npos ? std::string() : prompt.substr(nl + 1);
+}
+
+std::vector<std::string> split_lines(const std::string& s) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        const size_t nl = s.find('\n', pos);
+        out.push_back(nl == std::string::npos ? s.substr(pos) : s.substr(pos, nl - pos));
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return out;
+}
+
+// the id a ledger line names: "- [x] 3. wire the anchor (completed)" -> "3"
+std::string plan_line_id(const std::string& line) {
+    size_t pos = line.find(']');
+    if (pos == std::string::npos) return std::string();
+    ++pos;
+    while (pos < line.size() && line[pos] == ' ') ++pos;
+    const size_t e = line.find_first_of(". ", pos);
+    return line.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+}
+
+// What moved between two ledger states. The list itself does not have to be restated every time:
+// the first revision of an epoch carries it, sits at the epoch's head, and stays on the wire until
+// a rebase drops it -- after which the anchor is written again. Restating the whole list per change
+// was the cost: a turn that ticks off five items left five near-identical lists in the window.
+std::string plan_delta(const std::string& before, const std::string& after) {
+    const auto old_lines = split_lines(before), new_lines = split_lines(after);
+    std::string moved, gone;
+    for (const auto& l : new_lines) {
+        const std::string id = plan_line_id(l);
+        std::string prior;
+        for (const auto& o : old_lines)
+            if (plan_line_id(o) == id) { prior = o; break; }
+        if (prior != l) moved += (moved.empty() ? "" : "\n") + l;
+    }
+    for (const auto& o : old_lines) {
+        const std::string id = plan_line_id(o);
+        bool kept = false;
+        for (const auto& l : new_lines)
+            if (plan_line_id(l) == id) { kept = true; break; }
+        if (!kept) {
+            std::string text = o;
+            const size_t b = text.find(']');
+            if (b != std::string::npos) text = text.substr(b + 1);
+            gone += (gone.empty() ? "" : "\n") + text;
+        }
+    }
+    if (moved.empty() && gone.empty()) return std::string();   // only the order moved: say the whole list
+    std::string out = moved;
+    if (!gone.empty()) out += (moved.empty() ? std::string() : std::string("\n")) + "No longer listed (done or dropped):" + gone;
+    return out;
+}
+
 }  // namespace
 
 // ---------------- free helpers ----------------
@@ -521,7 +582,13 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
     }
     // The ledger only needs re-stating here if its tape item left with the epoch; while the item
     // is still in the window it is already on the wire, and a second copy is pure duplication.
-    if (!plan.empty() && index_of(items, plan_item_) < cut) blocks.push_back(plan);
+    // Re-stated, it is the ANCHOR of the new epoch and carries the label the model reads revisions
+    // by — not todo_tool's header, which claims the list "was preserved across context compression"
+    // at the exact moment this rebase is doing that, and says nothing about what a revision number means.
+    if (!plan.empty() && index_of(items, plan_item_) < cut)
+        blocks.push_back("[Your active task list, revision " + std::to_string(plan_rev_) +
+                         " -- the current list. A higher revision number wins; items not listed here are "
+                         "done or dropped.]\n" + plan_body(plan));
     std::string block;
     if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
@@ -622,28 +689,40 @@ void TapeEngine::on_call(const agent::CallStats& st) {
 bool TapeEngine::take_ephemeral(const std::string& prompt) {
     if (!cfg_.tape) return false;   // a payload rebuilt every call has no prefix to keep
     plan_ = prompt;
+    const std::string plan_on_tape_before = plan_on_tape_;   // the state the anchor on the tape carries
     // The ledger rides the tape as real history. An appended item is committed with the turn, so
     // the next request is an exact extension of the last one; the ephemeral tail message this
     // replaced was never committed, and broke the prefix on every call inside an epoch. One item
     // per state, not one per call: the cost is per epoch, and an unchanged ledger costs nothing.
     if (prompt.empty() || (plan_item_ && plan_on_tape_ == prompt)) return true;
-    // Every state stays on the tape -- it is append only -- so the model reads each earlier list
-    // too. Unlabelled, they were N "active task lists" side by side, all but one stale, each
+    // The tape is append only, so an earlier revision stays on the wire and the model reads it
+    // too. Unlabelled they were N "active task lists" side by side, all but one stale, each
     // claiming to have survived a compression that never happened, and a small model followed
-    // whichever it met first. Each revision is numbered, and says only the highest one is current.
+    // whichever it met first -- so every revision numbers itself and says it is the current one.
     plan_on_tape_ = prompt;
     ++plan_rev_;
-    std::string body = prompt;
-    if (body.rfind("[Your active task list", 0) == 0) {
-        const size_t nl = body.find('\n');
-        body = nl == std::string::npos ? std::string() : body.substr(nl + 1);
-    }
+    const std::string body = plan_body(prompt);
+    // The anchor is the full list. It is written once per epoch and re-written only when it has
+    // left the window; after it, a change rides as what moved -- one short item, not a copy of
+    // the whole list. Append-only, so the prefix the GPU holds is never rewritten.
+    const bool anchor = index_of(session_->items(), plan_item_) < 0;
+    std::string delta = anchor ? std::string() : plan_delta(plan_body(plan_on_tape_before), body);
+    // A delta only pays when it is shorter than the list it stands for. A list that is nearly
+    // finished is shorter than the note about what left it, so restating it is the cheaper word.
+    if (!delta.empty() && delta.size() >= body.size()) delta.clear();
     Message m;
     m.role = "system";
-    // The label must stay true once a later revision exists, because this item is never rewritten.
-    m.content = "[Your active task list, revision " + std::to_string(plan_rev_) +
-                ". Only the highest revision in this conversation is current; it replaces every earlier "
-                "one, and items it no longer lists are done or dropped.]\n" + body;
+    // The label is the whole cost of a revision, so it is short and never claims more than it
+    // knows: a higher number wins, and only the anchor states the list.
+    if (anchor || delta.empty()) {
+        m.content = "[Your active task list, revision " + std::to_string(plan_rev_) +
+                    " -- the current list. A higher revision number wins; items not listed here are "
+                    "done or dropped.]\n" + body;
+    } else {
+        m.content = "[Your active task list changed, revision " + std::to_string(plan_rev_) +
+                    " -- what moved since revision " + std::to_string(plan_rev_ - 1) +
+                    ". A higher revision number wins; the list itself is the anchor above.]\n" + delta;
+    }
     plan_item_ = session_->append(std::move(m), true);
     return true;
 }

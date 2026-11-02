@@ -208,8 +208,10 @@ int main(int argc, char** argv) {
         e.schema = json_obj({{"description", j(json_str("Work ledger for a multi-step task. Write the plan before acting, "
                                                         "update statuses as you go; omit todos to read the list back. "
                                                         "merge=true updates only the items named. The list comes back in "
-                                                        "this tool's result and in the anchor after a rebase; re-read the "
-                                                        "anchor and re-write the list if it is gone."))},
+                                                        "this tool's result and, while anything is open, as the head of the "
+                                                        "working context: the first copy of an epoch is the whole list, "
+                                                        "later ones only what moved, and a higher revision wins. Re-write "
+                                                        "the list if it is gone."))},
                              {"parameters", j(json_obj({{"type", j(json_str("object"))}, {"properties", j(std::move(props))}}))}});
         e.handler = [&todos, &agent](const Json& a) {
             const Json* t = json_get(a, "todos");
