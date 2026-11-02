@@ -65,6 +65,12 @@ struct Spy : agent::ContextEngine {
     std::string last_final = "(unset)";
     bool throw_on_end = false;
     std::vector<size_t> assistant_calls, result_counts;
+    std::vector<std::string> assistant_contents;   // what the tape was handed, so a blank message is visible
+    int blank_assistant() const {
+        int n = 0;
+        for (const std::string& c : assistant_contents) n += c.empty() ? 1 : 0;
+        return n;
+    }
     bool takes = false;                  // keeps the ephemeral prompt itself, as a tape does
     std::vector<std::string> taken;      // what the loop handed over, once per call
     void begin_turn(const std::string&) override { ++begun; }
@@ -75,7 +81,10 @@ struct Spy : agent::ContextEngine {
         return {u};
     }
     core::Json tools() override { return core::json_arr(); }
-    void on_assistant(const core::Message& m) override { assistant_calls.push_back(m.tool_calls.size()); }
+    void on_assistant(const core::Message& m) override {
+        assistant_calls.push_back(m.tool_calls.size());
+        assistant_contents.push_back(m.content);
+    }
     void on_tool_results(const std::vector<core::Message>& r) override { result_counts.push_back(r.size()); }
     void after_tools() override {}
     void on_steering(const std::vector<core::Message>& notes) override { steered += static_cast<int>(notes.size()); }
@@ -96,6 +105,14 @@ static void add_tool(tools::ToolRegistry& reg, const std::string& name, std::fun
     e.name = name;
     e.handler = std::move(h);
     reg.register_tool(e);
+}
+
+static core::Message answer_here(const std::string& text) {
+    core::Message m;
+    m.role = "assistant";
+    m.content = text;
+    m.finish_reason = "stop";
+    return m;
 }
 
 static bool cancelled_text(const std::string& s) { return s.find("cancelled") != std::string::npos && s.find("user interrupt") != std::string::npos; }
@@ -125,6 +142,13 @@ struct Seen {
 };
 
 // (a) an interrupt set inside the first of four sequential calls: that call finishes, the rest are cancelled unrun
+// GCC 16.2 mis-analyses the vector<string> growth here once other functions are inlined into the
+// same TU and reports -Wfree-nonheap-object on a buffer the allocator did allocate. It is a compiler
+// false positive, not a real double-free, so the diagnostic is scoped off around this function only.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
+#endif
 static void test_interrupt_sequential() {
     tools::ToolRegistry reg;
     agent::Agent ag;
@@ -157,6 +181,9 @@ static void test_interrupt_sequential() {
 }
 
 // (a) the parallel path: ten calls are two batches (8 workers); an interrupt set by the first batch cancels the second
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15
+#pragma GCC diagnostic pop
+#endif
 static void test_interrupt_parallel() {
     tools::ToolRegistry reg;
     agent::Agent ag;
@@ -553,6 +580,69 @@ static void test_ephemeral_prompt_placement() {
     }
 }
 
+// A reply that carries thinking and no answer, or nothing at all. The tape must not be fed a blank
+// assistant message, and the operator must not be shown an empty turn -- a cut-off budget is told, not hidden.
+static core::Message thinking_only(const std::string& finish) {
+    core::Message m;
+    m.role = "assistant";
+    m.reasoning = "let me think through the tape";
+    m.finish_reason = finish;
+    return m;
+}
+
+static core::Message blank(const std::string& finish) {
+    core::Message m;
+    m.role = "assistant";
+    m.finish_reason = finish;
+    return m;
+}
+
+static void test_reasoning_only_reply() {
+    // thinking, no answer, the budget cut it off: the turn is not over, so it asks again
+    {
+        Script script;
+        script.replies.push_back(thinking_only("length"));
+        script.replies.push_back(answer_here("the answer"));
+        Spy spy;
+        agent::Agent agent;
+        agent.max_iterations = 4;
+        agent.llm = &script;
+        agent.context = &spy;
+        const std::string out = agent.run("go");
+        chk(script.calls == 2, "a thinking-only cut reply is retried, not ended");
+        chk(!out.empty(), "the turn ends with something the operator can read");
+        chk(spy.blank_assistant() == 0, "the tape never receives a blank assistant message");
+    }
+    // thinking, no answer, the model stopped: same, one more attempt, then a told budget
+    {
+        Script script;
+        script.replies.push_back(thinking_only("stop"));
+        script.replies.push_back(answer_here("the answer"));
+        Spy spy;
+        agent::Agent agent;
+        agent.max_iterations = 4;
+        agent.llm = &script;
+        agent.context = &spy;
+        const std::string out = agent.run("go");
+        chk(script.calls == 2, "a thinking-only stop reply is retried, not ended");
+        chk(!out.empty(), "the turn ends with something the operator can read");
+        chk(spy.blank_assistant() == 0, "the tape never receives a blank assistant message");
+    }
+    // nothing at all, and the budget spent on it: the operator is told, not shown silence
+    {
+        Script script;
+        script.replies.push_back(blank("length"));
+        Spy spy;
+        agent::Agent agent;
+        agent.max_iterations = 2;
+        agent.llm = &script;
+        agent.context = &spy;
+        const std::string out = agent.run("go");
+        chk(!out.empty(), "a spent budget is announced, never an empty final answer");
+        chk(spy.last_final.empty() || spy.last_final == out, "what the tape keeps is what was said");
+    }
+}
+
 int main() {
     test_interrupt_sequential();
     test_interrupt_parallel();
@@ -563,6 +653,7 @@ int main() {
     test_budget();
     test_max_iterations_tool_summary();
     test_ephemeral_prompt_placement();
+    test_reasoning_only_reply();
     std::cout << g_pass << " passed, " << g_fail << " failed\n";
     if (g_fail == 0) std::cout << "all agent run tests passed\n";
     return g_fail ? 1 : 0;

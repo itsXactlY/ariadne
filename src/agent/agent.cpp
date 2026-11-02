@@ -17,6 +17,7 @@ namespace dd {
 namespace agent {
 
 namespace {
+constexpr int kBlankReplyRetries = 2;   // how many times an empty reply is asked for again
 // Parallel-safety sets (run_agent.py:246-277).
 const std::vector<std::string> NEVER_PARALLEL = {"clarify"};
 const std::vector<std::string> PARALLEL_SAFE = {
@@ -315,6 +316,7 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
     budget = std::make_unique<IterationBudget>(max_iterations);
     api_call_count = 0;
     std::string final_response;
+    int blank_replies = 0;   // replies that answered nothing; retried while the turn has tries left
 
     while (api_call_count < max_iterations && budget->remaining() > 0) {
         if (interrupt_requested) { interrupted = true; break; }
@@ -360,12 +362,32 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
         if (assistant.finish_reason.empty())
             assistant.finish_reason = assistant.has_tool_calls() ? "tool_calls" : "stop";
 
-        messages.push_back(assistant);
-        if (context) context->on_assistant(assistant);
-        if (step_hook) step_hook(assistant);
+        // A reply that carries neither an answer nor a tool call did not end the turn. Thinking
+        // alone is not an answer, and finish_reason=length says the answer was cut off mid-reply.
+        // A blank message never reaches the tape -- it would sit there as an assistant turn with
+        // nothing in it -- and the loop asks once more instead of ending on silence.
+        const bool answered = assistant.has_tool_calls() || !assistant.content.empty();
+        if (answered) {
+            messages.push_back(assistant);
+            if (context) context->on_assistant(assistant);
+            if (step_hook) step_hook(assistant);
+        }
 
         if (!assistant.has_tool_calls()) {
-            final_response = assistant.content;
+            if (answered) {
+                final_response = assistant.content;
+                break;
+            }
+            ++blank_replies;
+            if (blank_replies <= kBlankReplyRetries && !interrupt_requested.load(std::memory_order_acquire))
+                continue;
+            const std::string cut = assistant.finish_reason == "length"
+                                       ? " (the reply was cut off by the token budget)"
+                                       : "";
+            final_response = std::string("The model answered this turn with nothing") + cut +
+                             (assistant.reasoning.empty() ? " and no tool call" : " -- only thinking, no answer") +
+                             ". It was retried " + std::to_string(blank_replies) +
+                             " time(s) and stayed empty, so the turn ends here.";
             break;
         }
 
