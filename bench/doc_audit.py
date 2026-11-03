@@ -8,11 +8,16 @@
    README calls unwired but a product binary reaches is a falsified claim, and an
    unwired module README does not name is an undeclared one.
 
-2. CITATIONS. Every `path[:line[-line]]` inside backticks in README.md and docs/*.md
-   must resolve to a file in the tree (exact path, or a basename unique in the tree),
-   the range must sit inside the file, and the cited lines must share a token with the
-   doc line that cites them. A range that resolves onto unrelated code is anchor drift
+2. CITATIONS. Every `path[:line[-line]]` inside backticks in README.md, docs/*.md,
+   mk/README.md and — since the 2026-11-04 audit — plan.md, ARIADNE-GATEWAY-PLAN.md and
+   BLOG.md must resolve to a file in the tree (exact path, or a basename unique in the
+   tree), the range must sit inside the file, and the cited lines must share a token with
+   the doc line that cites them. A range that resolves onto unrelated code is anchor drift
    — the same failure as the wiring list, one level down.
+
+   The plan files are citable on purpose: they are where a wave is written down before it
+   is built, so they carry more anchors than any other page. Leaving them out of this pass
+   is what let every line into src/dd_tui.cpp drift by hundreds of lines unnoticed.
 
 Not tree files, so not citable: runtime artifacts beside the binary (`config.yaml`,
 `brief.md`, `report.md`, the `_test.cpp` suffix), URIs (`skill://…`), and provenance
@@ -168,7 +173,8 @@ def shares(doc_line, snippet):
 
 
 def citations():
-    docs = ["README.md"] + [rel(f) for f in sorted(glob.glob(str(ROOT / "docs/*.md")))] + ["mk/README.md"]
+    docs = (["README.md"] + [rel(f) for f in sorted(glob.glob(str(ROOT / "docs/*.md")))]
+            + ["mk/README.md", "plan.md", "ARIADNE-GATEWAY-PLAN.md", "BLOG.md"])
     tree = {}
     for f in (glob.glob(str(ROOT / "src/**/*.cpp"), recursive=True)
               + glob.glob(str(ROOT / "include/dd/**/*.hpp"), recursive=True)
@@ -181,6 +187,10 @@ def citations():
               # and pushes the doc toward wording that hides where the grammar lives.
               + glob.glob(str(ROOT / "skills/*.yaml"))
               + glob.glob(str(ROOT / "tests/*.cpp"))
+              # The probe suites are this repo's own source (a pty driver, a stub backend),
+              # not foreign Python: a doc that cites one must resolve, or the gate pushes the
+              # claim toward wording that hides where the proof lives.
+              + glob.glob(str(ROOT / "tests/*.py"))
              + glob.glob(str(ROOT / "docs/*.md"))
              + glob.glob(str(ROOT / "mk/*.md"))
               # Tier A renamed examples/daedalus -> examples/ariadne; the citable list is

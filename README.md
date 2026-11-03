@@ -75,7 +75,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **One run loop:** the interactive TUI and headless entrypoint drive the same `Agent::run` implementation.
 - **The model knows the contract.** One composed system prompt (`PromptComposer`): the
   **workflow contract** (`PromptComposer::workflow_contract` in `src/know/prompt.cpp:46`,
-  toggled by `agent.contract` at `src/dd_tui.cpp:1172-1173`) — a plan before multi-step work,
+  toggled by `agent.contract` at `src/dd_tui.cpp:1378-1379`) — a plan before multi-step work,
   facts from running not guessing, a change is done when it was run and looked at, skills are
   guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
   before acting, never guess a path or a name, live state is a command and memory is history), a
@@ -88,7 +88,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
 - **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
 - **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
- - **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:45`), never a reason to re-send an answer the caller already holds.
+- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:45`), never a reason to re-send an answer the caller already holds.
 - **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
 
 ## Execution model
@@ -205,7 +205,7 @@ flowchart LR
     FRAME --> TERM["Only changed terminal cells"]
 ```
 
-The README's recorded measurement for a 200-delta turn is zero hand-off allocations in the new path, compared with 214 in the queue it replaced. `grep -rn 'mutex\|lock_guard\|condition_variable' src include` returns nothing at all — no thread lock anywhere in `src/` and `include/`, and no comment arguing one would help. The locks that do exist are kernel-level, per-file, and off the request path: `flock(2)` on a sidecar lock file (`include/dd/core/fslock.hpp`, and a local `FileLock` in `src/gateway/devices.cpp`) held for the whole read-modify-write of a private file — pairing codes and device minting, not request authentication. A file lock that serializes two processes around a rewrite is not a mutex guarding shared memory, and it never sits between a request and its answer. Treat these as claims about this codebase and measured setup, not as a proof that lock-free designs are universally superior.
+The README's recorded measurement for a 200-delta turn is zero hand-off allocations in the new path, compared with 214 in the queue it replaced. `src/` and `include/` declare no mutex, no `lock_guard` and no `condition_variable`, and instantiate none: `grep -rn 'mutex\|lock_guard\|condition_variable' src include` returns only the comments that say why there is none, never a `std::mutex`, a `lock_guard` or a `condition_variable` in code. The locks that do exist are kernel-level, per-file, and off the request path: `flock(2)` on a sidecar lock file (`include/dd/core/fslock.hpp`, and a local `FileLock` in `src/gateway/devices.cpp`) held for the whole read-modify-write of a private file — pairing codes and device minting, not request authentication. A file lock that serializes two processes around a rewrite is not a mutex guarding shared memory, and it never sits between a request and its answer. Treat these as claims about this codebase and measured setup, not as a proof that lock-free designs are universally superior.
 
 The implementation uses fixed-slot rings, atomic ownership publication, producer-owned stream buffers, and snapshots. Ring overflow is counted; live-byte loss is counted; interruption is shared through an atomic flag that also aborts an in-flight libcurl call.
 
@@ -373,7 +373,7 @@ The transport does not invent a grammar for that shape. What the operator writes
 - The contract is checked on the bytes `HttpLLM::body` builds, not on an upstream's answer: `tests/agent_wire_retry_test.cpp` asserts the merged provider object reaches the wire and that an `extra` key named `model` loses to the model we chose.
 - `provider` is the one shape this key exists for today, not a second vocabulary; the key is one word for any field a `/v1` endpoint reads and this client has none of, and today only provider routing needs it. Today: a `base_url` that is a real provider's `/v1` is the only setup that can use it.
 
-*** ## Measurements, not mythology
+## Measurements, not mythology
 
 The project favors repeatable checks over adjectives. The supplied README and test descriptions record the following measurements in their specific environments:
 
@@ -442,7 +442,7 @@ The source tree is larger than the currently wired product surface. The document
 - The shell tool is guarded, not jailed.
 - Some ported translation units and headers are not wired into product binaries by design; use `make doc-audit` for the current measured list.
 - Live measurements depend on the endpoint, model, machine, corpus, and configuration.
-- The harness speaks to an OpenAI-compatible endpoint; this repository is not itself the inference engine.
+- The harness speaks to an OpenAI-compatible endpoint. It can also spawn and front its own engine (`--limbo`, the `dd::limbo` level), but that engine's weights and its build are not in this repository.
 
 ## Direction of travel
 

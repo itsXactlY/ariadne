@@ -174,7 +174,7 @@ HOME=$(mktemp -d)     → nothing created under HOME, exit 0
 ```
 
 `ariadne --init` reports which of the two happened — `wrote …` or `kept …` — so the installer
-never has to know. `ensure_home` (`src/core/home.cpp:152`) fills `state/`, `cache/`, `logs/`;
+never has to know. `ensure_home` (`src/core/home.cpp:153`) fills `state/`, `cache/`, `logs/`;
 the installer creates only the folder the binary is copied into.
 
 Three bugs surfaced while verifying, all real:

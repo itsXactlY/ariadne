@@ -37,7 +37,7 @@ two rules the port lacks.
 |---|---|---|
 | 1a | `tool_output: {max_bytes, max_lines, max_line_length}` in config; `tools::get_tool_output_limits()` resolves it (defaults 50000 / 2000 / 2000, never raises). `ShellOptions::max_output` and `fs_read`'s `limit` read from it instead of header constants. | a config with `max_lines: 3` yields exactly 3 lines and a `next_offset`; the same binary with the section absent yields the defaults |
 | 1b | `fs_read` applies `max_line_length`; a cut line is marked `line_cut` with the byte count it dropped | a fixture with one 40 KB line returns a bounded string, and the marker says how much went |
-| 1c | truncation becomes resumable: both `run_terminal` and `read_file` report `bytes_dropped` / `lines_dropped` plus the resume offset (`fs_tools` already computes `next_offset`; `shell.cpp:1136` already reports `output_bytes`) | a `grep -R` over the tree returns bounded output whose reply names the offset that continues it |
+| 1c | truncation becomes resumable: both `run_terminal` and `read_file` report `bytes_dropped` / `lines_dropped` plus the resume offset (`fs_tools` already computes `next_offset`; `shell.cpp:1252` already reports `output_bytes`) | a `grep -R` over the tree returns bounded output whose reply names the offset that continues it |
 | 1d | `terminal_hints::annotate_failure(cmd, exit, output)` on non-zero exit, plus two rules the port lacks: **empty output with exit 0**, and **output truncated, N dropped — narrow the command**. The port has 4 rules (`gh` JSON field, `command not found`, `ModuleNotFoundError`, import) and neither of these is among them | the two classes that cost real work this session: `cp -r` producing a 0-byte "before" with exit 0, and a hunk that appended at EOF. Each must now come back with a hint naming the cause |
 
 Exit criterion (number, not prose): one binary, one prompt, `DD_TAPE_LOG`, config
@@ -89,7 +89,7 @@ W5's two premises were falsified by the tree on 2026-10-28 and are deleted here,
 not worked around:
 
 - ~~`binary_extensions::has_binary_extension` vs the inline detection at
-  `fs_tools.cpp:133`~~ — the inline check is not an extension check. It is a
+  `fs_tools.cpp:130`~~ — the inline check is not an extension check. It is a
   content probe: `std::memchr(buf.data(), 0, min(r, kBinaryProbe))` with
   `kBinaryProbe = 8192` (`src/tools/fs_tools.cpp:29,130,319`). The module is a
   lowercase-extension-set lookup with **zero call sites** in `src/` or
@@ -104,22 +104,22 @@ not worked around:
   `fs_tools.cpp:319`, the edit path.
 
 **Still in scope, and it is a real fold:** `tools::interrupt` vs the inline cancel
-path — `src/dd_tui.cpp:199-211` (`g_cancel`, `g_sig`, `on_term`,
-`install_term_handlers`) and `src/ui.cpp:1439` (fills `{"error":"cancelled"}` for
-skipped calls). Constraint found by reading, not assumed: the module models a
-*global* flag (`set_interrupt`/`is_interrupted`), while the live path hands the
-running command a **per-call** `std::atomic<bool>*` through `g_cancel`. The fold
-must keep the per-call flag, or Esc stops one command and cancels the next one
-too.
-**Landed 2026-11-01.** The live cancel path in `src/dd_tui.cpp` now goes through the module: `CallFlags`
-is `tools::Interrupt` (the per-call half stays in `g_cancel`, the global half is the module's),
-`install_term_handlers()` installs `tools::install_signal_handlers()`, `interrupt_for_current_call()`
-raises the **module's** flag too so `run_terminal` sees one interrupt from either door, and
-`run_turn()` raises it with `tools::interrupt_current_call()`. What the fold made visible: the module's
-own `install_signal_handlers()` had never run, so an interrupt arriving as a plain signal set a flag
-nothing read — with a real handler installed the note is printed on the signal thread, before the
-blocked read returns, instead of after it (`interrupt_note_written`). The module still has no caller
-other than these, and the per-call pointer is still what the running command holds.
+path — `src/dd_tui.cpp:204-213` (`g_sig`, `on_term`, `install_term_handlers`) and the
+skipped call's own result, synthesised at `src/agent/agent.cpp:145-146`. Constraint
+found by reading, not assumed: the module holds the flag that is *current*
+(`bind`/`current`/`signal`/`clear`/`is_interrupted`, `include/dd/tools/interrupt.hpp:19-27`),
+while the live path hands the running command a **per-call** `std::atomic<bool>*`. The
+fold must keep the per-call flag, or Esc stops one command and cancels the next one too.
+**Landed 2026-11-01; reshaped since, and the constraint held.** The cancel hand-off is one module,
+`dd::tools::interrupt` (`include/dd/tools/interrupt.hpp:19-27`): an atomic pointer to the flag the
+running call watches — `bind`, `current`, `signal`, `clear`, `is_interrupted` — because a global bool
+would fire a turn that has not started yet. The flag itself is `Agent::interrupt_requested`, bound once
+beside the agent (`src/dd_tui.cpp:1325`); a signal reaches it from the handler at
+`src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:434`), a
+turn starts from `interrupt::clear()` (`src/dd_tui.cpp:431`), and every call in flight hands the module's
+pointer to the shell as `opt.cancel` (`src/dd_tui.cpp:228`, `src/dd_tui.cpp:244`). What the fold made
+visible: a plain signal had been setting a flag nothing read. The per-call pointer is still what the
+running command holds, which was the constraint.
 
 Invariant that must survive the move: **every tool call the loop skipped gets a
 result message**. That is what keeps the tape legal. Proof: existing tests stay
@@ -127,7 +127,7 @@ green plus a UI test asserting a cancelled batch has a result for every call id.
 Behavior must be byte-identical before and after — this wave is a refactor, and
 if the reply JSON changes it is not a refactor.
 
-Measured, not assumed: `tests/tools_interrupt_test.cpp` is now 17 checks, and the batch invariant is
+Measured, not assumed: `tests/tools_interrupt_test.cpp` is now 23 checks, and the batch invariant is
 proven as *bytes* rather than as a count — the interrupted `run_terminal` returns its cancelled
 envelope and the skipped sibling returns the envelope the dispatcher synthesises, and the two dumps
 are asserted equal apart from the `id` field that legitimately differs. `tests/interrupt_live_probe.py`
@@ -160,11 +160,11 @@ second send instead of ending the turn.
 ## W5 — redact untrusted server text at the point it enters the prompt
 
 **Closed** by `a42b913` (ancestor of HEAD). One rule: a server's prose is masked
-where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:832-834`
+where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:1109`
 masks the tool `description` through
 `dd::agent::mask_secret_tokens(desc->str, SecretPolicy::ServerProse)`;
-`src/dd_tui.cpp:878-880` masks the server's `instructions` the same way. The
-`inputSchema` node is deep-copied untouched (`:690`), so names, enums and
+`src/dd_tui.cpp:1155` masks the server's `instructions` the same way. The
+`inputSchema` node is deep-copied untouched (`:1105`), so names, enums and
 `required` stay byte-identical — a masked schema would make the model call things
 the server never offered. `SecretPolicy::ServerProse` deliberately drops the
 slash rule (`include/dd/agent/redact.hpp:52`): a path is prose, not a credential,
@@ -183,8 +183,10 @@ list, so disabling a tool changes the key. `config_fingerprint` is unchanged and
 its Python ground-truth cases.
 
 The file is one object read and rewritten whole, so a write is a read-modify-write: a
-`std::mutex` makes two threads writing two servers not lose one of them. It is a boot
-and operator-command lock, not a hot one. Writes go through a temp file in the same
+kernel `FileLock` on a sidecar (`include/dd/core/fslock.hpp`) makes two threads *and two
+processes* writing two servers not lose one of them — a userspace mutex could not cover
+the second dd on the same home, which is why W10d deleted the mutex this paragraph once
+described. It is a boot and operator-command lock, not a hot one. Writes go through a temp file in the same
 directory + `fsync` + `rename`, mode 0600, then a directory `fsync` — a rename that is
 not durable would silently cost the next boot a live list it already paid for.
 
@@ -202,17 +204,17 @@ token cost.
 | the write is atomic and 0600 | `save_all` | same suite: byte-equal round trip, mode 0600, no `.dd-tmp-*` left behind, parent dir created on a fresh home |
 | an unchanged manifest is not rewritten | `write_cache_entry` | same suite asserts the mtime is identical; the boot test asserts the served boot leaves the file byte-identical |
 | a corrupt or partial cache costs a live list, not a boot failure | `load_all` | same suite: empty, garbage, a truncated document, a list and a scalar all read as empty |
-| two writers do not lose a server | the lock | same suite: 8 threads write 8 servers, all 8 present and all keyed |
+| two writers do not lose a server | the kernel lock | same suite: 8 threads write 8 servers, all 8 present and all keyed |
 | boot reads disk on a match and lists live on a miss | `src/dd_tui.cpp` boot loop | `build/dd_mcp_cache_boot_tests`: a server whose `tools/list` costs 400 ms — boot 1 asks and writes, boot 2 asks nothing but handshakes and is served, a url edit asks again and re-keys, the moved config is served on its next boot |
 | a cached manifest registers the same tools, masked the same way | the same registration path | boot test asserts the chat body carries the cached name, enum and `required` byte-identical, the raw key absent, the masked form present, and `schema cached`/`(cache)` in the readouts |
 
 ## W7 — mid-turn steering
 
-**Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:380`)
+**Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:419`)
 runs at the round boundary — after the tool results are appended, before the next request,
 never while a tool call is executing — and what it returns rides as user messages, which
-`TapeEngine::on_steering` (`src/context/engine.cpp:648`) stamps `steered` so the fold is a fact
-of the tape. The count is the turn's (`begin_turn` resets it at `:317`). `/interrupt` keeps its
+`TapeEngine::on_steering` (`src/context/engine.cpp:752`) stamps `steered` so the fold is a fact
+of the tape. The count is the turn's (`begin_turn` resets it at `:370`). `/interrupt` keeps its
 meaning and stays the only mid-call action.
 
 | step | change | proof |
@@ -246,19 +248,20 @@ on asks that opened nothing at all, and was right at rank 1 only 23 of 70 times 
 
 **Closed.** Re-derivation is a tool, not a habit: `make doc-audit` (`bench/doc_audit.py`)
 expands the three product recipes from the `Makefile`, walks the transitive `#include`
-closure from them, and checks every path-and-line citation in `README.md` and
-`docs/*.md` against the tree. It fails on a claim the tree contradicts, so a wave that
+closure from them, and checks every path-and-line citation in `README.md`, `docs/*.md`
+and — since the 2026-11-04 audit — plan.md, ARIADNE-GATEWAY-PLAN.md and BLOG.md
+against the tree. It fails on a claim the tree contradicts, so a wave that
 moves code cannot leave a doc pointing somewhere else.
 
 | what | where | proof |
 |---|---|---|
-| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 59 TUs, `ariadne-agent` 18, `ariadne` 85; closure reaches **181 files** (86 TUs, 95 headers); **33 of 119** `src/*.cpp` linked into no product binary, **49 of 144** headers reached by none, 16 of 32 header-only ports unreached |
-| the README defers the unwired list to the tool | `README.md:409` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :409 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 119** `src/*.cpp` linked into no product binary, **49 of 144** headers unreached, 16 of 32 header-only ports unreached |
-| a citation must point at the thing it describes | `citations()` | 99 citations checked; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (12 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts (`brief.md`, `report.md`, `tape.jsonl`) are excluded |
-| anchors that waves moved | `docs/PARITY.md` | rules `807-815` → `934-944`; prompt voice `783-797` → `908-925`; contract wiring `824-833` → `911-917`; plan ledger `490,716-742,928-944,1220-1249` → `527`, `790-810`, `1019-1032`, `1177`, `1338-1344`; steering `1159` → `1195`; `README.md:95` → `:107`; `ui_test.cpp:169` → `170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:71-79`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`engine.cpp:343,404,659`); F4: catalogues are refreshed (`src/dd_tui.cpp:910-915,834-836,856`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 98 TUs, `ariadne-agent` 18, `ariadne-skills` 59; closure reaches **211 files** (99 TUs, 112 headers); **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers reached by none, 16 of 34 header-only ports unreached |
+| the README defers the unwired list to the tool | `README.md:443` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
+| a citation must point at the thing it describes | `citations()` | every backticked path-and-line is resolved and compared with the paragraph that cites it; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (10 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts beside the binary (`config.yaml`, `brief.md`, `report.md`, `SKILL.md`) are excluded |
+| anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:405`, `src/context/engine.cpp:466`, `src/context/engine.cpp:772`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
-`make doc-audit`: clean — 99 citations, 0 unresolved or drifting, 0 wiring claims.
+`make doc-audit`: clean — 182 citations, 0 unresolved or drifting, 0 wiring claims.
 
 ## W10 — no locks, no queues: every hand-off becomes atomic ownership
 
@@ -269,11 +272,14 @@ so it is engineer-decidable like every other wave:
 
 | what | where | why it is in scope |
 |---|---|---|
-| 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp:15` (jitter counter), `src/agent/prompt_cache_boundary.cpp:16` (x3), `include/dd/gateway/pairing.hpp:55` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere. Each is reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guards state no second thread reaches |
-| 5 queues | `src/context/maze.cpp:239` (`Job`), `:240` (`LedgerEntry`), `include/dd/know/router.hpp:115` (`opened_q_`), `include/dd/learn/sink.hpp:35` (`q_`), `include/dd/ui.hpp:274` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:799`) posts an event per streamed delta, so a long answer is thousands of nodes and thousands of string copies on the hot path |
-| 6 deques | `src/core/json.cpp:198`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:278/275/281` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
-| `core::park` / `unpark`, 10 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
-| `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:257/280/299`, `src/learn/ledger.cpp:20` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |
+| 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp` (jitter counter), `src/agent/prompt_cache_boundary.cpp` (x3), `include/dd/gateway/pairing.hpp` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere, and 10d deleted them. Each was reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guarded state no second thread reaches |
+| 5 queues | `src/context/maze.cpp:246` (`Job`), `src/context/maze.cpp:247` (`LedgerEntry`), `include/dd/know/router.hpp:120` (`opened_q_`), `include/dd/learn/sink.hpp:43` (`q_`), `include/dd/ui.hpp:485` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:1037`) posted an event per streamed delta, so a long answer was thousands of nodes and thousands of string copies on the hot path. These five lines are where each hand-off lives today: all five are `SlotRing`s |
+| 6 deques | `src/core/json.cpp:201`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:520`, `include/dd/ui.hpp:522`, `include/dd/ui.hpp:528` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
+| `core::park` / `unpark`, 12 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp`, `src/limbo/spawn.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
+| `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:265`, `src/context/maze.cpp:288`, `src/context/maze.cpp:307`, `src/learn/ledger.cpp:47` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |
+
+The `where` column carries today's lines, not the ones the inventory found: where the wave landed, the
+object named is the ring, the lock or the deque that replaced what was scoped.
 
 **The shape.** `SlotRing<N>` gains a multi-producer side. One word per slot carries the stamp
 *and* the state — `free`, `writing`, `published`, `taken` — so no thread reaches a state it did
@@ -320,7 +326,7 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 
 **Needs an operator decision** (capability, spend, or a security posture):
 
-- sub-agents — none in C++; `cap_delegate_calls(...,3)` (`agent.cpp:343`) records
+- sub-agents — none in C++; `cap_delegate_calls(...,3)` (`agent.cpp:363`) records
   delegated calls the harness cannot execute. Running them is a new capability.
 - a fetch/browser tool — until one exists there is no call site for
   `website_policy`, `threat_patterns`, `browser_camofox_state`, `tool_backend_helpers`
@@ -328,10 +334,7 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 - `env_passthrough` — which variables cross the shell boundary is a policy choice
 - `budget_config`, `usage_pricing`, `state_scrub` spend/pricing — spend is the operator's
 - `gateway`, `cron` — whole subsystems, not modules
-- the inference engine — **not this tree**. The standalone engine lives at
-  `/home/alca/projects/limbo/plan.md` (llama adaptive base + strata expert-streaming
-  machinery, its own build). The 14 untracked `limbo/` files here are parked, not the
-  target: the harness must not dial its own socket.
+
 - `delegation_output_schema`, `osv_package_parse` — no consumer in the shipping harness
 - remote-backend levers (`prompt_caching`, `prompt_cache_boundary`, `payload_tape`,
   `classification`, `backend_kind`, `retry` beyond transient) — no lever against this
@@ -346,12 +349,23 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 - `message_sanitization::close_interrupted_tool_sequence`: a transcript ending on a raw
   `tool` result with no assistant closer returned **HTTP 200**. The closer fixes nothing here.
 
+**Landed after this plan closed** — kept here so the file and the tree agree:
+
+- `dd::limbo` — the in-process level that spawns or adopts an engine (`2b7017a`). `src/limbo/` and
+  `include/dd/limbo/` are tracked, `--limbo [HOST:]PORT` is a flag of the TUI
+  (`src/dd_tui.cpp:628`), the level is constructed only when that flag is given
+  (`src/dd_tui.cpp:762`), and its three suites plus a TSan binary are in `TEST_BINS`/`TSAN_BINS`.
+  What stays outside this repository is the engine itself — the llama adaptive base and the strata
+  expert-streaming machinery, planned in the limbo repo's own plan. So the scope ruling is narrower
+  than it read: the harness may front an engine it was asked to run, and still never dials a socket
+  nobody gave it.
+
 ## Definition of done
 
 The plan is finished when every wave is committed, `make test` reports
-`0 test binary(ies) failed`, `README.md:26` matches a fresh grep, `PARITY.md` carries a
-measured number for each wave, and the two falsified modules are documented as
-**not wired on purpose** rather than left in an "unwired" list.
+`0 test binary(ies) failed`, `make doc-audit` is clean over `README.md`, `docs/*.md`, this file and
+the gateway plan, `PARITY.md` carries a measured number for each wave, and the two falsified
+modules are documented as **not wired on purpose** rather than left in an "unwired" list.
 
 The hand-off invariant is part of done: `src` and `include` carry no mutex, no
 `lock_guard` and no `condition_variable`, no cross-thread hand-off uses a queue, and
