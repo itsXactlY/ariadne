@@ -179,6 +179,11 @@ std::string HttpLLM::url() const {
 
 Json HttpLLM::body(const std::vector<core::Message>& messages, const Json& tools) const {
     Json b = core::json_obj();
+    // The operator's fields go in first and every field the harness decides is set over
+    // them: `extra` can name something this transport has no key for, never replace the
+    // model, the messages or the stream we chose.
+    if (extra.type == Json::Obj)
+        for (const auto& [k, v] : extra.obj) core::obj_set(b, k, *v);
     core::obj_set(b, "model", core::json_str(model));
     Json msgs = core::json_arr();
     for (const auto& m : messages) core::arr_push(msgs, wire_message(m));

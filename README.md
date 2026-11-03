@@ -353,11 +353,27 @@ Two transports, two vocabularies. The harness never guesses what a model's diale
 | `agent.thinking_budget: N > 0` | `reasoning_budget_tokens: N` plus an instruction message, on engine calls only | caps one thinking field; a `/v1` upstream never sees it |
 | `agent.thinking_budget: 0` — the default | nothing | no cap: the template decides the thinking length |
 
-- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:188`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
+- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:193`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
 - A request offers only what this model implements: `Endpoint::efforts()` returns the levels the chat template the server reported actually has (`src/context/endpoint.cpp:184`), and a level above that ceiling steps down through the `offered` check (`src/dd_tui.cpp:1173` uses `efforts` and `kEfforts`) until the boot note names the level that is running.
-- A cap is never named for a request that did not choose a level — the shape callback is gated on `effort > 0` (`src/dd_tui.cpp:1342` calls `ep.shape` with `effort.load(...) > 0`), so neither no-preference nor `off` invites the model to think. Where a cap is named, `Endpoint::shape` writes `reasoning_budget_tokens` on engine calls (`src/context/endpoint.cpp:179`) and returns early for a remote API, which gets the OpenAI fields only (`src/context/endpoint.cpp:173-174`).
+- A cap is never named for a request that did not choose a level — the shape callback is gated on `effort > 0` (`src/dd_tui.cpp:1347` calls `ep.shape` with `effort.load(...) > 0`), so neither no-preference nor `off` invites the model to think. Where a cap is named, `Endpoint::shape` writes `reasoning_budget_tokens` on engine calls (`src/context/endpoint.cpp:179`) and returns early for a remote API, which gets the OpenAI fields only (`src/context/endpoint.cpp:173-174`).
 
-## Measurements, not mythology
+### One model, many providers: what a request says about which one answers
+
+A model's id is not a server. A `/v1` upstream serves one model through several providers, same weights behind different servers and different quantizations, and the name a request carries cannot say which one answers. On that API the provider is a request field: `provider.only` names one, spelled as that endpoint's own model list spells it, and `provider.allow_fallbacks: false` refuses a substitute, which makes a provider other than the one asked for an error rather than a silent swap.
+
+The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:186` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose. A field an upstream does not know is that upstream's error text, verbatim; nothing here swallows a word the upstream never heard.
+
+| Request state | On the wire | What it does |
+|---|---|---|
+| no `model.extra` | nothing beyond our own fields | whoever the upstream picks answers, and the response names who did |
+| `model.extra.provider.only: [baidu/fp8]` | `{"provider":{"only":["baidu/fp8"]}}` | that provider answers; the response's `provider` field is the proof, not our inference |
+| `model.extra.provider.allow_fallbacks: false` | `false`, not a dropped key | a provider other than the one asked for is an error |
+
+- `model.extra` has no default: `src/dd_tui.cpp:1334` copies it into `HttpLLM::extra` (`include/dd/agent/http_llm.hpp`) and an unset key sends nothing, which is how a local `llama-server` stays untouched by a field it has never seen.
+- The contract is checked on the bytes `HttpLLM::body` builds, not on an upstream's answer: `tests/agent_wire_retry_test.cpp` asserts the merged provider object reaches the wire and that an `extra` key named `model` loses to the model we chose.
+- `provider` is the one shape this key exists for today, not a second vocabulary; the key is one word for any field a `/v1` endpoint reads and this client has none of, and today only provider routing needs it. Today: a `base_url` that is a real provider's `/v1` is the only setup that can use it.
+
+*** ## Measurements, not mythology
 
 The project favors repeatable checks over adjectives. The supplied README and test descriptions record the following measurements in their specific environments:
 

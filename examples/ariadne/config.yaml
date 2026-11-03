@@ -16,6 +16,12 @@ model:
   base_url: http://127.0.0.1:8080/v1     # OpenAI-compatible; must end in /v1
   name: qwen3.8-flash-next-coder-iq1_m    # sent as "model"; llama-server ignores it
   api_key: ""                             # llama.cpp needs none
+  # extra:                                # fields this client has no key of its own, sent verbatim
+  #   provider:                           # the only thing this is for today: an upstream serves
+  #     only: [deepseek]                  #   ONE model from many providers, and provider.only
+  #     allow_fallbacks: false            #   names which one answers; false refuses a substitute
+  #                                       # a local llama-server never sees these; a /v1 upstream
+  #                                       # that does not know a field answers the error itself
 
 agent:
   max_turns: 50            # LLM calls per turn; keep it low on a slow local model

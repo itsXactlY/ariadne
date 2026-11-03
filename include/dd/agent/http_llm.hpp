@@ -35,6 +35,11 @@ core::Json wire_message(const core::Message& m);
 class HttpLLM : public LLMClient {
 public:
     std::string base_url, model, api_key;
+    // What the operator asked the upstream to carry, verbatim: a /v1 chat endpoint reads
+    // fields this transport has no key of its own - one model is served by many providers,
+    // and only a request field says which one answers. Merged before the harness's own
+    // fields, so a name here can add a field but never replace one we decided.
+    core::Json extra;
     const std::atomic<bool>* cancel = nullptr;
     std::function<std::string()> effort;          // reasoning_effort to send, "" = the server's default
     std::function<void(core::Json& body)> shape;  // endpoint fields (dd/context Endpoint)

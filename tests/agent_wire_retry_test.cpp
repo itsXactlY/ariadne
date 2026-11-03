@@ -330,6 +330,26 @@ int main() {
         chk(ep.served.load() == 2, "the prewarm re-sent once, no more");
     }
 
+    // ── What the operator asked the upstream for reaches the wire ──
+    // One model is served by many providers, and only a request field says which one
+    // answers; this transport has no key of its own for it, so the operator's fields
+    // ride along verbatim. body() is a pure function, so the contract is checked on the
+    // bytes it builds - no endpoint is needed, and none of it is policy we invent.
+    {
+        HttpLLM llm;
+        llm.model = "the-model-we-chose";
+        llm.extra = dd::core::json_parse(
+            "{\"provider\":{\"only\":[\"deepseek\"],\"allow_fallbacks\":false},"
+            "\"model\":\"a-name-the-operator-picked\"}");
+        const std::string wire = dd::core::json_dump(llm.body({user("hi")}, json_arr()));
+        chk(wire.find("\"only\":[\"deepseek\"]") != std::string::npos,
+            "the provider pin reaches the wire verbatim");
+        chk(wire.find("\"allow_fallbacks\":false") != std::string::npos,
+            "refusing a substitute survives as false, not as a dropped key");
+        chk(wire.find("\"model\":\"the-model-we-chose\"") != std::string::npos,
+            "a name we decided is ours: the operator's field cannot replace it");
+    }
+
     curl_global_cleanup();
     std::printf(g_fail == 0 ? "wire retry: all ok\n" : "wire retry: %d failed\n", g_fail);
     return g_fail == 0 ? 0 : 1;

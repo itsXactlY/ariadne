@@ -1327,6 +1327,11 @@ int main(int argc, char** argv) {
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;
+    // Provider routing has no key of its own: an upstream serves one model from many
+    // providers, and only a request field says which one answers. Whatever the operator
+    // writes under model.extra is carried to that upstream verbatim, and an upstream that
+    // does not know a field refuses it - the answer, not a silence from us.
+    if (const Json* x = cfg.get_map("model.extra")) llm.extra = *x;
     llm.cancel = dd::tools::interrupt::current();   // the transport stops on the same flag
     // Sends per call: a restarting server is answered by the second send. 1 turns the
     // retry off, which is what a wire that must fail on the first try needs.
