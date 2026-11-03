@@ -341,6 +341,22 @@ The following environment variables override configuration values:
 
 Configuration is resolved from the selected home and its `config.yaml`; see `examples/ariadne/config.yaml` for the shipped reference.
 
+### Thinking: what a request tells the model
+
+Two transports, two vocabularies. The harness never guesses what a model's dialect is: an OpenAI-shaped request carries one field, the harness's own engine calls can carry a cap, and the chat template compiled into the server has the last word on both. The default names no cap at all — `agent.thinking_budget` is 0 from the header up (`include/dd/context/endpoint.hpp:77` holds `int thinking_budget = 0`) and a config that omits the key is left uncapped by the loader (`src/dd_tui.cpp:1163` reads `cfg.has("agent.thinking_budget")`), which is what the shipped reference does as well.
+
+| Request state | What is sent | What it does |
+|---|---|---|
+| `agent.reasoning_effort` empty or absent | nothing | the template's own default answers, and no cap is named either |
+| `agent.reasoning_effort: off` (`none`, `false`, `disabled`) | `reasoning_effort: "none"` | thinking off; llama-server and Strata both read that spelling, and no cap is named |
+| `agent.reasoning_effort: low` … `ultra` | `reasoning_effort: <level>` | the level's meaning is the template's; on the harness's own engine the cap below also applies |
+| `agent.thinking_budget: N > 0` | `reasoning_budget_tokens: N` plus an instruction message, on engine calls only | caps one thinking field; a `/v1` upstream never sees it |
+| `agent.thinking_budget: 0` — the default | nothing | no cap: the template decides the thinking length |
+
+- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:188`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
+- A request offers only what this model implements: `Endpoint::efforts()` returns the levels the chat template the server reported actually has (`src/context/endpoint.cpp:184`), and a level above that ceiling steps down through the `offered` check (`src/dd_tui.cpp:1173` uses `efforts` and `kEfforts`) until the boot note names the level that is running.
+- A cap is never named for a request that did not choose a level — the shape callback is gated on `effort > 0` (`src/dd_tui.cpp:1342` calls `ep.shape` with `effort.load(...) > 0`), so neither no-preference nor `off` invites the model to think. Where a cap is named, `Endpoint::shape` writes `reasoning_budget_tokens` on engine calls (`src/context/endpoint.cpp:179`) and returns early for a remote API, which gets the OpenAI fields only (`src/context/endpoint.cpp:173-174`).
+
 ## Measurements, not mythology
 
 The project favors repeatable checks over adjectives. The supplied README and test descriptions record the following measurements in their specific environments:

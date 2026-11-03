@@ -74,7 +74,7 @@ public:
 
     // The fields a request carries. thinking: reasoning is on for this call.
     void shape(core::Json& body, int slot, bool thinking) const;
-    int thinking_budget = 1024;                  // agent.thinking_budget; 0 = no cap
+    int thinking_budget = 0;                     // agent.thinking_budget; 0 = no cap
 
     // The effort ladder this model's chat template implements ("off" first);
     // the whole ladder when there is no template to read, nothing when the

@@ -21,8 +21,15 @@ agent:
   max_turns: 50            # LLM calls per turn; keep it low on a slow local model
   system_prompt: ""        # the operator's own voice; the composer adds role, workflow, retrieval
   reasoning_effort: none   # off | low | medium | high | xhigh | max | ultra (only what the template has)
-  thinking_budget: 1024    # max thinking tokens per call on a local server; 0 = no cap
-  contract: true           # the short workflow contract: plan first, verify by running, close the turn
+  # thinking: reasoning_effort is the switch; the model's own chat template is the size.
+  #   empty/absent  -> no thinking field, no cap: the template's default answers
+  #   off | none    -> reasoning_effort: "none", which llama-server and Strata read as off
+  #   low … ultra   -> the level name; only the levels this template implements are offered
+  # thinking_budget is only a cap, and only on the harness's own engine requests (reasoning_budget_tokens
+  # + an instruction message); a remote /v1 endpoint never sees it, and a cap is named only when
+  # a level was chosen. 0 = no cap — what this file ships, and what the harness does with
+  # the key absent.
+  thinking_budget: 0       # no cap on a native-engine call; a /v1 model is sized by reasoning_effort
 
 display:
   skin: neural             # ./skins/<skin>.yaml if present, else the built-in neural palette

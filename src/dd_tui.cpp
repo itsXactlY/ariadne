@@ -1158,7 +1158,11 @@ int main(int argc, char** argv) {
     // ---- the server, and what each request tells it ----
     dd::context::Endpoint ep(base_url);
     ep.probe();
-    ep.thinking_budget = cfg.has("agent.thinking_budget") ? static_cast<int>(cfg.get_int("agent.thinking_budget")) : 1024;
+    // 0 = no cap: a server whose template wants a thinking budget decides its own size. The key
+    // is absent only in an operator config that predates the change; uncapped matches it.
+    ep.thinking_budget = cfg.has("agent.thinking_budget")
+                             ? static_cast<int>(cfg.get_int("agent.thinking_budget"))
+                             : 0;
     const std::vector<std::string> efforts = ep.efforts();
     auto offered = [&](int i) {
         return i >= 0 && std::find(efforts.begin(), efforts.end(), kEfforts[i]) != efforts.end();
@@ -1331,7 +1335,11 @@ int main(int argc, char** argv) {
         const int e = effort.load(std::memory_order_relaxed);
         return e < 0 ? std::string() : e == 0 ? std::string("none") : std::string(kEfforts[e]);
     };
-    llm.shape = [&ep, &effort](Json& b) { ep.shape(b, ep.main_slot(), effort.load(std::memory_order_relaxed) != 0); };
+    // shape's third argument says "reasoning is on for this call", and only a chosen
+    // level says that: -1 is "no preference" (send nothing, the model's default answers)
+    // and 0 is off. Naming a thinking budget in a request that asked for no level is
+    // what invites the model to think — the budget leaked into runs that wanted none.
+    llm.shape = [&ep, &effort](Json& b) { ep.shape(b, ep.main_slot(), effort.load(std::memory_order_relaxed) > 0); };
     llm.on_begin = [&scene] { scene.llm_begin(); };
     llm.on_reasoning = [&scene](const std::string& d) { scene.llm_reasoning(d); };
     llm.on_content = [&scene](const std::string& d) { scene.llm_content(d); };
