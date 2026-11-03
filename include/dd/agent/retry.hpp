@@ -15,17 +15,27 @@ double jittered_backoff(int attempt, double base_delay = 5.0, double max_delay =
 
 // ── The wire's own retry policy ───────────────────────────────────────────────
 // One send of a request is an experiment, and its outcome is either a fact about the
-// server or a fact about the socket. Only a socket fact can change on a second send, so
-// only a socket fact is worth sending again. Everything the server answered — a 4xx, a
-// body past the byte cap, an error chunk inside the stream, a call the operator cut — is
-// the answer this request gets every time it is sent; re-sending it spends a turn to get
-// the same words back, and on a stream it spends them twice.
+// server or a state the server is in. A state that says "come back" can differ on a second
+// send; a verdict on the request cannot. So a refused connect, a cut socket, a 5xx that
+// handed nothing out, and a rate limit are worth one more send — everything else the
+// server answered (a 400, a 401, a 501, a body past the byte cap, an error chunk inside the
+// stream, a call the operator cut) is the answer this request gets every time it is sent;
+// re-sending it spends a turn to get the same words back, and on a stream it spends them
+// twice. A 429 is the case worth naming: the request was never refused, it was not served
+// *yet*, and the server says when to ask again (see `retry_after_s`).
 enum class WireFailure {
     None,       // an acceptable answer arrived
     Answer,     // the server answered, but not with what was asked for: re-sending changes nothing
     Cancelled,  // curl stopped because the operator said stop; nobody asked for the call again
-    Transient,  // no answer arrived and nothing reached the caller: refused connect, cut socket, 5xx
+    Transient,  // nothing reached the caller and a second send may differ: cut socket, 5xx, 429
 };
+
+// The server states that mean "ask again", never "this request is wrong": 408 (it gave up
+// waiting for us), 429 (we are over its rate), 500/502/503/504 (it failed to serve this
+// one). 501 and 505 are answers — a second send asks the same unimplementable thing — and
+// every other 4xx is the request being refused. Retrying only this list is what makes the
+// policy a policy rather than "any non-2xx twice".
+bool retryable_status(long status);
 
 // One send, in the terms the policy reads. curl's code travels as an int so this header
 // stays curl-free; a non-zero code means no answer arrived at all. `spoken` is the whole
@@ -43,6 +53,7 @@ struct WireResult {
     // — a keep-alive server holds the connection open — so a non-zero curl code here is the
     // reader stopping, not the server failing. It must never be re-sent.
     bool completed = false;
+    long retry_after_s = 0;      // the server's own Retry-After, 0 when it named none
 };
 
 WireFailure wire_failure(const WireResult& r);
@@ -54,6 +65,14 @@ bool transient(WireFailure f);
 // scaled to the wire: a socket hiccup clears in milliseconds, not in the 5s an agent turn
 // waits for a rate limit. A restarting server is back well before the second send.
 double wire_backoff_ms(int attempt, double base_ms = 250.0, double max_ms = 2000.0);
+
+// What to actually wait before send `attempt`, which is not the same question.
+// `retry_after_s` is the server's own instruction: a wait shorter than it earns another 429,
+// so the longer of the two wins. `remaining_ms` is what the call's retry budget has left
+// (-1 = unbounded); a wait that would run past it returns -1, so the caller stops and says
+// what the server asked for instead of sleeping into a failure it already knows.
+double wire_wait_ms(int attempt, long retry_after_s, double base_ms = 250.0,
+                    double max_ms = 2000.0, double remaining_ms = -1.0);
 
 }  // namespace agent
 }  // namespace dd

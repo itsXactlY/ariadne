@@ -88,7 +88,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
 - **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
 - **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
-- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:45`), never a reason to re-send an answer the caller already holds.
+- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:55`), never a reason to re-send an answer the caller already holds.
 - **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
 
 ## Execution model
@@ -258,7 +258,7 @@ A tool-enabled agent is a system with side effects. The boundary needs to be exp
 | MCP | Enabled servers are discovered live; input schemas are registered |
 | HTTP | URL safety checks run before clients connect |
 | Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
-| Retries | Socket-level failures and eligible 5xx responses may be retried; 4xx and interrupted calls are not. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:45`) — an answer the caller already holds is never re-sent |
+| Retries | A refused connect, a socket cut before the response line, and the states that mean "come back" (408, 429, 500, 502, 503, 504) are re-sent while nothing has been handed out; 400/401/501/505 are verdicts and are not, nor is an interrupted call. A 429's own `Retry-After` is honoured over the backoff, and a wait past the retry budget is refused with the number in the error. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:55`) — an answer the caller already holds is never re-sent |
 | Tool output | Bounded at production, with omitted bytes/lines accounted for |
 | Paths | Filesystem tools reject `..` path components |
 | Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
@@ -332,7 +332,8 @@ The following environment variables override configuration values:
 | `DD_BASE_URL` | Override `model.base_url`; must end in `/v1` |
 | `DD_MODEL` | Override `model.name` |
 | `DD_API_KEY` | Override `model.api_key`; local llama.cpp setups may not need one |
-| `DD_WIRE_ATTEMPTS` | Number of sends per LLM call; retries only eligible failures |
+| `DD_WIRE_ATTEMPTS` | Sends per LLM call (default 3); retries only the come-back states above |
+| `DD_WIRE_BUDGET_MS` | Wall clock one call may spend on sends and pauses (default 30000); a server's `Retry-After` past it is refused rather than slept away |
 | `DD_MAX_TURNS` | Override `agent.max_turns`; cap it to avoid pathological loops |
 | `DD_TAPE_LOG` | Write per-call context-tape accounting |
 | `DD_FAST_LAYER` | Override the fast-layer token threshold for rebase testing |
@@ -361,7 +362,7 @@ Two transports, two vocabularies. The harness never guesses what a model's diale
 
 A model's id is not a server. A `/v1` upstream serves one model through several providers, same weights behind different servers and different quantizations, and the name a request carries cannot say which one answers. On that API the provider is a request field: `provider.only` names one, spelled as that endpoint's own model list spells it, and `provider.allow_fallbacks: false` refuses a substitute, which makes a provider other than the one asked for an error rather than a silent swap.
 
-The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:186` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose. A field an upstream does not know is that upstream's error text, verbatim; nothing here swallows a word the upstream never heard.
+  The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:220` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose.
 
 | Request state | On the wire | What it does |
 |---|---|---|
@@ -369,7 +370,7 @@ The transport does not invent a grammar for that shape. What the operator writes
 | `model.extra.provider.only: [baidu/fp8]` | `{"provider":{"only":["baidu/fp8"]}}` | that provider answers; the response's `provider` field is the proof, not our inference |
 | `model.extra.provider.allow_fallbacks: false` | `false`, not a dropped key | a provider other than the one asked for is an error |
 
-- `model.extra` has no default: `src/dd_tui.cpp:1334` copies it into `HttpLLM::extra` (`include/dd/agent/http_llm.hpp`) and an unset key sends nothing, which is how a local `llama-server` stays untouched by a field it has never seen.
+- `model.extra` has no default: `src/dd_tui.cpp:1335` copies it into `HttpLLM::extra` (`include/dd/agent/http_llm.hpp`) and an unset key sends nothing, which is how a local `llama-server` stays untouched by a field it has never seen.
 - The contract is checked on the bytes `HttpLLM::body` builds, not on an upstream's answer: `tests/agent_wire_retry_test.cpp` asserts the merged provider object reaches the wire and that an `extra` key named `model` loses to the model we chose.
 - `provider` is the one shape this key exists for today, not a second vocabulary; the key is one word for any field a `/v1` endpoint reads and this client has none of, and today only provider routing needs it. Today: a `base_url` that is a real provider's `/v1` is the only setup that can use it.
 

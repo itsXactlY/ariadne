@@ -115,7 +115,7 @@ fold must keep the per-call flag, or Esc stops one command and cancels the next 
 running call watches — `bind`, `current`, `signal`, `clear`, `is_interrupted` — because a global bool
 would fire a turn that has not started yet. The flag itself is `Agent::interrupt_requested`, bound once
 beside the agent (`src/dd_tui.cpp:1325`); a signal reaches it from the handler at
-`src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:434`), a
+`src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:435`), a
 turn starts from `interrupt::clear()` (`src/dd_tui.cpp:431`), and every call in flight hands the module's
 pointer to the shell as `opt.cancel` (`src/dd_tui.cpp:228`, `src/dd_tui.cpp:244`). What the fold made
 visible: a plain signal had been setting a flag nothing read. The per-call pointer is still what the
@@ -139,20 +139,28 @@ produced. Both green. Full suite after the fold: **109 test binaries, 0 failed**
 
 ## W4 — transient retry on the wire (reliability)
 
-**Closed.** One rule, in one place: `wire_failure(WireResult)` (`include/dd/agent/retry.hpp`)
-answers `None / Answer / Cancelled / Transient`, and only `Transient` is sent again. A
-fact about the socket can change on a second send; a fact about the server cannot, so a
-4xx, the byte cap, the stall clock and an error chunk inside the stream are answers.
-`HttpLLM::chat` (`src/agent/http_llm.cpp`) holds the send loop and `prime` takes the same
-rule through `net::Response`. `jittered_backoff` has a call site at last: `wire_backoff_ms`
-scales it to the wire — 250 ms base, 2 s cap — so a restarting server is answered by the
-second send instead of ending the turn.
+**Closed, and reopened for the one class it filed wrong (2026-11-04).** One rule, in one place:
+`wire_failure(WireResult)` (`include/dd/agent/retry.hpp`) answers `None / Answer / Cancelled /
+Transient`, and only `Transient` is sent again. A state the server is in can change on a second
+send; a verdict on the request cannot. The rule is therefore a list, not a range: `retryable_status`
+(408, 429, 500, 502, 503, 504) is `Transient` while nothing has been handed out, and every other
+4xx — 400, 401, 501, 505 — is the answer. A 429 was the name the first version filed under "a 4xx,
+so final"; it is the request not served *yet*, and the server says when to ask again. So the wait
+is `wire_wait_ms`: the longer of `wire_backoff_ms` (250 ms base, 2 s cap — `jittered_backoff` scaled
+to the wire) and the server's own `Retry-After`, refused when it would run past the call's
+`retry_budget_ms` (30 s), because a client that sleeps toward a failure it already knows is
+spending the operator's turn. `HttpLLM::chat` (`src/agent/http_llm.cpp`) holds the send loop and
+`prime` takes the same rule through `net::Response`; `DD_WIRE_ATTEMPTS` and `DD_WIRE_BUDGET_MS` are
+the levers. Both binaries run that one transport now: `ariadne-agent` used to carry a second,
+single-shot curl call with no policy at all.
 
 | rule | where | proof |
 |---|---|---|
-| a socket fact is re-sent: refused connect, a socket cut before the response line, a 5xx that handed nothing out | `wire_failure` | `build/dd_wire_retry_tests` — a fake loopback endpoint answers 500 then 200: exactly two connections, ≥245 ms between them, the answer lands |
+| a state that can differ is re-sent: refused connect, a socket cut before the response line, a 408/429/500/502/503/504 that handed nothing out | `wire_failure` + `retryable_status` | `build/dd_wire_retry_tests` — a fake loopback endpoint answers 500 then 200: exactly two connections, ≥245 ms between them, the answer lands |
 | a stream that already spoke is never re-sent | `StreamSink::spoke` | same suite: a delta handed out, then the socket cut — one connection, the caller keeps the words it got, nothing is spoken twice |
-| a 4xx, the byte cap, the stall clock and an error chunk are answers, not hiccups | `wire_failure` | one connection, no pause paid (<200 ms), the server's own words come back |
+| a verdict on the request (400, 401, 501, 505), the byte cap, the stall clock and an error chunk are answers, not hiccups | `wire_failure` + `retryable_status` | one connection, no pause paid (<200 ms), the server's own words come back |
+| a rate limit is waited out for as long as the server asked | `wire_wait_ms` + `retry_after_seconds` (`src/net/http.cpp`) | same suite: 429 with `Retry-After: 1` then 200 — exactly two connections, ≥990 ms apart, the answer lands |
+| a wait longer than the budget is refused, and the failure says so | `budget_spent` + `retry_budget_ms` | same suite: 429 with `Retry-After: 120` against a 400 ms budget — one connection, no sleep, the error names both the 120 s and the budget |
 | a call cut by Esc is never re-sent | `cancelled` in `WireResult` | one connection at most, no backoff paid, the error says `interrupted` |
 | the send count rides out, so a slow endpoint is visible | `CallStats.attempts` → `LlmStats.attempts`; `with_sends()` on the error | the suite asserts `attempts == 2` and that `latency_ms` counts the whole wait, not only the send that answered; the engine row renders it as `· ×2` and the verbose status row as `sent 2` (`dd_ui_tests`) |
 | `DD_WIRE_ATTEMPTS=1` is the old one-shot wire | `HttpLLM::retry_attempts` | the suite: one connection, and the error names the server's reason without a send count |
@@ -255,7 +263,7 @@ moves code cannot leave a doc pointing somewhere else.
 
 | what | where | proof |
 |---|---|---|
-| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 98 TUs, `ariadne-agent` 18, `ariadne-skills` 59; closure reaches **211 files** (99 TUs, 112 headers); **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers reached by none, 16 of 34 header-only ports unreached |
+| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 98 TUs, `ariadne-agent` 23, `ariadne-skills` 59; closure reaches **211 files** (99 TUs, 112 headers); **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers reached by none, 16 of 34 header-only ports unreached |
 | the README defers the unwired list to the tool | `README.md:443` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
 | a citation must point at the thing it describes | `citations()` | every backticked path-and-line is resolved and compared with the paragraph that cites it; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (10 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts beside the binary (`config.yaml`, `brief.md`, `report.md`, `SKILL.md`) are excluded |
 | anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
@@ -353,7 +361,7 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 
 - `dd::limbo` — the in-process level that spawns or adopts an engine (`2b7017a`). `src/limbo/` and
   `include/dd/limbo/` are tracked, `--limbo [HOST:]PORT` is a flag of the TUI
-  (`src/dd_tui.cpp:628`), the level is constructed only when that flag is given
+  (`src/dd_tui.cpp:629`), the level is constructed only when that flag is given
   (`src/dd_tui.cpp:762`), and its three suites plus a TSan binary are in `TEST_BINS`/`TSAN_BINS`.
   What stays outside this repository is the engine itself — the llama adaptive base and the strata
   expert-streaming machinery, planned in the limbo repo's own plan. So the scope ruling is narrower

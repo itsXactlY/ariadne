@@ -20,11 +20,20 @@ struct Response {
     std::string body;
     std::string error;   // transport failure, empty when the server answered
     bool cancelled = false;
+    // The server's own Retry-After, in whole seconds (0 = it named none). A 429 or a 503
+    // that says how long to wait is not a verdict on the request, it is an instruction;
+    // the retry policy honours it rather than guessing a backoff that comes back too early.
+    long retry_after_s = 0;
     // A streamed call whose callback asked for the end. The server answered; the caller
     // stopped reading. An error would call a satisfied reader a failure.
     bool ended_early = false;
     bool ok() const { return error.empty() && status >= 200 && status < 300; }
 };
+
+// `Retry-After: 12` -> 12; a header line that is not that header, or a HTTP-date form this
+// client cannot schedule against, -> 0. One parser, so the one-shot and the streamed paths
+// cannot disagree about what a server asked for.
+long retry_after_seconds(const std::string& header_line);
 
 Response get(const std::string& url, long timeout_ms, size_t max_bytes = kMaxBody);
 Response post(const std::string& url, const std::string& json_body, long timeout_ms,

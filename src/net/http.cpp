@@ -5,6 +5,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <cctype>
 
 namespace dd {
 namespace net {
@@ -31,6 +32,14 @@ std::size_t sink(char* p, std::size_t, std::size_t n, void* ud) {
 int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     const auto* flag = static_cast<const std::atomic<bool>*>(ud);
     return flag && flag->load(std::memory_order_relaxed) ? 1 : 0;
+}
+
+// Every header line the server sends, once each: the only place a Retry-After can be read.
+std::size_t header_cb(char* p, std::size_t, std::size_t n, void* ud) {
+    auto* ra = static_cast<long*>(ud);
+    const long secs = retry_after_seconds(std::string(p, n));
+    if (secs > 0) *ra = secs;
+    return n;
 }
 
 // A stream's sink: bytes go out as they arrive. 0 stops the transfer, which libcurl reports
@@ -63,8 +72,11 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
         return r;
     }
     Sink out{&r.body, max_bytes};
+    long retry_after = 0;
     struct curl_slist* hdrs = nullptr;
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &retry_after);
     if (stream) {
         // A stream is never buffered and never bounded by a wall clock: the transfer is
         // abandoned only when it produces nothing for `timeout_ms`, which is a dead server.
@@ -96,6 +108,7 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
     }
     const CURLcode rc = curl_easy_perform(c);
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &r.status);
+    r.retry_after_s = retry_after;
     if (rc == CURLE_ABORTED_BY_CALLBACK) {
         r.cancelled = true;
         r.error = "cancelled";
@@ -113,6 +126,27 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
 }
 
 }  // namespace
+
+long retry_after_seconds(const std::string& header_line) {
+    static const std::string key = "retry-after:";
+    if (header_line.size() <= key.size()) return 0;
+    for (std::size_t i = 0; i < key.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(header_line[i])) != key[i]) return 0;
+    const char* v = header_line.c_str() + key.size();
+    while (*v == ' ' || *v == '\t') ++v;
+    long secs = 0;
+    bool digits = false;
+    while (*v >= '0' && *v <= '9') {
+        secs = secs * 10 + (*v - '0');
+        digits = true;
+        if (secs > 86400) return 86400;   // a day is already longer than any budget: clamp instead of overflowing
+        ++v;
+    }
+    // The HTTP-date form (`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`) names an instant,
+    // not a duration. This client has no wall clock the server agreed to, so it reads 0 and
+    // falls back to its own backoff rather than inventing a wait.
+    return digits ? secs : 0;
+}
 
 Response get(const std::string& url, long timeout_ms, size_t max_bytes) {
     return perform(url, nullptr, timeout_ms, nullptr, max_bytes);

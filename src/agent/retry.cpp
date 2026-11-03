@@ -53,10 +53,10 @@ WireFailure wire_failure(const WireResult& r) {
     if (r.refused || r.stalled) return WireFailure::Answer;
 
     if (r.code == 0) {   // curl reached the server and got a response line
-        // A 5xx is the server failing to answer, not answering: if nothing was handed out
-        // yet, the second send can get a different reply. A 4xx is an answer about the
+        // A state that says "come back" is not a verdict: if nothing was handed out yet, the
+        // second send can get a different reply. A 400/401/501 is an answer about the
         // request, so it comes back identically; so does an error chunk inside a stream.
-        if (r.status >= 500 && !r.spoken) return WireFailure::Transient;
+        if (retryable_status(r.status) && !r.spoken) return WireFailure::Transient;
         return r.status >= 400 || r.stream_error ? WireFailure::Answer : WireFailure::None;
     }
 
@@ -69,9 +69,25 @@ WireFailure wire_failure(const WireResult& r) {
 
 bool transient(WireFailure f) { return f == WireFailure::Transient; }
 
+bool retryable_status(long status) {
+    return status == 408 || status == 429 || status == 500 || status == 502 ||
+           status == 503 || status == 504;
+}
+
 double wire_backoff_ms(int attempt, double base_ms, double max_ms) {
     // jittered_backoff works in seconds; the wire speaks milliseconds.
     return jittered_backoff(attempt, base_ms / 1000.0, max_ms / 1000.0, 0.5) * 1000.0;
+}
+
+double wire_wait_ms(int attempt, long retry_after_s, double base_ms, double max_ms,
+                    double remaining_ms) {
+    double wait = wire_backoff_ms(attempt, base_ms, max_ms);
+    if (retry_after_s > 0) {
+        const double asked = static_cast<double>(retry_after_s) * 1000.0;
+        if (asked > wait) wait = asked;   // a shorter wait buys another 429, not an answer
+    }
+    if (remaining_ms >= 0.0 && wait > remaining_ms) return -1.0;
+    return wait;
 }
 
 }  // namespace agent

@@ -61,7 +61,7 @@ All in `namespace dd::learn`, `include/dd/learn/`, `src/learn/`. Depends on `kno
 `EventSink` and `Overlay` interfaces, never on `learn` (dependency rule `learn -> know -> mem -> core`).
 
 The graph as shipped. `LearnService` is the only object the composition root constructs
-(`include/dd/learn/service.hpp:52`, `src/dd_tui.cpp:1312`); everything else is private to it, and the two
+(`include/dd/learn/service.hpp:52`, `src/dd_tui.cpp:1313`); everything else is private to it, and the two
 interfaces it implements are `know`'s, not its own (`include/dd/learn/sink.hpp:24`,
 `include/dd/learn/overlay.hpp:27`).
 

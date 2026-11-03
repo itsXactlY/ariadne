@@ -11,6 +11,7 @@
 // env overrides: DD_BASE_URL, DD_MODEL, DD_API_KEY, DD_MAX_TURNS
 
 #include "dd/agent/agent.hpp"
+#include "dd/agent/http_llm.hpp"   // the one transport: the same retry policy the TUI runs
 #include "dd/core/config.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
@@ -29,6 +30,7 @@ using namespace dd::core;
 using dd::tools::ToolEntry;
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -38,82 +40,6 @@ namespace ddcore = ::dd::core;
 
 using JsonSP = ddcore::JsonSP;
 
-
-// libcurl 8.16+ write-callback: (buffer, capacity, actual_bytes, outstream).
-static std::size_t curl_sink(char* buffer, std::size_t size, std::size_t nitems, void* ud) {
-    (void)size;
-    auto* s = static_cast<std::string*>(ud);
-    s->append(buffer, nitems);
-    return nitems;
-}
-
-// ---- concrete provider transport: OpenAI chat/completions over libcurl ----
-struct HttpLLMClient : dd::agent::LLMClient {
-    std::string base_url;   // e.g. http://127.0.0.1:8080/v1
-    std::string model;
-    std::string api_key;
-
-    dd::core::Message chat(const std::vector<dd::core::Message>& messages,
-                           const dd::core::Json& tools) override {
-        // ---- request body: {model, messages:[...], tools:[...]} ----
-        Json body = json_obj();
-        obj_set(body, "model", json_str(model));
-        Json msgs = json_arr();
-        for (const auto& m : messages) arr_push(msgs, ddcore::message_to_json(m));
-        obj_set(body, "messages", msgs);
-        if (tools.type == Json::Arr && !tools.arr.empty()) obj_set(body, "tools", tools);
-        obj_set(body, "stream", json_bool(false));
-
-        std::string url = base_url;
-        if (!url.empty() && url.back() != '/') url += "/";
-        url += "chat/completions";
-
-        std::string payload = json_dump(body);
-        std::string out;
-
-        CURL* c = curl_easy_init();
-        if (!c) throw std::runtime_error("curl: out of memory for handle");
-        struct CurlGuard { CURL* c; ~CurlGuard(){ curl_easy_cleanup(c);} } guard{c};
-
-        struct curl_slist* hdrs = nullptr;
-        hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-        if (!api_key.empty()) {
-            std::string auth = "Authorization: Bearer " + api_key;
-            hdrs = curl_slist_append(hdrs, auth.c_str());
-        }
-        struct SListGuard { struct curl_slist* h; ~SListGuard(){ curl_slist_free_all(h);} } hguard{hdrs};
-
-        curl_easy_setopt(c, CURLOPT_POST, 1L);
-        curl_easy_setopt(c, CURLOPT_POSTFIELDS, payload.c_str());
-        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (curl_off_t)payload.size());
-        curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
-        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_sink);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
-        curl_easy_setopt(c, CURLOPT_TIMEOUT, 120L);
-        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-
-        CURLcode rc = curl_easy_perform(c);
-        if (rc != CURLE_OK)
-            throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
-
-        // ---- parse choices[0] ----
-        Json resp = json_parse(out);
-        const Json* choices = json_get(resp, "choices");
-        dd::core::Message assistant;
-        if (choices && choices->type == Json::Arr && !choices->arr.empty()) {
-            const Json& ch0 = *choices->arr[0];
-            if (const Json* msg = json_get(ch0, "message"))
-                assistant = ddcore::message_from_json(*msg);
-            if (assistant.finish_reason.empty()) {
-                if (const Json* fr = json_get(ch0, "finish_reason"))
-                    assistant.finish_reason = fr->type == Json::Str ? fr->str : "";
-            }
-        }
-        if (assistant.role.empty()) assistant.role = "assistant";
-        return assistant;
-    }
-};
 
 static dd::tools::FsLimits g_fs_limits;      // resolved from tool_output at startup
 static size_t g_shell_max_output = 8000;      // ditto; the shipped default until the config says otherwise
@@ -131,6 +57,8 @@ static void register_fs_tools(dd::tools::ToolRegistry& reg) {
 
 // ---- entry ----
 int main(int argc, char** argv) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);   // before the transport touches curl
+
     std::string home_flag, config_flag;
     std::vector<std::string> msg_words;
     bool after_dd = false;
@@ -181,10 +109,16 @@ int main(int argc, char** argv) {
     dd::tools::ToolRegistry reg;
     register_fs_tools(reg);
 
-    HttpLLMClient llm;
+    // The real transport, not a second one: this binary used to carry its own single-shot
+    // curl call, so a 429, a dropped socket or a restarting server ended a headless run that
+    // the TUI would have survived. One mechanism, both binaries.
+    dd::agent::HttpLLM llm;
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;
+    llm.stall_timeout_s = 120;   // the old client's wall clock; now a "no bytes" guard
+    if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
+    if (const char* v = std::getenv("DD_WIRE_BUDGET_MS"); v && *v) llm.retry_budget_ms = std::max(0, std::atoi(v));
 
     dd::agent::Agent agent;
     agent.model = model;

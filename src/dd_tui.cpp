@@ -282,7 +282,8 @@ static void usage(FILE* f) {
         "  --pair          mint a device token and print its pairing code (scopes: chat,memory,tools,admin)\n"
         "  --devices       list paired devices    --revoke ID   end one\n"
         "\n"
-        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n"
+        "env: DD_HOME DD_BASE_URL DD_MODEL DD_API_KEY DD_MAX_TURNS DD_SERVE_KEY DD_WIRE_ATTEMPTS\n"
+        "     DD_WIRE_BUDGET_MS DD_TUI_COLS DD_TUI_ROWS DD_TUI_MOUSE=0 NO_COLOR\n"
         "     DD_STRATA_EXE DD_LLAMA_SERVER DD_LIMBO_LLAMA_URL   the dwellers --limbo spawns or adopts\n",
         f);
 }
@@ -1333,9 +1334,12 @@ int main(int argc, char** argv) {
     // does not know a field refuses it - the answer, not a silence from us.
     if (const Json* x = cfg.get_map("model.extra")) llm.extra = *x;
     llm.cancel = dd::tools::interrupt::current();   // the transport stops on the same flag
-    // Sends per call: a restarting server is answered by the second send. 1 turns the
-    // retry off, which is what a wire that must fail on the first try needs.
+    // Sends per call: a restarting server, a dropped socket and a rate limit are answered by
+    // a later send. 1 turns the retry off, which is what a wire that must fail on the first
+    // try needs. The budget bounds the wall clock, not the count: a server that answers 429
+    // with `Retry-After: 300` must not hold the turn for five minutes.
     if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
+    if (const char* v = std::getenv("DD_WIRE_BUDGET_MS"); v && *v) llm.retry_budget_ms = std::max(0, std::atoi(v));
     llm.effort = [&effort]() -> std::string {
         const int e = effort.load(std::memory_order_relaxed);
         return e < 0 ? std::string() : e == 0 ? std::string("none") : std::string(kEfforts[e]);

@@ -155,8 +155,10 @@ $(BUILD)/dd_know_rules_tests: $(CORE) $(KNOWDEP) $(KNOWPOD) $(AGENT) $(wildcard 
 $(BUILD)/ariadne-skills: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(wildcard include/dd/know/*.hpp) src/cli_main.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD)) src/cli_main.cpp -pthread -lcurl -o $(BUILD)/ariadne-skills
 
-$(BUILD)/ariadne-agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp
-	$(CXX) $(CXXFLAGS) $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) src/dd_agent_main.cpp -lcurl -o $(BUILD)/ariadne-agent
+# $(HTTPLLM) and $(NET) are here because this binary runs the harness's own transport, not a
+# copy of it: one send policy, one Retry-After parser, one place a 429 is understood.
+$(BUILD)/ariadne-agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET) src/dd_agent_main.cpp
+	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET)) src/dd_agent_main.cpp -lcurl -o $(BUILD)/ariadne-agent
 
 # The sidegag: built first and built alone — one translation unit, bare $(CXX), no other
 # target in the tree — then it compiles the harness and installs it. `make install`

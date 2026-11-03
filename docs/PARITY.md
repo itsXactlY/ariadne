@@ -17,7 +17,7 @@ out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:1063-1080` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:1378-1379`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:201`, `src/dd_tui.cpp:1485`, `src/ui.cpp:2394-2427`, `src/dd_tui.cpp:1827` |
+| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1485`, `src/ui.cpp:2394-2427`, `src/dd_tui.cpp:1827` |
 | Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1384-1480`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1309-1341`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:1201-1218`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2495-2500`, asserted in `tests/ui_test.cpp:1160-1230` |
 
@@ -180,7 +180,7 @@ that second half — a saved call leaves no trace in the log.
 
 The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
 becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
-nothing (`src/dd_tui.cpp:1218`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:252`). The hand-off seam is the same
+nothing (`src/dd_tui.cpp:1219`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:252`). The hand-off seam is the same
 object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
 
 ```mermaid
@@ -282,11 +282,14 @@ each step built, tested, then looked at:
 4. **This ledger**, plus the README line that drifted.
 
 Also shipped here, each with its number: the wire's transient retry (proved
- against a loopback endpoint that answers 500 then 200 and never answers twice), and the same gate run against a
+against a loopback endpoint that answers 500 then 200 and never answers twice) — and, since
+2026-11-04, a rate limit is no longer filed as a verdict: 429 with `Retry-After` is waited out for as
+long as the server asked, and a wait past the 30 s retry budget is refused with the number in the
+error instead of slept away — and the same gate run against a
  keep-alive endpoint — no `Content-Length`, no `Connection: close`, socket held 4s past the last byte — which is how
  llama-server, vLLM and OpenAI actually answer: the turn has to end at `data: [DONE]`, not at EOF, so a whole answer
  arrives in under a second on exactly one send, a reader that stops mid-stream counts as `completed`
- (`include/dd/agent/chat_stream.hpp:38`, `src/agent/http_llm.cpp:92`, `include/dd/agent/retry.hpp:45`), and a
+ (`include/dd/agent/chat_stream.hpp:38`, `src/agent/http_llm.cpp:101`, `include/dd/agent/retry.hpp:55`), and a
  `CURLE_WRITE_ERROR` that lands beside the terminator keeps the answer instead of re-sending it. Reading to EOF cost
  every turn the stall timeout and filed a finished answer as a stalled server; under `--serve` the held socket kept
  `busy_` set, so the first request never answered and every later one 409d behind it.

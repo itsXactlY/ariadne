@@ -48,7 +48,13 @@ public:
     std::function<void(const CallStats&)> on_stats;
     bool streamed = false;   // the last call's answer went out through on_content
     long stall_timeout_s = 900;   // no bytes for this long ends a call (a long prefill on a slow box must survive)
-    int retry_attempts = 2;   // sends for one call: 1 = never re-send, 2 = one re-send on a transient failure
+    // Sends for one call. 1 = never re-send. Three lets a rate limit (429 with Retry-After)
+    // be waited out twice and still answer the turn; two gave up after the first 429.
+    int retry_attempts = 3;
+    // The wall clock one call may spend on sends *and* pauses before it stops with the last
+    // failure. A count alone cannot bound the wait: a server that answers 429 with
+    // `Retry-After: 300` would otherwise hold a turn for five minutes. 0 = no budget.
+    double retry_budget_ms = 30000.0;
 
     core::Message chat(const std::vector<core::Message>& messages, const core::Json& tools) override;
 

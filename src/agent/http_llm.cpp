@@ -38,6 +38,7 @@ double num_at(const Json& o, const char* a, const char* b = nullptr) {
 struct StreamSink {
     ChatStream cs;
     std::string raw;
+    long retry_after_s = 0;   // the server's own Retry-After, read off the response headers
     const std::atomic<bool>* cancel = nullptr;
     curl_off_t recv = 0;    // bytes the write callback has seen
     long stall_s = 0;       // 0 = no stall guard
@@ -75,6 +76,15 @@ int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     return 0;
 }
 
+// Every response header line, once: a 429 or a 503 says how long to wait, and a client that
+// guesses its own backoff instead comes back early and is refused again.
+std::size_t stream_header_cb(char* p, std::size_t, std::size_t n, void* ud) {
+    auto* s = static_cast<StreamSink*>(ud);
+    const long secs = net::retry_after_seconds(std::string(p, n));
+    if (secs > 0) s->retry_after_s = secs;
+    return n;
+}
+
 std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
     auto* s = static_cast<StreamSink*>(ud);
     if (s->cancel && s->cancel->load(std::memory_order_relaxed)) return 0;
@@ -99,6 +109,7 @@ WireResult wire_result(CURLcode rc, long status, const StreamSink& s, bool cance
     WireResult r;
     r.code = static_cast<int>(rc);
     r.status = status;
+    r.retry_after_s = s.retry_after_s;
     r.stalled = s.stalled;
     r.cancelled = cancelled;
     r.spoken = s.spoke;
@@ -115,6 +126,7 @@ WireResult wire_result(const net::Response& r) {
     WireResult w;
     w.code = r.status > 0 ? 0 : -1;   // -1: the server never answered
     w.status = r.status;
+    w.retry_after_s = r.retry_after_s;
     w.cancelled = r.cancelled;
     w.refused = r.error == "url rejected";
     return w;
@@ -154,6 +166,28 @@ bool wait_backoff(double ms, const std::atomic<bool>* stop) {
 // A slow endpoint is visible instead of mysterious: the reply says how many sends it took.
 std::string with_sends(const std::string& text, int sends) {
     return sends > 1 ? text + " (after " + std::to_string(sends) + " sends)" : text;
+}
+
+static double elapsed_ms(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// -1 means "no budget": the loop then retries on the attempt count alone.
+static double budget_left_ms(std::chrono::steady_clock::time_point t0, double budget_ms) {
+    return budget_ms > 0.0 ? budget_ms - elapsed_ms(t0) : -1.0;
+}
+
+// What the caller is told when the budget, not the attempt count, ran out. It has to say the
+// two things the operator cannot see: how many sends were spent, and that the server named a
+// wait this client would not sit through.
+static std::string budget_spent(const std::string& text, int sends, long retry_after_s, double budget_ms) {
+    std::string s = with_sends(text, sends);
+    const std::string secs = std::to_string(static_cast<long>(budget_ms / 1000.0));
+    if (retry_after_s > 0)
+        s += " (the server asked for " + std::to_string(retry_after_s) + "s, past the " + secs + "s retry budget)";
+    else
+        s += " (the " + secs + "s retry budget was spent)";
+    return s;
 }
 
 }  // namespace
@@ -201,13 +235,17 @@ bool HttpLLM::prime(Json b, const std::atomic<bool>* stop, long timeout_ms) cons
     const std::string payload = core::json_dump(b);
     const std::string endpoint = url();
     const int sends = retry_attempts > 1 ? retry_attempts : 1;
+    const auto t0 = std::chrono::steady_clock::now();
     for (int attempt = 1; attempt <= sends; ++attempt) {
         const net::Response r = net::post(endpoint, payload, timeout_ms, stop);
         if (r.ok()) return true;
         // A cache fill that never landed is worth one more fill; a cut call, a refused
-        // url and an answered status are all final — the same no comes back.
+        // url and a verdict on the request are all final — the same no comes back.
         if (!transient(wire_failure(wire_result(r))) || attempt == sends) return false;
-        if (!wait_backoff(wire_backoff_ms(attempt), stop)) return false;
+        const double wait = wire_wait_ms(attempt, r.retry_after_s, 250.0, 2000.0,
+                                         budget_left_ms(t0, retry_budget_ms));
+        if (wait < 0.0) return false;   // the server asked for longer than this call may spend
+        if (!wait_backoff(wait, stop)) return false;
     }
     return false;
 }
@@ -256,6 +294,8 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, stream_sink);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+        curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, stream_header_cb);
+        curl_easy_setopt(c, CURLOPT_HEADERDATA, &sink);
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);   // Esc aborts a call; this only guards a dead server
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, stall_timeout_s);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
@@ -326,10 +366,14 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         }
 
         last = why(rc, status, sink, cancelled);
-        // Only a socket fact is sent again, and only while nothing has been handed out.
-        // A cut call, a 4xx, a capped body, a stalled server and the last send all end here.
+        // Only a state that can differ is sent again, and only while nothing has been handed
+        // out and the budget has time for the wait. A cut call, a verdict on the request, a
+        // capped body, a stalled server and the last send all end here.
         if (!transient(f) || attempt == sends) throw std::runtime_error(with_sends(last, attempt));
-        if (!wait_backoff(wire_backoff_ms(attempt), cancel)) throw std::runtime_error("interrupted");
+        const double wait = wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0,
+                                         budget_left_ms(t0, retry_budget_ms));
+        if (wait < 0.0) throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms));
+        if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
     }
 
     throw std::runtime_error(with_sends(last, sends));   // unreachable: the final send throws above

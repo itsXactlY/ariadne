@@ -4,6 +4,7 @@
 // cannot tell you how many times it connected, so the server counts connections instead.
 #include "dd/agent/http_llm.hpp"
 #include "dd/agent/retry.hpp"
+#include "dd/net/http.hpp"
 
 #include <curl/curl.h>
 
@@ -134,10 +135,18 @@ struct FakeEndpoint {
 const std::string FakeEndpoint::kClosed = "";
 
 // A response with the body's own length in the header, so curl reads exactly what is there.
-static std::string http(long status, const std::string& body, const std::string& ctype = "application/json") {
-    std::string head = status == 200 ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 " + std::to_string(status) + " " +
-                       (status == 500 ? "Internal Server Error" : "Bad Request") + "\r\n";
-    head += "Content-Type: " + ctype + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
+// `extra` is how a server adds a header a body cannot carry — Retry-After, here.
+static std::string http(long status, const std::string& body, const std::string& ctype = "application/json",
+                        const std::string& extra = "") {
+    const char* reason = status == 200 ? "OK"
+                       : status == 429 ? "Too Many Requests"
+                       : status == 500 ? "Internal Server Error"
+                       : status == 501 ? "Not Implemented"
+                       : status == 503 ? "Service Unavailable"
+                       : "Bad Request";
+    std::string head = "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\n";
+    head += "Content-Type: " + ctype + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" +
+            extra + "Connection: close\r\n\r\n";
     return head + body;
 }
 
@@ -198,6 +207,47 @@ int main() {
     chk(dd::agent::transient(WireFailure::Transient) && !dd::agent::transient(WireFailure::Answer) &&
             !dd::agent::transient(WireFailure::Cancelled) && !dd::agent::transient(WireFailure::None),
         "only Transient is re-sent");
+
+    // ── A rate limit is a "come back", not a verdict ──
+    // 429 was the case this policy got wrong: the request was never refused, it was not
+    // served yet. 501 and the rest of the 4xx are verdicts, and re-sending those is the toy.
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 429, false, false, false, false, false}) == WireFailure::Transient,
+        "a 429 is transient");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 408, false, false, false, false, false}) == WireFailure::Transient,
+        "a 408 is transient");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 503, false, false, false, false, false}) == WireFailure::Transient,
+        "a 503 is transient");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 501, false, false, false, false, false}) == WireFailure::Answer,
+        "a 501 is an answer: a second send asks the same unimplementable thing");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 401, false, false, false, false, false}) == WireFailure::Answer,
+        "a 401 is an answer, not a hiccup");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 429, false, false, true, false, false}) == WireFailure::Answer,
+        "a 429 after the stream spoke is an answer");
+    chk(!dd::agent::retryable_status(400) && !dd::agent::retryable_status(501) &&
+            !dd::agent::retryable_status(505) && dd::agent::retryable_status(429) &&
+            dd::agent::retryable_status(502) && dd::agent::retryable_status(504),
+        "only the come-back states are retryable");
+
+    // ── Retry-After is the server's instruction; the budget is the limit ──
+    chk(dd::agent::wire_wait_ms(1, 2) >= 2000.0, "a Retry-After longer than the backoff wins");
+    chk(dd::agent::wire_wait_ms(1, 0) >= 250.0 && dd::agent::wire_wait_ms(1, 0) <= 375.0,
+        "no Retry-After leaves the backoff as the wait");
+    chk(dd::agent::wire_wait_ms(3, 0, 250.0, 2000.0, 50000.0) > 0.0,
+        "a wait inside the budget is allowed");
+    chk(dd::agent::wire_wait_ms(1, 120, 250.0, 2000.0, 400.0) < 0.0,
+        "a Retry-After past the budget refuses to send again instead of sleeping");
+    chk(dd::agent::wire_wait_ms(20, 0, 250.0, 2000.0, 5000.0) > 0.0,
+        "a capped backoff inside a larger budget is allowed");
+    chk(dd::agent::wire_wait_ms(20, 0, 250.0, 2000.0, 500.0) < 0.0,
+        "a 2s-capped backoff does not fit in 500ms: the send is refused, not taken early");
+
+    // ── The header parser both curl paths share ──
+    chk(dd::net::retry_after_seconds("Retry-After: 7\r\n") == 7, "Retry-After: 7 reads as 7s");
+    chk(dd::net::retry_after_seconds("retry-after: 12\r\n") == 12, "the header name is case-insensitive");
+    chk(dd::net::retry_after_seconds("Retry-After: Wed, 21 Oct 2015 07:28:00 GMT\r\n") == 0,
+        "the HTTP-date form is not guessed at");
+    chk(dd::net::retry_after_seconds("Content-Type: text/event-stream\r\n") == 0,
+        "another header names no wait");
 
     // ── The pause: milliseconds, doubling, capped, jittered on top ──
     const double a1 = dd::agent::wire_backoff_ms(1);
@@ -328,6 +378,60 @@ int main() {
         ep.halt();
         chk(filled, "the cache fill lands on the second send");
         chk(ep.served.load() == 2, "the prewarm re-sent once, no more");
+    }
+
+    // ── A rate limit: 429 with Retry-After, then the answer ──
+    {
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json", "Retry-After: 1\r\n"),
+                         http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        int sends_seen = 0;
+        llm.on_stats = [&](const CallStats& st) { sends_seen = st.attempts; };
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string answer;
+        bool threw = false;
+        try { answer = llm.chat({user("hi")}, json_arr()).content; } catch (const std::exception&) { threw = true; }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(!threw && answer == "2 + 2 = 4", "a 429 is waited out and the turn answers");
+        chk(ep.served.load() == 2, "a 429 costs exactly one more connection");
+        chk(sends_seen == 2, "the reply says two sends");
+        chk(elapsed >= 990.0, "the server's Retry-After was waited out, not the 250ms backoff");
+    }
+
+    // ── A rate limit that asks for longer than the call may spend: give up and say why ──
+    {
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json", "Retry-After: 120\r\n"),
+                         http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.retry_budget_ms = 400;   // a turn that cannot wait two minutes
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(ep.served.load() == 1, "a wait past the budget is not taken: one connection");
+        chk(elapsed < 1000.0, "the client does not sleep toward a failure it already knows");
+        chk(what.find("rate limit") != std::string::npos, "the server's own words still come back");
+        chk(what.find("120") != std::string::npos, "the failure names the wait the server asked for");
+        chk(what.find("budget") != std::string::npos, "the failure says which limit stopped it");
+    }
+
+    // ── A verdict on the request: 501 is never re-sent ──
+    {
+        FakeEndpoint ep({http(501, "{\"error\":{\"message\":\"not implemented\"}}")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(ep.served.load() == 1, "a 501 is never re-sent");
+        chk(elapsed < 200.0, "no backoff was paid for a 501");
+        chk(what.find("not implemented") != std::string::npos, "the 501's own words come back");
     }
 
     // ── What the operator asked the upstream for reaches the wire ──
