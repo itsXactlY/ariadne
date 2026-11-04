@@ -119,6 +119,16 @@ int main(int argc, char** argv) {
     llm.stall_timeout_s = 120;   // the old client's wall clock; now a "no bytes" guard
     if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
     if (const char* v = std::getenv("DD_WIRE_BUDGET_MS"); v && *v) llm.retry_budget_ms = std::max(0, std::atoi(v));
+    if (const char* v = std::getenv("DD_WIRE_CAP_MS"); v && *v) llm.retry_after_cap_ms = std::max(0, std::atoi(v));
+    if (cfg.has("agent.retry.attempts")) llm.retry_attempts = std::max(1, static_cast<int>(cfg.get_int("agent.retry.attempts")));
+    if (cfg.has("agent.retry.budget_ms")) llm.retry_budget_ms = static_cast<double>(cfg.get_int("agent.retry.budget_ms"));
+    if (cfg.has("agent.retry.retry_after_cap_ms"))
+        llm.retry_after_cap_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_cap_ms"));
+    llm.on_wait = [](long status, long retry_after_s, double ms) {
+        if (ms <= 0.0) return;
+        std::fprintf(stderr, "ariadne-agent: %ld, the server asked for %lds, waiting %.0fs\n", status, retry_after_s,
+                     ms / 1000.0);
+    };
 
     dd::agent::Agent agent;
     agent.model = model;

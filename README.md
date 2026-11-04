@@ -635,7 +635,8 @@ Environment variables can override selected settings.
 | `DD_MODEL` | Override model identifier |
 | `DD_API_KEY` | Override API key |
 | `DD_WIRE_ATTEMPTS` | Maximum sends per inference call |
-| `DD_WIRE_BUDGET_MS` | Maximum wall-clock retry budget |
+| `DD_WIRE_BUDGET_MS` | Maximum wall-clock retry budget (the ladder's own pauses) |
+| `DD_WIRE_CAP_MS` | Ceiling on a wait the server itself asked for (`Retry-After`) |
 | `DD_MAX_TURNS` | Override maximum agent turns |
 | `DD_TAPE_LOG` | Enable context-tape accounting |
 | `DD_FAST_LAYER` | Override fast-layer threshold for rebase testing |
@@ -644,7 +645,11 @@ Environment variables can override selected settings.
 
 The default retry configuration uses a bounded retry ladder for retryable failures, including rate limiting and temporary upstream errors.
 
-The transport respects longer upstream `Retry-After` instructions within its configured budget.
+The transport respects `Retry-After` instructions **past** its own retry budget: a wait the server named is
+information, not a guess, so it is obeyed up to `agent.retry.retry_after_cap_ms` (default 300 s, `0` for no
+ceiling). Past that the call stops with the seconds and the knob in the error, because a provider that
+demands more than five minutes is exhausted rather than busy. Pauses are announced as they start and as
+they end (`HttpLLM::on_wait`), and `Esc` still stops the turn while one runs.
 
 Already-delivered streaming output is not blindly replayed.
 

@@ -508,23 +508,63 @@ int main() {
                     ep.served.load(), static_cast<long>(elapsed));
     }
 
-    // ── A rate limit that asks for longer than the call may spend: give up and say why ──
+    // ── The budget bounds the ladder, not the server's own number. "Retry-After: 180" out of a
+    //    150 s budget used to end the operator's first prompt of a session; obeying the number it
+    //    handed over is cheaper than the wasted turn and is the only true reading of the sentence ──
     {
-        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json", "Retry-After: 120\r\n"),
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json", "Retry-After: 2\r\n"),
                          http(200, kSse, "text/event-stream")}, 0);
         ep.start();
         HttpLLM llm = endpoint_llm(ep);
-        llm.retry_budget_ms = 400;   // a turn that cannot wait two minutes
+        llm.retry_budget_ms = 400;        // the ladder has no room for two seconds ...
+        llm.retry_after_cap_ms = 30000;   // ... but an instruction inside the ceiling does
+        std::vector<std::pair<long, double>> announced;   // what a screen would have shown
+        llm.on_wait = [&announced](long status, long, double ms) { announced.push_back({status, ms}); };
         const auto t0 = std::chrono::steady_clock::now();
         std::string what;
         try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
         const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         ep.halt();
-        chk(ep.served.load() == 1, "a wait past the budget is not taken: one connection");
+        chk(what.empty(), "an instructed wait inside the ceiling answers the turn instead of failing it");
+        chk(ep.served.load() == 2, "the second send is made, not given up on");
+        chk(elapsed >= 1900.0, "the server's own number was obeyed (" + std::to_string(static_cast<long>(elapsed)) + " ms)");
+        chk(announced.size() == 2 && announced[0].first == 429 && announced[0].second >= 1900.0 && announced[1].second == 0.0,
+            "the pause announces itself, and its end");
+    }
+
+    // ── Past the ceiling it is not obeyed: the number on the screen is one the operator can act on ──
+    {
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json", "Retry-After: 120\r\n"),
+                         http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.retry_budget_ms = 400;         // a turn that cannot wait two minutes
+        llm.retry_after_cap_ms = 30000;    // and a ceiling below what the server asked
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(ep.served.load() == 1, "a wait past the ceiling is not taken: one connection");
         chk(elapsed < 1000.0, "the client does not sleep toward a failure it already knows");
         chk(what.find("rate limit") != std::string::npos, "the server's own words still come back");
         chk(what.find("120") != std::string::npos, "the failure names the wait the server asked for");
-        chk(what.find("budget") != std::string::npos, "the failure says which limit stopped it");
+        chk(what.find("ceiling") != std::string::npos, "the failure says which limit stopped it");
+        chk(what.find("retry_after_cap_ms") != std::string::npos, "and names the knob that would raise it");
+    }
+
+    // ── A spent budget is spent: 0 left, never read as "unbounded" ──
+    {
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit\"}}", "application/json"),
+                         http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.retry_budget_ms = 120;   // shorter than the first rung, and no instruction came
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        ep.halt();
+        chk(ep.served.load() == 1, "no instruction, no room: the ladder stops at the budget");
+        chk(what.find("budget") != std::string::npos, "and the failure says so");
     }
 
     // ── A verdict on the request: 501 is never re-sent ──

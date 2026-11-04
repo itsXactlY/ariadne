@@ -319,7 +319,14 @@ Also shipped here, each with its number: the wire's transient retry (proved
 against a loopback endpoint that answers 500 then 200 and never answers twice) — and, since
 2026-11-04, a rate limit is no longer filed as a verdict: 429 with `Retry-After` is waited out for as
 long as the server asked, and a wait past the 150 s retry budget is refused with the number in the
-error instead of slept away. The same day, a provider that died *before its first token* stopped being
+error instead of slept away. *Extended 2026-11-04 (later the same evening, after a first prompt died on
+openrouter's `Retry-After: 180`):* the budget bounds the ladder — the client's own guess — and not the
+server's answer to the same question, so an instructed wait is obeyed past the budget up to
+`agent.retry.retry_after_cap_ms` (default 300 s, the number the operator can act on when it is too
+long), the refusal names that ceiling and the knob, a spent budget is 0 rather than a negative an
+unbounded check would read as "keep going", and a pause long enough to look like a dead program is
+announced before it sleeps and again when it wakes (`HttpLLM::on_wait`) — Esc still stops the turn
+while it sleeps. The same day, a provider that died *before its first token* stopped being
 an answer: OpenRouter reports it inside a 200 — `Upstream error from Sail Research: The response
 stream was interrupted and could not be recovered. Please retry the request.` — so the turn ended with
 nothing handed out, every time; and a 200 whose body is a JSON error rather than a stream was read as a

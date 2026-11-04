@@ -60,11 +60,18 @@ public:
     // clears inside a minute still answers the turn. A socket fact climbs the same count on a
     // millisecond scale and gives up in seconds.
     int retry_attempts = 9;
-    // The wall clock one call may spend on sends *and* pauses before it stops with the last
-    // failure. A count alone cannot bound the wait: a server that answers 429 with
-    // `Retry-After: 300` would otherwise hold a turn for five minutes. 150 s is the ladder's
-    // own sum with jitter; 0 = no budget.
+    // The wall clock one call may spend on sends *and* pauses it CHOSE. A count alone cannot bound
+    // the wait. 150 s is the ladder's own sum with jitter; 0 = no budget. A wait the server named
+    // is not this client's guess and is judged by retry_after_cap_ms below instead.
     double retry_budget_ms = 150000.0;
+    // ... but a wait the SERVER named is not a guess, and refusing it ends the turn on information
+    // we already have. An instructed Retry-After longer than the budget is obeyed up to this
+    // ceiling (0 = no ceiling). 300 s is five minutes: past that the honest answer is that this
+    // provider is exhausted, and the error says so with the number and the knob.
+    double retry_after_cap_ms = 300000.0;
+    // A pause long enough to look like a dead program is announced: (status, retry_after_s, ms)
+    // before it sleeps and (0, 0, 0) when it wakes. Any thread.
+    std::function<void(long status, long retry_after_s, double ms)> on_wait;
 
     core::Message chat(const std::vector<core::Message>& messages, const core::Json& tools) override;
 

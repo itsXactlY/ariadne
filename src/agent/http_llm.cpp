@@ -207,18 +207,34 @@ static double elapsed_ms(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-// -1 means "no budget": the loop then retries on the attempt count alone.
+// -1 means "no budget": the loop then retries on the attempt count alone. A spent budget is 0, not
+// a negative that a caller could read as "unbounded" — the ladder must stop once there is no room.
 static double budget_left_ms(std::chrono::steady_clock::time_point t0, double budget_ms) {
-    return budget_ms > 0.0 ? budget_ms - elapsed_ms(t0) : -1.0;
+    return budget_ms > 0.0 ? std::max(0.0, budget_ms - elapsed_ms(t0)) : -1.0;
+}
+
+// A wait the server NAMED is knowledge, not a guess. The budget bounds the ladder — this client's
+// own speculation about when a limit clears — and it must not throw away the server's answer to
+// the same question. OpenRouter answering "429, Retry-After: 180" out of a 150 s budget ended the
+// operator's very first prompt of a session; obeying the number it handed over is both cheaper
+// than the wasted turn and the only reading of the sentence that is actually true. An instructed
+// wait is therefore taken up to its own ceiling, and the budget governs waits nobody named.
+static bool instructed_within_ceiling(long retry_after_s, double cap_ms) {
+    if (retry_after_s <= 0) return false;
+    return cap_ms <= 0.0 || static_cast<double>(retry_after_s) * 1000.0 <= cap_ms;
 }
 
 // What the caller is told when the budget, not the attempt count, ran out. It has to say the
 // two things the operator cannot see: how many sends were spent, and that the server named a
 // wait this client would not sit through.
-static std::string budget_spent(const std::string& text, int sends, long retry_after_s, double budget_ms) {
+static std::string budget_spent(const std::string& text, int sends, long retry_after_s, double budget_ms,
+                                double cap_ms) {
     std::string s = with_sends(text, sends);
     const std::string secs = std::to_string(static_cast<long>(budget_ms / 1000.0));
-    if (retry_after_s > 0)
+    if (retry_after_s > 0 && !instructed_within_ceiling(retry_after_s, cap_ms))
+        s += " (the server asked for " + std::to_string(retry_after_s) + "s, past the " + secs +
+             "s ceiling for an instructed wait: agent.retry.retry_after_cap_ms raises it)";
+    else if (retry_after_s > 0)
         s += " (the server asked for " + std::to_string(retry_after_s) + "s, past the " + secs + "s retry budget)";
     else
         s += " (the " + secs + "s retry budget was spent)";
@@ -279,7 +295,7 @@ bool HttpLLM::prime(Json b, const std::atomic<bool>* stop, long timeout_ms) cons
         if (!transient(wire_failure(wire_result(r))) || attempt == sends) return false;
         // A rate limit is waited out on the ladder the operator named; a socket fact keeps the
         // millisecond scale, where a restarted server is back before the second send.
-        const double left = budget_left_ms(t0, retry_budget_ms);
+        const double left = instructed_within_ceiling(r.retry_after_s, retry_after_cap_ms) ? -1.0 : budget_left_ms(t0, retry_budget_ms);
         const double wait = r.status == 429 ? wire_rate_wait_ms(attempt, r.retry_after_s, left)
                                            : wire_wait_ms(attempt, r.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0) return false;   // the server asked for longer than this call may spend
@@ -437,14 +453,20 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // ladder's worth: a status said nothing about wanting a wait (200), and if the second
         // send comes back with the same sentence, the request is what it dislikes.
         if (upstream_hiccup && attempt >= 2) throw std::runtime_error(with_sends(last, attempt));
-        const double left = budget_left_ms(t0, retry_budget_ms);
+        const double left = instructed_within_ceiling(sink.retry_after_s, retry_after_cap_ms) ? -1.0
+                                                                                               : budget_left_ms(t0, retry_budget_ms);
         const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
                                          : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);
-        if (wait < 0.0) throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms));
+        if (wait < 0.0)
+            throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms, retry_after_cap_ms));
         if (first_status == 0) first_status = status;
         last_wait_ms = wait;
         waited_ms += wait;
+        // A pause of two minutes must not look like a dead program: say it before going quiet, and
+        // say it again when the wait ends. The operator can still stop the turn while it sleeps.
+        if (on_wait) on_wait(status, sink.retry_after_s, wait);
         if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
+        if (on_wait) on_wait(0, 0, 0.0);
     }
 
     throw std::runtime_error(with_sends(last, sends));   // unreachable: the final send throws above

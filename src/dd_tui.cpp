@@ -375,7 +375,7 @@ void size(int& cols, int& rows) {
 }  // namespace term
 
 static const char* const kCommands[] = {"/help", "/tools", "/turns", "/effort", "/reasoning", "/verbose", "/plan", "/context", "/rebase",
-                                        "/resume", "/clear", "/new", "/learn", "/interrupt", "/quit",
+                                        "/resume", "/retry", "/clear", "/new", "/learn", "/interrupt", "/quit",
                                         "/mcp"};   // every live MCP server adds its own "/<server>" at boot
 
 static std::string trim_ws(const std::string& s) {
@@ -1345,6 +1345,25 @@ int main(int argc, char** argv) {
     // with `Retry-After: 300` must not hold the turn for five minutes.
     if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
     if (const char* v = std::getenv("DD_WIRE_BUDGET_MS"); v && *v) llm.retry_budget_ms = std::max(0, std::atoi(v));
+    if (const char* v = std::getenv("DD_WIRE_CAP_MS"); v && *v) llm.retry_after_cap_ms = std::max(0, std::atoi(v));
+    if (cfg.has("agent.retry.attempts")) llm.retry_attempts = std::max(1, static_cast<int>(cfg.get_int("agent.retry.attempts")));
+    if (cfg.has("agent.retry.budget_ms")) llm.retry_budget_ms = static_cast<double>(cfg.get_int("agent.retry.budget_ms"));
+    if (cfg.has("agent.retry.retry_after_cap_ms"))
+        llm.retry_after_cap_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_cap_ms"));
+    // A rate limit the server puts a number on can hold the turn for minutes. Two minutes of a
+    // still screen is indistinguishable from a dead program, so the pause says itself and says
+    // when it ends -- and Esc, which stops the turn, still works while it sleeps.
+    llm.on_wait = [&scene](long status, long retry_after_s, double ms) {
+        if (ms <= 0.0) {
+            scene.note("⟳ sending again");
+            return;
+        }
+        std::string s = "⟳ rate limited";
+        if (status > 0) s = "⟳ the server said " + std::to_string(status);
+        if (retry_after_s > 0) s += " · it asked for " + std::to_string(retry_after_s) + "s";
+        s += " — waiting " + std::to_string(static_cast<long>((ms + 999.0) / 1000.0)) + "s; Esc stops the turn";
+        scene.note(s);
+    };
     llm.effort = [&effort]() -> std::string {
         const int e = effort.load(std::memory_order_relaxed);
         return e < 0 ? std::string() : e == 0 ? std::string("none") : std::string(kEfforts[e]);
@@ -1716,8 +1735,14 @@ int main(int argc, char** argv) {
         if (!dd::tools::interrupt::signal()) scene.note("interrupting…");
     };
 
+    // The last question, kept because a turn can end on the wire rather than on an answer: a rate
+    // limit past the ceiling, a provider that refused the key, a socket that went away. The
+    // operator's words are still the question worth asking, and /retry sends them again.
+    std::string last_prompt;
+
     auto start_turn = [&](const std::string& prompt) {
         if (worker.joinable()) worker.join();
+        last_prompt = prompt;
         scene.user(prompt);
         scene.turn_begin();
         scene.scroll_end();
@@ -1865,7 +1890,7 @@ int main(int argc, char** argv) {
             } else if (cmd == "/help") {
                 scene.note("enter send · esc / ctrl-c interrupt · ↑↓ history · ctrl-←→ words · pgup/pgdn or wheel scroll (over the tools box: that list) · "
                            "ctrl-l redraw · tab completes\n/effort off|low|…  /reasoning <effort>|show|full|hide  /verbose quiet|normal|full  /context  /rebase  "
-                           "/resume  /tools  /turns N  /plan  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
+                           "/resume  /retry (ask the last question again)  /tools  /turns N  /plan  /clear (new session)  /learn  /mcp  /<server>  /interrupt  /quit");
             } else if (cmd == "/learn") {
                 if (learn_pin) run_cmd("learn", [&] {
                     learn_pin();
@@ -2021,6 +2046,18 @@ int main(int argc, char** argv) {
             } else if (cmd == "/rebase") {
                 if (running.load()) scene.note("/rebase applies between turns");
                 else run_cmd("rebase", [&engine] { engine.rebase_now(); });
+            } else if (cmd == "/retry") {
+                // A turn that died on the wire took the question with it. Nothing about the prompt
+                // changes on the second ask, so nothing has to be typed again.
+                if (last_prompt.empty()) {
+                    scene.note("/retry: nothing has been asked yet");
+                } else if (running.load()) {
+                    scene.note("/retry: a turn is running — /interrupt first, or wait for it");
+                } else {
+                    const std::string words = last_prompt.size() > 80 ? last_prompt.substr(0, 80) + "…" : last_prompt;
+                    scene.note("↻ asking again: " + words);
+                    start_turn(last_prompt);
+                }
             } else if (cmd == "/interrupt") {
                 interrupt();
             } else if (cmd == "/turns") {
