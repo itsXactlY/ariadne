@@ -148,7 +148,7 @@ send; a verdict on the request cannot. The rule is therefore a list, not a range
 so final"; it is the request not served *yet*, and the server says when to ask again. So the wait
 is `wire_wait_ms`: the longer of `wire_backoff_ms` (250 ms base, 2 s cap — `jittered_backoff` scaled
 to the wire) and the server's own `Retry-After`, refused when it would run past the call's
-`retry_budget_ms` (30 s), because a client that sleeps toward a failure it already knows is
+`retry_budget_ms` (150 s, the ladder's own sum), because a client that sleeps toward a failure it already knows is
 spending the operator's turn. `HttpLLM::chat` (`src/agent/http_llm.cpp`) holds the send loop and
 `prime` takes the same rule through `net::Response`; `DD_WIRE_ATTEMPTS` and `DD_WIRE_BUDGET_MS` are
 the levers. Both binaries run that one transport now: `ariadne-agent` used to carry a second,
@@ -160,6 +160,7 @@ single-shot curl call with no policy at all.
 | a stream that already spoke is never re-sent | `StreamSink::spoke` | same suite: a delta handed out, then the socket cut — one connection, the caller keeps the words it got, nothing is spoken twice |
 | a verdict on the request (400, 401, 501, 505), the byte cap, the stall clock and an error chunk are answers, not hiccups | `wire_failure` + `retryable_status` | one connection, no pause paid (<200 ms), the server's own words come back |
 | a rate limit is waited out for as long as the server asked | `wire_wait_ms` + `retry_after_seconds` (`src/net/http.cpp`) | same suite: 429 with `Retry-After: 1` then 200 — exactly two connections, ≥990 ms apart, the answer lands |
+| a rate limit climbs a seconds ladder, not the millisecond socket backoff: 250 ms, 500 ms, 1 s, then 1 s, 5 s, 15 s, 30 s, 1 min | `wire_rate_wait_ms` | same suite: every rung asserted with its jitter band, plus a live run — three 429s then 200 is four connections and 1,878 ms, and the answer lands |
 | a wait longer than the budget is refused, and the failure says so | `budget_spent` + `retry_budget_ms` | same suite: 429 with `Retry-After: 120` against a 400 ms budget — one connection, no sleep, the error names both the 120 s and the budget |
 | a call cut by Esc is never re-sent | `cancelled` in `WireResult` | one connection at most, no backoff paid, the error says `interrupted` |
 | the send count rides out, so a slow endpoint is visible | `CallStats.attempts` → `LlmStats.attempts`; `with_sends()` on the error | the suite asserts `attempts == 2` and that `latency_ms` counts the whole wait, not only the send that answered; the engine row renders it as `· ×2` and the verbose status row as `sent 2` (`dd_ui_tests`) |

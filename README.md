@@ -258,7 +258,7 @@ A tool-enabled agent is a system with side effects. The boundary needs to be exp
 | MCP | Enabled servers are discovered live; input schemas are registered |
 | HTTP | URL safety checks run before clients connect |
 | Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
-| Retries | A refused connect, a socket cut before the response line, and the states that mean "come back" (408, 429, 500, 502, 503, 504) are re-sent while nothing has been handed out; 400/401/501/505 are verdicts and are not, nor is an interrupted call. A 429's own `Retry-After` is honoured over the backoff, and a wait past the retry budget is refused with the number in the error. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:55`) — an answer the caller already holds is never re-sent |
+| Retries | A refused connect, a socket cut before the response line, and the states that mean "come back" (408, 429, 500, 502, 503, 504) are re-sent while nothing has been handed out; 400/401/501/505 are verdicts and are not, nor is an interrupted call. A 429 climbs the rate ladder — three quick re-sends (250 ms, 500 ms, 1 s), then 1 s, 5 s, 15 s, 30 s, 1 min, the last rung repeating — and a server's own `Retry-After` wins over the rung whenever it is longer; a wait past the retry budget is refused with the number in the error. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:55`) — an answer the caller already holds is never re-sent |
 | Tool output | Bounded at production, with omitted bytes/lines accounted for |
 | Paths | Filesystem tools reject `..` path components |
 | Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
@@ -332,8 +332,8 @@ The following environment variables override configuration values:
 | `DD_BASE_URL` | Override `model.base_url`; must end in `/v1` |
 | `DD_MODEL` | Override `model.name` |
 | `DD_API_KEY` | Override `model.api_key`; local llama.cpp setups may not need one |
-| `DD_WIRE_ATTEMPTS` | Sends per LLM call (default 3); retries only the come-back states above |
-| `DD_WIRE_BUDGET_MS` | Wall clock one call may spend on sends and pauses (default 30000); a server's `Retry-After` past it is refused rather than slept away |
+| `DD_WIRE_ATTEMPTS` | Sends per LLM call (default 9, the rate ladder's length); retries only the come-back states above |
+| `DD_WIRE_BUDGET_MS` | Wall clock one call may spend on sends and pauses (default 150000, the ladder's own sum); a server's `Retry-After` past it is refused rather than slept away |
 | `DD_MAX_TURNS` | Override `agent.max_turns`; cap it to avoid pathological loops |
 | `DD_TAPE_LOG` | Write per-call context-tape accounting |
 | `DD_FAST_LAYER` | Override the fast-layer token threshold for rebase testing |

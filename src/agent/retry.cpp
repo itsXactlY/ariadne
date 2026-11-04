@@ -79,6 +79,36 @@ double wire_backoff_ms(int attempt, double base_ms, double max_ms) {
     return jittered_backoff(attempt, base_ms / 1000.0, max_ms / 1000.0, 0.5) * 1000.0;
 }
 
+// A fixed rung plus a little decorrelation: without it every client that met the same limit
+// comes back in the same millisecond, which is how one rate limit becomes a stampede.
+static double rung_ms(double ms) {
+    if (ms <= 0.0) return 0.0;
+    const std::uint64_t tick = jitter_counter.fetch_add(1, std::memory_order_relaxed);
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::uint64_t seed = (static_cast<std::uint64_t>(ns) ^ (tick * 0x9E3779B9ULL)) & 0xFFFFFFFFULL;
+    std::mt19937_64 eng(seed);
+    std::uniform_real_distribution<double> dist(0.0, 0.1 * ms);
+    return ms + dist(eng);
+}
+
+double wire_rate_wait_ms(int attempt, long retry_after_s, double remaining_ms) {
+    // Three quick re-sends first: a limit that clears in a few hundred milliseconds should not
+    // cost a turn a minute. After that the rungs are the ones the operator named, in seconds.
+    static const double ladder[] = {250.0, 500.0, 1000.0, 1000.0, 5000.0, 15000.0, 30000.0, 60000.0};
+    constexpr int rungs = static_cast<int>(sizeof(ladder) / sizeof(ladder[0]));
+    int i = attempt - 1;
+    if (i < 0) i = 0;
+    if (i >= rungs) i = rungs - 1;   // the minute rung repeats; the budget ends the climb
+    double wait = rung_ms(ladder[i]);
+    if (retry_after_s > 0) {
+        const double asked = static_cast<double>(retry_after_s) * 1000.0;
+        if (asked > wait) wait = asked;   // the server's own window beats the ladder's rung
+    }
+    if (remaining_ms >= 0.0 && wait > remaining_ms) return -1.0;
+    return wait;
+}
+
 double wire_wait_ms(int attempt, long retry_after_s, double base_ms, double max_ms,
                     double remaining_ms) {
     double wait = wire_backoff_ms(attempt, base_ms, max_ms);

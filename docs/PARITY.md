@@ -300,7 +300,7 @@ each step built, tested, then looked at:
 Also shipped here, each with its number: the wire's transient retry (proved
 against a loopback endpoint that answers 500 then 200 and never answers twice) — and, since
 2026-11-04, a rate limit is no longer filed as a verdict: 429 with `Retry-After` is waited out for as
-long as the server asked, and a wait past the 30 s retry budget is refused with the number in the
+long as the server asked, and a wait past the 150 s retry budget is refused with the number in the
 error instead of slept away — and the same gate run against a
  keep-alive endpoint — no `Content-Length`, no `Connection: close`, socket held 4s past the last byte — which is how
  llama-server, vLLM and OpenAI actually answer: the turn has to end at `data: [DONE]`, not at EOF, so a whole answer

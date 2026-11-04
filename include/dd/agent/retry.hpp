@@ -74,5 +74,13 @@ double wire_backoff_ms(int attempt, double base_ms = 250.0, double max_ms = 2000
 double wire_wait_ms(int attempt, long retry_after_s, double base_ms = 250.0,
                     double max_ms = 2000.0, double remaining_ms = -1.0);
 
+// A rate limit is not a socket hiccup, and 250 ms of backoff is the wrong scale for it: the
+// server named a window, and coming back inside it spends a send to learn nothing. The ladder
+// is the operator's: three quick re-sends for a blip (250 ms, 500 ms, 1 s), then the server's
+// own timescale -- 1 s, 5 s, 15 s, 30 s, 1 min -- with the last rung repeating, because a limit
+// that still says no after a minute is still the server's call. The budget, not the ladder, is
+// what ends the climb, and the server's own Retry-After wins over the rung when it is longer.
+double wire_rate_wait_ms(int attempt, long retry_after_s, double remaining_ms = -1.0);
+
 }  // namespace agent
 }  // namespace dd

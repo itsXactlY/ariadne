@@ -241,6 +241,30 @@ int main() {
     chk(dd::agent::wire_wait_ms(20, 0, 250.0, 2000.0, 500.0) < 0.0,
         "a 2s-capped backoff does not fit in 500ms: the send is refused, not taken early");
 
+    // ── A rate limit climbs the operator's ladder, not the millisecond backoff ──
+    // Three quick re-sends for a blip, then 1 s, 5 s, 15 s, 30 s, 1 min. The rungs are the
+    // contract: a client that comes back inside the server's window spends a send to learn
+    // nothing, and one that gives up after 250 ms loses a turn a minute would have saved.
+    {
+        struct Rung { int attempt; double lo, hi; };
+        const Rung rungs[] = {{1, 250.0, 275.0}, {2, 500.0, 550.0}, {3, 1000.0, 1100.0},
+                              {4, 1000.0, 1100.0}, {5, 5000.0, 5500.0}, {6, 15000.0, 16500.0},
+                              {7, 30000.0, 33000.0}, {8, 60000.0, 66000.0}};
+        for (const Rung& r : rungs) {
+            const double w = dd::agent::wire_rate_wait_ms(r.attempt, 0);
+            chk(w >= r.lo && w <= r.hi, "rate rung " + std::to_string(r.attempt) + " waits " +
+                                            std::to_string(static_cast<long>(r.lo)) + " ms (" +
+                                            std::to_string(static_cast<long>(w)) + ")");
+        }
+        chk(dd::agent::wire_rate_wait_ms(9, 0) >= 60000.0, "the minute rung repeats past its end");
+        chk(dd::agent::wire_rate_wait_ms(1, 30) >= 30000.0, "a longer Retry-After beats the rung");
+        chk(dd::agent::wire_rate_wait_ms(8, 0) > dd::agent::wire_rate_wait_ms(3, 0) * 10.0,
+            "the ladder grows by orders of magnitude, not by the millisecond backoff's cap");
+        chk(dd::agent::wire_rate_wait_ms(8, 0, 30000.0) < 0.0,
+            "a rung past the budget refuses the send instead of taking it early");
+        chk(dd::agent::wire_rate_wait_ms(1, 0, 5000.0) > 0.0, "a rung inside the budget is taken");
+    }
+
     // ── The header parser both curl paths share ──
     chk(dd::net::retry_after_seconds("Retry-After: 7\r\n") == 7, "Retry-After: 7 reads as 7s");
     chk(dd::net::retry_after_seconds("retry-after: 12\r\n") == 12, "the header name is case-insensitive");
@@ -398,6 +422,29 @@ int main() {
         chk(ep.served.load() == 2, "a 429 costs exactly one more connection");
         chk(sends_seen == 2, "the reply says two sends");
         chk(elapsed >= 990.0, "the server's Retry-After was waited out, not the 250ms backoff");
+    }
+
+    // ── Three rate limits in a row are waited out, not three sends and a dead turn ──
+    {
+        const std::string limited = http(429, "{\"error\":{\"message\":\"rate limit\"}}");
+        FakeEndpoint ep({limited, limited, limited, http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        int sends_seen = 0;
+        llm.on_stats = [&](const CallStats& st) { sends_seen = st.attempts; };
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string answer;
+        bool threw = false;
+        try { answer = llm.chat({user("hi")}, json_arr()).content; } catch (const std::exception&) { threw = true; }
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ep.halt();
+        chk(!threw && answer == "2 + 2 = 4", "three 429s in a row still answer the turn");
+        chk(ep.served.load() == 4, "the ladder's first three rungs are three more sends");
+        chk(sends_seen == 4, "the reply says four sends");
+        chk(elapsed >= 1700.0, "the quick rungs were waited out: 250 ms + 500 ms + 1 s (" +
+                                   std::to_string(static_cast<long>(elapsed)) + " ms)");
+        std::printf("rate ladder live: %d sends over %ld ms (rungs 250/500/1000 ms)\n",
+                    ep.served.load(), static_cast<long>(elapsed));
     }
 
     // ── A rate limit that asks for longer than the call may spend: give up and say why ──

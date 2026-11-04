@@ -242,8 +242,11 @@ bool HttpLLM::prime(Json b, const std::atomic<bool>* stop, long timeout_ms) cons
         // A cache fill that never landed is worth one more fill; a cut call, a refused
         // url and a verdict on the request are all final — the same no comes back.
         if (!transient(wire_failure(wire_result(r))) || attempt == sends) return false;
-        const double wait = wire_wait_ms(attempt, r.retry_after_s, 250.0, 2000.0,
-                                         budget_left_ms(t0, retry_budget_ms));
+        // A rate limit is waited out on the ladder the operator named; a socket fact keeps the
+        // millisecond scale, where a restarted server is back before the second send.
+        const double left = budget_left_ms(t0, retry_budget_ms);
+        const double wait = r.status == 429 ? wire_rate_wait_ms(attempt, r.retry_after_s, left)
+                                           : wire_wait_ms(attempt, r.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0) return false;   // the server asked for longer than this call may spend
         if (!wait_backoff(wait, stop)) return false;
     }
@@ -370,8 +373,9 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // out and the budget has time for the wait. A cut call, a verdict on the request, a
         // capped body, a stalled server and the last send all end here.
         if (!transient(f) || attempt == sends) throw std::runtime_error(with_sends(last, attempt));
-        const double wait = wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0,
-                                         budget_left_ms(t0, retry_budget_ms));
+        const double left = budget_left_ms(t0, retry_budget_ms);
+        const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
+                                         : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0) throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms));
         if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
     }
