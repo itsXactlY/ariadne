@@ -53,17 +53,24 @@ MODEL = '''model:
   # Export DD_API_KEY instead -- it wins over this line -- or paste the key in the clear.
   api_key: ""
 
-  # THE PIN. model.extra is carried to the upstream verbatim (HttpLLM::extra), which is the only
-  # way a /v1 endpoint learns WHICH provider answers: /models/deepseek/deepseek-v4.1-flash-1017/
-  # endpoints listed 46 of them when this file was generated.
+  # THE ROUTING. model.extra is carried to the upstream verbatim (HttpLLM::extra), which is the
+  # only way a /v1 endpoint learns WHICH provider answers: /models/deepseek/deepseek-v4.1-flash-
+  # 1017/endpoints listed 46 of them when this file was generated.
   #
-  # only + allow_fallbacks is a real trade, and it is why a first prompt once died on "429, the
-  # server asked for 180s": a hard pin turns one provider's throttle into a dead turn while 45
-  # others could have served the same model. true keeps the preference and lets openrouter
-  # substitute for the SAME model; false is for when the provider itself is what is being tested.
+  # order, not only. This is not a preference -- "only" plus one provider is a dead turn whenever
+  # that provider throttles, which is exactly what happened: a 53 KB request came back
+  #   429 · Retry-After: 180 · "deepseek/deepseek-v4.1-flash-1017 is temporarily rate-limited
+  #   upstream ... or add your own provider key" · provider_name: Sail Research
+  # while the SAME request unpinned answered in one send from a healthy provider. The model is
+  # served by 46 endpoints; naming one as the ONLY one throws 45 away and converts its rolling
+  # per-minute limit into ten minutes of the operator's evening.
+  #
+  # order = try these first (the pin, as a preference), allow_fallbacks = the rest of the pool
+  # answers when the preferred one is throttled or down. For a real hard pin (measuring ONE
+  # provider) write only: ["..."] instead -- and expect its 429s to be yours.
   extra:
     provider:
-      only: ["sail-research/fp4/us"]
+      order: ["sail-research/fp4/us"]
       allow_fallbacks: true
 '''
 
@@ -77,6 +84,17 @@ if any(l.strip() and not l.strip().startswith("#") for l in pre):
 else:
     keep = []
 
-out = HEADER + "\n" + "\n".join((keep if keep is not None else pre) + MODEL.split("\n") + lines[end:])
+# The key is the ONE thing this file owns that config.yaml does not: never overwrite a live one.
+# A regeneration that silently blanks api_key logs you out of the upstream with a 401, which looks
+# like a provider problem and is not.
+model = MODEL
+if dst.is_file():
+    old = dst.read_text()
+    m = re.search(r"^  api_key: *(\S*)?$", old, re.M)
+    if m and m.group(1) and m.group(1) not in ('""', "''"):
+        model = re.sub(r'^  api_key: *""$', '  api_key: "' + m.group(1).strip('"') + '"', MODEL, count=1, flags=re.M)
+        print(f"kept the key already in {dst.name} ({len(m.group(1).strip(chr(34)))} chars)", file=sys.stderr)
+
+out = HEADER + "\n" + "\n".join((keep if keep is not None else pre) + model.split("\n") + lines[end:])
 dst.write_text(out)
 print(f"wrote {dst} ({out.count(chr(10))} lines); model block replaced at config.yaml lines {start + 1}-{end}")

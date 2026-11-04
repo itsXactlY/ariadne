@@ -12,6 +12,7 @@
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"   // the one transport: the same retry policy the TUI runs
+#include "dd/agent/attribution.hpp"   // ... and the same app identity on the wire
 #include "dd/core/config.hpp"
 #include "dd/core/home.hpp"
 #include "dd/core/json.hpp"
@@ -116,6 +117,10 @@ int main(int argc, char** argv) {
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;
+    // App attribution, same policy as the screen: the Referer URL is what a provider that files
+    // usage by app keys an app on, so an un-attributed headless run is the one that shows up as
+    // "Unknown". Ariadne names itself on such an endpoint; a local llama-server gets nothing.
+    llm.attribution = dd::agent::attribution_from_config(cfg, base_url);
     llm.stall_timeout_s = 120;   // the old client's wall clock; now a "no bytes" guard
     if (const char* v = std::getenv("DD_WIRE_ATTEMPTS"); v && *v) llm.retry_attempts = std::max(1, std::atoi(v));
     if (const char* v = std::getenv("DD_WIRE_BUDGET_MS"); v && *v) llm.retry_budget_ms = std::max(0, std::atoi(v));
@@ -124,10 +129,12 @@ int main(int argc, char** argv) {
     if (cfg.has("agent.retry.budget_ms")) llm.retry_budget_ms = static_cast<double>(cfg.get_int("agent.retry.budget_ms"));
     if (cfg.has("agent.retry.retry_after_cap_ms"))
         llm.retry_after_cap_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_cap_ms"));
-    llm.on_wait = [](long status, long retry_after_s, double ms) {
+    if (cfg.has("agent.retry.retry_after_total_ms"))
+        llm.retry_after_total_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_total_ms"));
+    llm.on_wait = [](long status, long retry_after_s, double ms, const std::string& why) {
         if (ms <= 0.0) return;
-        std::fprintf(stderr, "ariadne-agent: %ld, the server asked for %lds, waiting %.0fs\n", status, retry_after_s,
-                     ms / 1000.0);
+        std::fprintf(stderr, "ariadne-agent: %ld, the server asked for %lds, waiting %.0fs%s%s\n", status, retry_after_s,
+                     ms / 1000.0, why.empty() ? "" : " — ", why.c_str());
     };
 
     dd::agent::Agent agent;
@@ -179,7 +186,12 @@ int main(int argc, char** argv) {
 
     if (user_message.empty()) { std::cerr << "empty user message\n"; return 1; }
 
-    std::cout << "[base=" << base_url << " model=" << model << " turns=" << max_iterations << "]\n";
+    // The identity the upstream will file this run under, when there is one: an operator who
+    // sees "Unknown" in a provider's app list reads here whether the headers are even going out.
+    std::cout << "[base=" << base_url << " model=" << model << " turns=" << max_iterations;
+    if (!llm.attribution.referer.empty())
+        std::cout << " app=" << llm.attribution.title << "@" << llm.attribution.referer;
+    std::cout << "]\n";
     // A transport failure is a fact about the endpoint, not a reason to abort. Left
     // uncaught it reaches std::terminate — the process dies with SIGABRT and the
     // caller (an installer's smoke step, a script, a test) reads 134 and cannot tell

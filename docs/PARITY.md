@@ -326,7 +326,20 @@ server's answer to the same question, so an instructed wait is obeyed past the b
 long), the refusal names that ceiling and the knob, a spent budget is 0 rather than a negative an
 unbounded check would read as "keep going", and a pause long enough to look like a dead program is
 announced before it sleeps and again when it wakes (`HttpLLM::on_wait`) — Esc still stops the turn
-while it sleeps. The same day, a provider that died *before its first token* stopped being
+while it sleeps. *Extended again the same night, after the screen showed nothing but
+`⟳ 429 · asked for 180s` from turn zero:* a ceiling PER INSTRUCTION is not a bound on the call —
+nine sends that each obey a 180 s instruction is twenty-seven minutes of a turn spent asleep on a
+provider that is simply refusing, which is what `agent.retry.attempts: 9` produced. Instructed
+waiting is now also capped in total per call (`agent.retry.retry_after_total_ms`, default 240 s,
+0 = never obey one): the first 180 s window is honored, the second ends the call with the amount
+already spent and the knob that would allow more. The pause announcement carries the server's own
+sentence as well as its status, because "429" cannot tell a rate limit from an exhausted key or a
+pin on a throttled provider — and in this case it was the last of the three: the body said
+`deepseek/deepseek-v4.1-flash-1017 is temporarily rate-limited upstream ... or add your own provider
+key`, provider_name Sail Research, while the same 53 KB request routed without the pin answered in
+one send. A single-provider `only` turns one provider's rolling per-minute limit into a dead turn;
+`order` + `allow_fallbacks` keeps the preference and lets the other 45 endpoints serve it.
+The same day, a provider that died *before its first token* stopped being
 an answer: OpenRouter reports it inside a 200 — `Upstream error from Sail Research: The response
 stream was interrupted and could not be recovered. Please retry the request.` — so the turn ended with
 nothing handed out, every time; and a 200 whose body is a JSON error rather than a stream was read as a

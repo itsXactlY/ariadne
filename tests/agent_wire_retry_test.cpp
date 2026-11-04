@@ -15,6 +15,7 @@
 #include <cstring>
 #include <netinet/in.h>
 #include <poll.h>
+#include <mutex>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
@@ -52,6 +53,15 @@ struct FakeEndpoint {
     // only caught by a server that keeps the connection — which `hold_ms` stages.
     int hold_ms = 0;
     std::vector<std::pair<int, std::chrono::steady_clock::time_point>> held_;
+    // Every request as it arrived, headers and body. The client's own view of what it sent is
+    // not evidence; these bytes are what a provider would file the call under.
+    mutable std::mutex mu;
+    std::vector<std::string> requests;
+
+    std::string request(size_t i) const {
+        std::lock_guard<std::mutex> lk(mu);
+        return i < requests.size() ? requests[i] : std::string();
+    }
 
     FakeEndpoint(std::vector<std::string> a, int answers_after = 1) : answers(std::move(a)) {
         for (int i = 0; i < answers_after; ++i) answers.push_back(kClosed);
@@ -122,6 +132,7 @@ struct FakeEndpoint {
             // The cut-off point: a cancelled call connects but never asks. Serving nothing
             // for it is what keeps "zero retries" true rather than merely unobserved.
             if (!headers) { ::close(c); continue; }
+            { std::lock_guard<std::mutex> lk(mu); requests.push_back(req); }
 
             const int n = ++served;
             const std::string& resp = n <= static_cast<int>(answers.size()) ? answers[n - 1] : kClosed;
@@ -519,7 +530,7 @@ int main() {
         llm.retry_budget_ms = 400;        // the ladder has no room for two seconds ...
         llm.retry_after_cap_ms = 30000;   // ... but an instruction inside the ceiling does
         std::vector<std::pair<long, double>> announced;   // what a screen would have shown
-        llm.on_wait = [&announced](long status, long, double ms) { announced.push_back({status, ms}); };
+        llm.on_wait = [&announced](long status, long, double ms, const std::string&) { announced.push_back({status, ms}); };
         const auto t0 = std::chrono::steady_clock::now();
         std::string what;
         try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
@@ -551,6 +562,34 @@ int main() {
         chk(what.find("120") != std::string::npos, "the failure names the wait the server asked for");
         chk(what.find("ceiling") != std::string::npos, "the failure says which limit stopped it");
         chk(what.find("retry_after_cap_ms") != std::string::npos, "and names the knob that would raise it");
+    }
+
+    // ── A ceiling per instruction is not a bound on the call: nine sends that each obey a 180 s
+    //    instruction is twenty-seven minutes of one turn spent asleep, which is exactly what a
+    //    provider that keeps saying 429 produces. The total allowance for instructed waiting ends it. ──
+    {
+        FakeEndpoint ep({http(429, "{\"error\":{\"message\":\"rate limit exceeded\"}}", "application/json",
+                            "Retry-After: 2\r\n"),
+                         http(429, "{\"error\":{\"message\":\"rate limit exceeded\"}}", "application/json",
+                              "Retry-After: 2\r\n"),
+                         http(200, kSse, "text/event-stream")},
+                        0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.retry_attempts = 9;           // the ladder's full count, which used to mean 9 x 180 s
+        llm.retry_after_cap_ms = 30000;   // every instruction is well inside the per-instruction ceiling ...
+        llm.retry_after_total_ms = 3000;  // ... and only one of them fits what the call may spend
+        std::vector<std::string> said;    // what the screen would have shown
+        llm.on_wait = [&said](long, long, double, const std::string& why) { said.push_back(why); };
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        ep.halt();
+        chk(ep.served.load() == 2, "the first instructed wait is taken and the next one is refused");
+        chk(!said.empty() && said[0].find("rate limit exceeded") != std::string::npos,
+            "the pause carries the server's own sentence, not just the status");
+        chk(what.find("rate limit exceeded") != std::string::npos, "the failure carries it too");
+        chk(what.find("retry_after_total_ms") != std::string::npos, "and names the knob that would allow more: " + what);
+        chk(what.find("already gone") != std::string::npos, "it says how much instructed waiting is spent: " + what);
     }
 
     // ── A spent budget is spent: 0 left, never read as "unbounded" ──
@@ -600,6 +639,92 @@ int main() {
             "refusing a substitute survives as false, not as a dropped key");
         chk(wire.find("\"model\":\"the-model-we-chose\"") != std::string::npos,
             "a name we decided is ours: the operator's field cannot replace it");
+    }
+
+    // ── App attribution: the identity a provider files the call under ──
+    // A provider that files usage by app (OpenRouter) shows "Unknown" for a call with no
+    // Referer and creates no app page for it, so the headers are the whole difference between
+    // "Ariadne" and the anonymous bucket. They are read off the request as it arrived.
+    {
+        // The policy first, on strings: where the headers go and where they do not.
+        const auto ar = dd::agent::ariadne_attribution();
+        chk(ar.referer == "https://github.com/itsXactlY/ariadne" && ar.title == "Ariadne" && ar.categories == "cli-agent",
+            "Ariadne's own identity is the public repository, named and filed as a cli-agent");
+        chk(dd::agent::files_usage_by_app("https://openrouter.ai/api/v1") &&
+                dd::agent::files_usage_by_app("https://OPENROUTER.ai/api/v1/chat/completions"),
+            "an OpenRouter endpoint files usage by app");
+        chk(!dd::agent::files_usage_by_app("http://127.0.0.1:8080/v1") &&
+                !dd::agent::files_usage_by_app("https://my-gateway.example.com/v1") &&
+                !dd::agent::files_usage_by_app("https://openrouter.ai.evil.example/v1"),
+            "a local server, a gateway and a look-alike host do not");
+        chk(dd::agent::attribution_for("https://openrouter.ai/api/v1", {}).referer == ar.referer,
+            "on OpenRouter an unnamed run sends Ariadne's own identity");
+        chk(dd::agent::attribution_for("http://127.0.0.1:8080/v1", {}).referer.empty(),
+            "a local llama-server gets no referer: there is no app to be there");
+        chk(dd::agent::attribution_for("http://127.0.0.1:8080/v1",
+                                       {"https://myapp.example.com", "My App", "programming-app"})
+                    .referer == "https://myapp.example.com",
+            "an operator who named their own app is filed under it, anywhere they point the harness");
+        chk(dd::agent::attribution_for("https://openrouter.ai/api/v1", {"not a url", "", ""}).referer == ar.referer,
+            "a value that is not a URL names no app: the identity falls back rather than going out broken");
+        const dd::core::Json off_bool = dd::core::json_bool(false);
+        const dd::core::Json off_word = dd::core::json_str("off");
+        const dd::core::Json on_url = dd::core::json_str("https://github.com/itsXactlY/ariadne");
+        chk(dd::agent::attribution_off(&off_bool) && dd::agent::attribution_off(&off_word),
+            "model.attribution: false / off is the operator turning the headers off");
+        chk(!dd::agent::attribution_off(nullptr) && !dd::agent::attribution_off(&on_url),
+            "an absent or non-switch value leaves the policy in charge");
+    }
+    {
+        // ... and then on the wire, through a real call.
+        FakeEndpoint ep({http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.attribution = dd::agent::ariadne_attribution();
+        llm.chat({user("hi")}, json_arr());
+        const std::string req = ep.request(0);
+        ep.halt();
+        chk(req.find("HTTP-Referer: https://github.com/itsXactlY/ariadne") != std::string::npos,
+            "the referer URL - the app's identifier - reaches the wire");
+        chk(req.find("X-OpenRouter-Title: Ariadne") != std::string::npos, "so does the display name");
+        chk(req.find("X-OpenRouter-Categories: cli-agent") != std::string::npos, "and the marketplace category");
+    }
+    {
+        // A prewarm is a whole prompt the provider bills, sent on its own one-shot path: if it
+        // went out anonymous, part of Ariadne's traffic would stay in the "Unknown" bucket even
+        // though every real call is attributed. Same identity, both paths.
+        FakeEndpoint ep({http(200, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        llm.attribution = dd::agent::ariadne_attribution();
+        llm.retry_attempts = 1;
+        const bool warmed = llm.prime(llm.body({user("hi")}, json_arr()), nullptr, 5000);
+        const std::string req = ep.request(0);
+        ep.halt();
+        chk(warmed, "the prewarm landed");
+        chk(req.find("HTTP-Referer: https://github.com/itsXactlY/ariadne") != std::string::npos,
+            "a prewarm carries the app identity like a main call");
+        chk(req.find("X-OpenRouter-Categories: cli-agent") != std::string::npos, "... categories included");
+    }
+    {
+        // An unnamed transport sends no attribution header at all, and a CR/LF cannot split one.
+        FakeEndpoint ep({http(200, kSse, "text/event-stream"), http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM plain = endpoint_llm(ep);
+        plain.chat({user("hi")}, json_arr());
+        const std::string bare = ep.request(0);
+        chk(bare.find("HTTP-Referer") == std::string::npos && bare.find("X-OpenRouter-Title") == std::string::npos,
+            "no app named: not one attribution header on the wire");
+
+        HttpLLM evil = endpoint_llm(ep);
+        evil.attribution = {"https://myapp.example.com", "My App\r\nX-Injected: 1", ""};
+        evil.chat({user("hi")}, json_arr());
+        const std::string req = ep.request(1);
+        ep.halt();
+        // The words survive inside the value; the LINE does not, which is the whole point.
+        chk(req.find("\r\nX-Injected:") == std::string::npos, "a CR/LF in a value cannot start a header of its own");
+        chk(req.find("X-OpenRouter-Title: My AppX-Injected: 1") != std::string::npos,
+            "the value loses the line break and stays one header");
     }
 
     curl_global_cleanup();

@@ -475,6 +475,28 @@ The actual responding provider must still be verified from the response metadata
 
 Custom fields are merged into the outgoing request, while the harness retains control over its own fundamental request fields.
 
+### App attribution
+
+A provider that files usage by app keys the app on the URL in `HTTP-Referer` (OpenRouter's contract: `openrouter.ai/docs/app-attribution`).
+
+Without that header the call belongs to the anonymous bucket such a provider's model pages show as "Unknown", and no app page exists for the harness at all. `X-OpenRouter-Title` only names the app and `X-OpenRouter-Categories` only files it in the marketplace; neither creates one on its own.
+
+Ariadne names itself on an endpoint that files usage by app, so its traffic is filed under the public repository and shows up as `Ariadne` in the `cli-agent` category:
+
+```yaml
+model:
+  referer: https://github.com/itsXactlY/ariadne   # the identifier; empty = no attribution header
+  app_title: Ariadne                              # display name in the rankings
+  app_categories: cli-agent                       # documented names only; others are dropped
+  attribution: off                                # false | off | none = send none of them
+```
+
+The values above are the defaults, so an unconfigured OpenRouter run is already attributed.
+
+An endpoint that does not file usage by app — a local llama-server, a LAN gateway — receives none of these headers: there is no app to be there, and a referer sent to every host the harness talks to is a disclosure rather than an identity.
+
+The app's own page is `openrouter.ai/apps?url=<referer>`, and it exists only after a successful attributed request.
+
 ---
 
 ## 7. Tools, MCP, and execution boundaries
@@ -637,6 +659,7 @@ Environment variables can override selected settings.
 | `DD_WIRE_ATTEMPTS` | Maximum sends per inference call |
 | `DD_WIRE_BUDGET_MS` | Maximum wall-clock retry budget (the ladder's own pauses) |
 | `DD_WIRE_CAP_MS` | Ceiling on a wait the server itself asked for (`Retry-After`) |
+| `DD_WIRE_TOTAL_MS` | Total instructed waiting one call may spend (`Retry-After` pauses summed) |
 | `DD_MAX_TURNS` | Override maximum agent turns |
 | `DD_TAPE_LOG` | Enable context-tape accounting |
 | `DD_FAST_LAYER` | Override fast-layer threshold for rebase testing |
@@ -648,8 +671,17 @@ The default retry configuration uses a bounded retry ladder for retryable failur
 The transport respects `Retry-After` instructions **past** its own retry budget: a wait the server named is
 information, not a guess, so it is obeyed up to `agent.retry.retry_after_cap_ms` (default 300 s, `0` for no
 ceiling). Past that the call stops with the seconds and the knob in the error, because a provider that
-demands more than five minutes is exhausted rather than busy. Pauses are announced as they start and as
-they end (`HttpLLM::on_wait`), and `Esc` still stops the turn while one runs.
+demands more than five minutes is exhausted rather than busy.
+
+A ceiling **per instruction** is still not a bound on the call, and the difference is not academic: nine
+sends that each obey "429, Retry-After: 180" is twenty-seven minutes of one turn spent asleep on a provider
+that is simply refusing. `agent.retry.retry_after_total_ms` (default 240 s, `0` = never obey an instruction)
+is the whole allowance for instructed waiting in one call, so a repeated 180 s limit is honored once and
+then ends the call with the amount already spent and the knob that would allow more.
+
+Pauses are announced as they start — with the server's own sentence, because "429" alone cannot tell a rate
+limit from an exhausted key or a pin on a throttled provider — and as they end (`HttpLLM::on_wait`), and
+`Esc` still stops the turn while one runs.
 
 Already-delivered streaming output is not blindly replayed.
 

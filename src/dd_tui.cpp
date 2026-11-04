@@ -21,6 +21,7 @@
 
 #include "dd/agent/agent.hpp"
 #include "dd/agent/http_llm.hpp"
+#include "dd/agent/attribution.hpp"   // the identity on the wire, read in one place
 #include "dd/net/server.hpp"
 #include "dd/serve/chat_api.hpp"
 #include "dd/agent/redact.hpp"
@@ -1333,6 +1334,14 @@ int main(int argc, char** argv) {
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;
+    // App attribution: the three headers a provider that files usage by app (OpenRouter) keys an
+    // app on. Un-attributed calls land in the anonymous bucket its model pages show as "Unknown";
+    // a title alone creates nothing, the Referer URL is the identifier
+    // (openrouter.ai/docs/app-attribution). Ariadne names itself -- the public repository -- on
+    // such an endpoint unless the operator named their own app, and a local llama-server gets no
+    // header at all. model.attribution: off sends none. The read lives in dd/agent/attribution.hpp
+    // so the headless binary cannot drift from the screen.
+    llm.attribution = dd::agent::attribution_from_config(cfg, base_url);
     // Provider routing has no key of its own: an upstream serves one model from many
     // providers, and only a request field says which one answers. Whatever the operator
     // writes under model.extra is carried to that upstream verbatim, and an upstream that
@@ -1350,18 +1359,26 @@ int main(int argc, char** argv) {
     if (cfg.has("agent.retry.budget_ms")) llm.retry_budget_ms = static_cast<double>(cfg.get_int("agent.retry.budget_ms"));
     if (cfg.has("agent.retry.retry_after_cap_ms"))
         llm.retry_after_cap_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_cap_ms"));
+    if (cfg.has("agent.retry.retry_after_total_ms"))
+        llm.retry_after_total_ms = static_cast<double>(cfg.get_int("agent.retry.retry_after_total_ms"));
     // A rate limit the server puts a number on can hold the turn for minutes. Two minutes of a
-    // still screen is indistinguishable from a dead program, so the pause says itself and says
-    // when it ends -- and Esc, which stops the turn, still works while it sleeps.
-    llm.on_wait = [&scene](long status, long retry_after_s, double ms) {
+    // still screen is indistinguishable from a dead program, so the pause says itself, says WHY --
+    // the server's own sentence, which is the difference between "rate limited", "out of credits"
+    // and "the provider you pinned is throttled" -- and says when it ends. Esc still stops the turn.
+    llm.on_wait = [&scene](long status, long retry_after_s, double ms, const std::string& why) {
         if (ms <= 0.0) {
             scene.note("⟳ sending again");
             return;
         }
         std::string s = "⟳ rate limited";
         if (status > 0) s = "⟳ the server said " + std::to_string(status);
+        if (!why.empty()) {
+            std::string w = why;
+            if (w.size() > 160) w = w.substr(0, 157) + "...";
+            s += " — " + w;
+        }
         if (retry_after_s > 0) s += " · it asked for " + std::to_string(retry_after_s) + "s";
-        s += " — waiting " + std::to_string(static_cast<long>((ms + 999.0) / 1000.0)) + "s; Esc stops the turn";
+        s += " · waiting " + std::to_string(static_cast<long>((ms + 999.0) / 1000.0)) + "s; Esc stops the turn";
         scene.note(s);
     };
     llm.effort = [&effort]() -> std::string {

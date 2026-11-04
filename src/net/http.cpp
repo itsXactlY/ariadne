@@ -60,7 +60,8 @@ std::size_t stream_sink(char* p, std::size_t, std::size_t n, void* ud) {
 }
 
 Response perform(const std::string& url, const std::string* body, long timeout_ms,
-                 const std::atomic<bool>* cancel, size_t max_bytes, StreamSink* stream = nullptr) {
+                 const std::atomic<bool>* cancel, size_t max_bytes, StreamSink* stream = nullptr,
+                 const std::vector<std::string>* extra = nullptr) {
     Response r;
     if (!dd::tools::is_safe_url(url)) {
         r.error = "url rejected: " + url;
@@ -96,6 +97,10 @@ Response perform(const std::string& url, const std::string* body, long timeout_m
     curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     if (body) {
         hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+        // The caller's own headers: a provider that files usage by app is told who is calling by
+        // a header, and a one-shot POST (a prewarm) is that provider's traffic like any other.
+        if (extra)
+            for (const std::string& h : *extra) hdrs = curl_slist_append(hdrs, h.c_str());
         curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
         curl_easy_setopt(c, CURLOPT_POST, 1L);
         curl_easy_setopt(c, CURLOPT_POSTFIELDS, body->c_str());
@@ -153,8 +158,8 @@ Response get(const std::string& url, long timeout_ms, size_t max_bytes) {
 }
 
 Response post(const std::string& url, const std::string& json_body, long timeout_ms, const std::atomic<bool>* cancel,
-              size_t max_bytes) {
-    return perform(url, &json_body, timeout_ms, cancel, max_bytes);
+              size_t max_bytes, const std::vector<std::string>& headers) {
+    return perform(url, &json_body, timeout_ms, cancel, max_bytes, nullptr, headers.empty() ? nullptr : &headers);
 }
 
 Response post_stream(const std::string& url, const std::string& json_body, long timeout_ms,

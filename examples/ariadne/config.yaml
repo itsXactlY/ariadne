@@ -22,6 +22,14 @@ model:
   #     allow_fallbacks: false            #   names which one answers; false refuses a substitute
   #                                       # a local llama-server never sees these; a /v1 upstream
   #                                       # that does not know a field answers the error itself
+  # App attribution (https://openrouter.ai/docs/app-attribution): a provider that files usage by
+  # app keys an app on the Referer URL and shows "Unknown" for every call that carries none.
+  # Ariadne names itself on such an endpoint -- the public repository is that URL -- and sends
+  # nothing to a local llama-server. Set referer to your own app's URL to be filed under it.
+  # referer: https://github.com/itsXactlY/ariadne   # the app's URL: the identifier upstream
+  # app_title: Ariadne                             # display name in the rankings
+  # app_categories: cli-agent                      # OpenRouter's own list; other names drop
+  # attribution: off                               # false | off | none = send no header at all
 
 agent:
   max_turns: 50            # LLM calls per turn; keep it low on a slow local model
@@ -31,6 +39,10 @@ agent:
     budget_ms: 150000      # wall clock one call spends on sends and on pauses it CHOSE
     retry_after_cap_ms: 300000  # a wait the SERVER named (Retry-After) is obeyed past the budget, up to this
                            # ceiling; 0 = no ceiling. Past it the error names the seconds and this knob.
+    retry_after_total_ms: 240000  # ... and a ceiling PER INSTRUCTION is not a bound on the call: nine sends
+                           # obeying "429, Retry-After: 180" is 27 minutes asleep. This is the whole allowance
+                           # for instructed waiting in one call (0 = never obey one); the second 180 s is
+                           # refused, and the error says how much is spent and which knob allows more.
   reasoning_effort: none   # off | low | medium | high | xhigh | max | ultra (only what the template has)
   # thinking: reasoning_effort is the switch; the model's own chat template is the size.
   #   empty/absent  -> no thinking field, no cap: the template's default answers

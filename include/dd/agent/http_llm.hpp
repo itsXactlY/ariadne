@@ -39,6 +39,34 @@ struct CallStats {
 // reasoning_content, harness bookkeeping (finish_reason) stays home.
 core::Json wire_message(const core::Message& m);
 
+// ── App attribution ───────────────────────────────────────────────────────────
+// A provider that files usage by app (OpenRouter) keys an app on the URL in
+// HTTP-Referer: without that header the request lands in the anonymous bucket its model
+// pages show as "Unknown" and no app page exists at all. X-OpenRouter-Title only names
+// the app and X-OpenRouter-Categories only files it in the marketplace; neither creates
+// an app on its own. openrouter.ai/docs/app-attribution is the contract.
+struct Attribution {
+    std::string referer;      // the app's URL: the identifier. empty = send no header at all
+    std::string title;        // the display name in rankings
+    std::string categories;   // comma-separated, only names OpenRouter documents (cli-agent ...)
+};
+
+// Ariadne's own identity: the public repository is the URL OpenRouter files the app under.
+Attribution ariadne_attribution();
+
+// True for an endpoint that keys usage on the Referer header — and so the only place these
+// headers mean anything. A local llama-server has no app to be, and a referer sent to every
+// host the harness talks to is a disclosure, not an identity.
+bool files_usage_by_app(const std::string& base_url);
+
+// What this run sends: `configured` when the operator named an app, else Ariadne's own when
+// the endpoint files usage by app, else nothing (empty referer -> no headers on the wire).
+Attribution attribution_for(const std::string& base_url, Attribution configured);
+
+// `model.attribution` read as the operator's switch: false, off, none or "false" turns the
+// headers off for every endpoint; absent or any other value leaves the policy above in charge.
+bool attribution_off(const core::Json* node);
+
 class HttpLLM : public LLMClient {
 public:
     std::string base_url, model, api_key;
@@ -54,6 +82,9 @@ public:
     std::function<void(const std::string&)> on_reasoning, on_content;
     std::function<void(const CallStats&)> on_stats;
     bool streamed = false;   // the last call's answer went out through on_content
+    // Who the upstream should file this traffic under: resolved once, at startup, by
+    // attribution_for(). Empty referer means the request carries no attribution header.
+    Attribution attribution;
     long stall_timeout_s = 900;   // no bytes for this long ends a call (a long prefill on a slow box must survive)
     // Sends for one call. 1 = never re-send. Nine is the rate ladder's length: three quick
     // re-sends (250 ms, 500 ms, 1 s) and then 1 s, 5 s, 15 s, 30 s, 1 min, so a limit that
@@ -69,9 +100,15 @@ public:
     // ceiling (0 = no ceiling). 300 s is five minutes: past that the honest answer is that this
     // provider is exhausted, and the error says so with the number and the knob.
     double retry_after_cap_ms = 300000.0;
-    // A pause long enough to look like a dead program is announced: (status, retry_after_s, ms)
-    // before it sleeps and (0, 0, 0) when it wakes. Any thread.
-    std::function<void(long status, long retry_after_s, double ms)> on_wait;
+    // ... and a ceiling PER INSTRUCTION is not a bound on the call: nine sends that each obey a
+    // 180 s instruction is twenty-seven minutes of one turn spent asleep, which is exactly what a
+    // repeated rate limit produces. This is the whole allowance for instructed waiting in one call
+    // (0 = no allowance: every instruction is then treated as past its room). 240 s honors one
+    // 180 s window and refuses the second.
+    double retry_after_total_ms = 240000.0;
+    // A pause long enough to look like a dead program is announced: (status, retry_after_s, ms,
+    // why) before it sleeps and (0, 0, 0, "") when it wakes. Any thread.
+    std::function<void(long status, long retry_after_s, double ms, const std::string& why)> on_wait;
 
     core::Message chat(const std::vector<core::Message>& messages, const core::Json& tools) override;
 
@@ -79,6 +116,8 @@ public:
     // One unstreamed call that only fills the server's cache (max_tokens 1).
     bool prime(core::Json body, const std::atomic<bool>* cancel, long timeout_ms) const;
     std::string url() const;
+    // The attribution headers this call puts on the wire, in order; empty when unnamed.
+    std::vector<std::string> attribution_headers() const;
 };
 
 }  // namespace agent

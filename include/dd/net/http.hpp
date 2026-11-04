@@ -9,6 +9,7 @@
 #include <string>
 #include <functional>
 #include <string_view>
+#include <vector>
 
 namespace dd {
 namespace net {
@@ -37,7 +38,8 @@ long retry_after_seconds(const std::string& header_line);
 
 Response get(const std::string& url, long timeout_ms, size_t max_bytes = kMaxBody);
 Response post(const std::string& url, const std::string& json_body, long timeout_ms,
-              const std::atomic<bool>* cancel = nullptr, size_t max_bytes = kMaxBody);
+              const std::atomic<bool>* cancel = nullptr, size_t max_bytes = kMaxBody,
+              const std::vector<std::string>& headers = {});
 
 // One POST whose bytes are handed out as they arrive, never buffered whole: an event stream
 // (llama-server's SSE) is a body with no end a caller could wait for. `on_chunk` returning

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -224,18 +225,43 @@ static bool instructed_within_ceiling(long retry_after_s, double cap_ms) {
     return cap_ms <= 0.0 || static_cast<double>(retry_after_s) * 1000.0 <= cap_ms;
 }
 
+// Room this send may spend on a pause. Two allowances, because the two kinds of pause are not the
+// same kind of thing: the operator's budget covers what THIS CLIENT decided to wait, and the
+// instructed allowance covers what the SERVER named. A ceiling per instruction cannot bound a
+// repeated rate limit -- nine sends that each obey a 180 s instruction is twenty-seven minutes of
+// one turn spent asleep -- so the instructed side is capped in total as well. -1 = no room, and the
+// caller stops with a reason instead of sleeping again.
+static double wait_room(std::chrono::steady_clock::time_point t0, double budget_ms, long retry_after_s,
+                        double cap_ms, double instructed_ms, double instructed_spent_ms) {
+    if (retry_after_s > 0) {
+        // 0 room, not -1: -1 already means "unbounded" to the ladder, and a refusal coded as
+        // "unbounded" is the bug this helper exists to prevent.
+        if (!instructed_within_ceiling(retry_after_s, cap_ms)) return 0.0;   // named, and too long
+        if (instructed_ms <= 0.0) return 0.0;                               // no allowance at all
+        return std::max(0.0, instructed_ms - instructed_spent_ms);
+    }
+    return budget_left_ms(t0, budget_ms);
+}
+
 // What the caller is told when the budget, not the attempt count, ran out. It has to say the
 // two things the operator cannot see: how many sends were spent, and that the server named a
 // wait this client would not sit through.
 static std::string budget_spent(const std::string& text, int sends, long retry_after_s, double budget_ms,
-                                double cap_ms) {
+                                double cap_ms, double instructed_ms, double instructed_spent_ms) {
     std::string s = with_sends(text, sends);
     const std::string secs = std::to_string(static_cast<long>(budget_ms / 1000.0));
+    const std::string asked_s = std::to_string(retry_after_s);
     if (retry_after_s > 0 && !instructed_within_ceiling(retry_after_s, cap_ms))
-        s += " (the server asked for " + std::to_string(retry_after_s) + "s, past the " + secs +
+        s += " (the server asked for " + asked_s + "s, past the " + secs +
              "s ceiling for an instructed wait: agent.retry.retry_after_cap_ms raises it)";
+    else if (retry_after_s > 0 && instructed_ms <= 0.0)
+        s += " (the server asked for " + asked_s +
+             "s, and instructed waiting is switched off: agent.retry.retry_after_total_ms turns it on)";
     else if (retry_after_s > 0)
-        s += " (the server asked for " + std::to_string(retry_after_s) + "s, past the " + secs + "s retry budget)";
+        s += " (the server asked for " + asked_s + "s again, and " +
+             std::to_string(static_cast<long>(instructed_spent_ms / 1000.0)) + "s of instructed waiting of the " +
+             std::to_string(static_cast<long>(instructed_ms / 1000.0)) +
+             "s this call may spend on it is already gone: agent.retry.retry_after_total_ms raises it)";
     else
         s += " (the " + secs + "s retry budget was spent)";
     return s;
@@ -260,6 +286,85 @@ std::string HttpLLM::url() const {
     std::string u = base_url;
     if (!u.empty() && u.back() != '/') u += "/";
     return u + "chat/completions";
+}
+
+// ── App attribution ───────────────────────────────────────────────────────────
+namespace {
+
+// scheme://[user[:pass]@]host[:port][/path] -> "host", lowercased. "" when the URL names none.
+std::string host_of(const std::string& url) {
+    const size_t at = url.find("://");
+    const size_t beg = at == std::string::npos ? 0 : at + 3;
+    size_t end = url.find_first_of("/?#", beg);
+    if (end == std::string::npos) end = url.size();
+    std::string host = url.substr(beg, end - beg);
+    if (const size_t c = host.rfind('@'); c != std::string::npos) host = host.substr(c + 1);
+    if (const size_t c = host.find(':'); c != std::string::npos) host = host.substr(0, c);   // port, not IPv6
+    for (char& ch : host) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return host;
+}
+
+// A header value is one line by construction: a CR or LF inside it would end our header and
+// start one nobody wrote. The operator's own config is the source, so this is a guard, not a
+// parser.
+std::string header_safe(const std::string& v) {
+    std::string o;
+    o.reserve(v.size());
+    for (const char c : v)
+        if (c != '\r' && c != '\n') o += c;
+    const size_t b = o.find_first_not_of(" \t");
+    if (b == std::string::npos) return {};
+    const size_t e = o.find_last_not_of(" \t");
+    return o.substr(b, e - b + 1);
+}
+
+// The identifier is a URL or it is nothing: OpenRouter files by URL and drops anything else,
+// so a value that is not http(s) is treated as "no app named" rather than sent.
+bool is_url(const std::string& v) {
+    const std::string l = [&] { std::string s = v; for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; }();
+    return l.rfind("http://", 0) == 0 || l.rfind("https://", 0) == 0;
+}
+
+}  // namespace
+
+Attribution ariadne_attribution() {
+    // The public repository, not a marketing subdomain: it is stable, it describes the project
+    // on its own, and docs/Best-practices say to avoid subdomains that are not distinct apps.
+    return {"https://github.com/itsXactlY/ariadne", "Ariadne", "cli-agent"};
+}
+
+bool files_usage_by_app(const std::string& base_url) {
+    const std::string h = host_of(base_url);
+    static const std::string kHost = "openrouter.ai";
+    return h == kHost || (h.size() > kHost.size() && h.compare(h.size() - kHost.size(), kHost.size(), "." + kHost) == 0);
+}
+
+Attribution attribution_for(const std::string& base_url, Attribution configured) {
+    if (is_url(configured.referer)) {
+        if (configured.title.empty()) configured.title = "Ariadne";
+        return configured;   // the operator named their app: it goes out wherever they point us
+    }
+    if (files_usage_by_app(base_url)) return ariadne_attribution();
+    return {};
+}
+
+bool attribution_off(const Json* node) {
+    if (!node) return false;
+    if (node->type == Json::Bool) return !node->b;
+    if (node->type != Json::Str) return false;
+    const std::string v = header_safe(node->str);
+    return v == "off" || v == "none" || v == "false" || v == "no";
+}
+
+std::vector<std::string> HttpLLM::attribution_headers() const {
+    std::vector<std::string> h;
+    const std::string ref = header_safe(attribution.referer);
+    if (ref.empty()) return h;   // no URL, no app: a title alone creates nothing upstream
+    h.push_back("HTTP-Referer: " + ref);
+    if (const std::string t = header_safe(attribution.title); !t.empty()) h.push_back("X-OpenRouter-Title: " + t);
+    if (const std::string c = header_safe(attribution.categories); !c.empty())
+        h.push_back("X-OpenRouter-Categories: " + c);
+    return h;
 }
 
 Json HttpLLM::body(const std::vector<core::Message>& messages, const Json& tools) const {
@@ -287,18 +392,23 @@ bool HttpLLM::prime(Json b, const std::atomic<bool>* stop, long timeout_ms) cons
     const std::string endpoint = url();
     const int sends = retry_attempts > 1 ? retry_attempts : 1;
     const auto t0 = std::chrono::steady_clock::now();
+    double instructed_spent = 0.0;   // what this call has slept on the SERVER's instructions
     for (int attempt = 1; attempt <= sends; ++attempt) {
-        const net::Response r = net::post(endpoint, payload, timeout_ms, stop);
+        // Same identity as a main call: a prewarm is a full prompt the provider bills and files
+        // under an app, so leaving it anonymous would put real traffic in the "Unknown" bucket.
+        const net::Response r = net::post(endpoint, payload, timeout_ms, stop, net::kMaxBody, attribution_headers());
         if (r.ok()) return true;
         // A cache fill that never landed is worth one more fill; a cut call, a refused
         // url and a verdict on the request are all final — the same no comes back.
         if (!transient(wire_failure(wire_result(r))) || attempt == sends) return false;
         // A rate limit is waited out on the ladder the operator named; a socket fact keeps the
         // millisecond scale, where a restarted server is back before the second send.
-        const double left = instructed_within_ceiling(r.retry_after_s, retry_after_cap_ms) ? -1.0 : budget_left_ms(t0, retry_budget_ms);
+        const double left = wait_room(t0, retry_budget_ms, r.retry_after_s, retry_after_cap_ms,
+                                     retry_after_total_ms, instructed_spent);
         const double wait = r.status == 429 ? wire_rate_wait_ms(attempt, r.retry_after_s, left)
                                            : wire_wait_ms(attempt, r.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0) return false;   // the server asked for longer than this call may spend
+        if (r.retry_after_s > 0) instructed_spent += wait;
         if (!wait_backoff(wait, stop)) return false;
     }
     return false;
@@ -319,6 +429,7 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
     // it sat through, and the status that made it sit. A rate limit that cleared is invisible
     // without these, and looks exactly like a slow endpoint.
     double waited_ms = 0.0, last_wait_ms = 0.0;
+    double instructed_spent = 0.0;   // what this call has slept on the SERVER's instructions
     long first_status = 0;
 
     for (int attempt = 1; attempt <= sends; ++attempt) {
@@ -344,6 +455,9 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         struct CurlGuard { CURL* c; ~CurlGuard() { curl_easy_cleanup(c); } } guard{c};
         struct curl_slist* hdrs = curl_slist_append(nullptr, "Content-Type: application/json");
         if (!api_key.empty()) hdrs = curl_slist_append(hdrs, ("Authorization: Bearer " + api_key).c_str());
+        // Who this traffic belongs to, when the operator (or Ariadne's own default) named an
+        // app: a provider that files by Referer shows "Unknown" for every un-attributed call.
+        for (const std::string& h : attribution_headers()) hdrs = curl_slist_append(hdrs, h.c_str());
         struct SListGuard { struct curl_slist* h; ~SListGuard() { curl_slist_free_all(h); } } hguard{hdrs};
 
         curl_easy_setopt(c, CURLOPT_POST, 1L);
@@ -453,20 +567,24 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // ladder's worth: a status said nothing about wanting a wait (200), and if the second
         // send comes back with the same sentence, the request is what it dislikes.
         if (upstream_hiccup && attempt >= 2) throw std::runtime_error(with_sends(last, attempt));
-        const double left = instructed_within_ceiling(sink.retry_after_s, retry_after_cap_ms) ? -1.0
-                                                                                               : budget_left_ms(t0, retry_budget_ms);
+        const double left = wait_room(t0, retry_budget_ms, sink.retry_after_s, retry_after_cap_ms,
+                                     retry_after_total_ms, instructed_spent);
         const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
                                          : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0)
-            throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms, retry_after_cap_ms));
+            throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms,
+                                                  retry_after_cap_ms, retry_after_total_ms, instructed_spent));
         if (first_status == 0) first_status = status;
         last_wait_ms = wait;
         waited_ms += wait;
-        // A pause of two minutes must not look like a dead program: say it before going quiet, and
-        // say it again when the wait ends. The operator can still stop the turn while it sleeps.
-        if (on_wait) on_wait(status, sink.retry_after_s, wait);
+        if (sink.retry_after_s > 0) instructed_spent += wait;
+        // A pause of two minutes must not look like a dead program: say it before going quiet -- with
+        // the reason the server gave, because "429" alone leaves the operator guessing whether it is a
+        // rate limit, an exhausted key or a pin on a throttled provider -- and say it again when the
+        // wait ends. The operator can still stop the turn while it sleeps.
+        if (on_wait) on_wait(status, sink.retry_after_s, wait, last);
         if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
-        if (on_wait) on_wait(0, 0, 0.0);
+        if (on_wait) on_wait(0, 0, 0.0, std::string());
     }
 
     throw std::runtime_error(with_sends(last, sends));   // unreachable: the final send throws above
