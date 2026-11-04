@@ -52,6 +52,10 @@ void TurnStartTrigger::plan(const Signal& s, const PlanContext& c, Plan& out) co
     in.kinds = {Kind::Skill, Kind::Memory, Kind::Tool};
     in.query = c.distill.text(asked, c.idf);
     in.query.text = asked;   // the deep leg searches by the words as written
+    // ... and by the work in flight. A ledger with open items is part of what this turn is
+    // about: a recall that hears only the sentence cannot know which task the sentence is a
+    // step of, and the memory the turn most needs is the one about the item it is on.
+    if (!t->plan.empty()) in.query.text += "\nworking on: " + t->plan;
     in.deep = !t->skip_deep;
     in.wait_ms = asks_about_the_past(t->text) ? c.policy.deep_recall_ms : c.policy.deep_ms;
     in.where = Placement::QuestionNote;

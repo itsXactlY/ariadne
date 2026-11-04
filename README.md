@@ -292,6 +292,8 @@ MazeMaker is the persistent knowledge layer.
 
 Completed turns and selected reasoning are sent through a background memory-soak process. Relevant memories can subsequently be retrieved and incorporated into future execution.
 
+The work ledger is memory too. Every state the plan reaches is written to the maze as a revision of its own (`ariadne:plan:<session>:<rev>`, chained to the turn that was newest when the list moved), so a plan outlives the window, the process and the session: the next run reads the newest revision back and continues the work instead of starting from an empty list. The plan is also part of the turn's recall query, so the one slow lookup per turn is asked about the work in flight and not only about the sentence that arrived.
+
 This allows the working context to remain bounded without making previous experience disposable.
 
 ### Learning from execution

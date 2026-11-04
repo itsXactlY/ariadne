@@ -65,7 +65,7 @@ NET := src/net/http.cpp $(URLSAFE)
 SERVE := src/net/server.cpp src/serve/chat_api.cpp
 GWDEV := src/gateway/crypto.cpp src/gateway/identity.cpp src/gateway/devices.cpp src/gateway/device_gateway.cpp src/gateway/relay.cpp src/gateway/cli.cpp
 HTTPLLM := src/agent/http_llm.cpp $(RETRY) $(URLSAFE)   # the wire's send policy lives in retry.cpp
-CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp
+CONTEXT := src/context/tape.cpp src/context/render.cpp src/context/endpoint.cpp src/context/maze.cpp src/context/deck.cpp src/context/engine.cpp src/context/recall.cpp src/context/plan.cpp
 # The limbo level: the harness's own inference engine. One front, the dwellers it admits, and
 # no Python holding the pipe open. server.cpp/http.cpp ride along because the level speaks HTTP
 # on a socket and proxies a llama-server over curl.

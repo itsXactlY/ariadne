@@ -459,6 +459,13 @@ void Soaker::turn(const std::string& session, const std::string& user, const std
     push(std::move(j));
 }
 
+void Soaker::plan(const std::string& session, const std::string& label, const std::string& content, int epoch) {
+    if (label.empty() || trim(content).empty()) return;
+    Job j{"plan", session, label, content, epoch, {}};
+    if (!prev_turn_.empty()) j.edges.push_back(Edge{prev_turn_, label, 0.9, "plan_of"});
+    push(std::move(j));
+}
+
 void Soaker::reasoning(const std::string& session, const std::string& text, int epoch) {
     if (trim(scrub_think(text)).empty()) return;
     const long long t = next_ts(last_ts_reasoning_);

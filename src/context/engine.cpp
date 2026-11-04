@@ -1,5 +1,6 @@
 // src/context/engine.cpp — impl of dd/context/engine.hpp.
 #include "dd/context/engine.hpp"
+#include "dd/context/plan.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -377,7 +378,10 @@ void TapeEngine::drain_ledger() {
 std::set<long> TapeEngine::in_window() const {
     std::set<long> ids;
     for (const auto& e : ledger_)
-        if (e.epoch == session_->generation()) ids.insert(e.id);
+        // A plan revision is a node this session wrote, but not text on the tape: the list rides
+        // as its own rendering. A recall hit that happens to BE the plan node is therefore not
+        // already in the window, and dropping it would lose the one memory the turn most needs.
+        if (e.kind != "plan" && e.epoch == session_->generation()) ids.insert(e.id);
     return ids;
 }
 
@@ -424,6 +428,11 @@ void TapeEngine::begin_turn(const std::string& user_message) {
         t.epoch = session_->generation();
         t.in_window = in_window();
         t.earlier = turn_ids(true);
+        // The work in flight travels with the question. The pod's recall is the one call per
+        // turn allowed to be slow, and a call asked only about the sentence that just arrived
+        // cannot know which task the sentence is a step of -- so it finds background about the
+        // words and none about the work. The ledger is that missing half.
+        t.plan = plan_open_text(plan_, 400);
         if (on_recall) on_recall(true);
         const know::Delivery d = router_->on(t);
         if (on_recall) on_recall(false);

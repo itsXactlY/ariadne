@@ -24,6 +24,7 @@ struct SessionStarted {};
 struct TurnStarted {
     std::string text;             // what the user wrote
     std::string anchored;         // the question as it is looked up: a short one carries the previous real turn
+    std::string plan;             // the open items of the ledger this session works from ("" when none)
     bool trivial = false;         // "ok", "thanks": nothing to look up
     bool skip_deep = false;       // a rebase just recalled for this question: the pointers only
     int epoch = 0;

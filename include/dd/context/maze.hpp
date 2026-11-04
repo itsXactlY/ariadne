@@ -79,6 +79,12 @@ public:
     // ring's single-writer path and never a CAS per job.
     void turn(const std::string& session, const std::string& user, const std::string& assistant, int epoch = 0);
     void reasoning(const std::string& session, const std::string& text, int epoch = 0);
+    // A plan revision: the ledger's newest state, written as a node of its own and chained to
+    // the turn that was newest when the ledger moved -- so think() from a plan reaches the work
+    // it belongs to, and a turn is adjacent to the plan it was working under. It rides this
+    // queue and this spool because a plan is not less durable than a turn: a dead pod delays
+    // it, replay writes it.
+    void plan(const std::string& session, const std::string& label, const std::string& content, int epoch = 0);
     // A resumed session continues its chain from its last turn.
     void continue_chain(const std::string& last_turn_label) { prev_turn_ = last_turn_label; }
     // consumer side: what was written since (the engine's thread claims the published entries)

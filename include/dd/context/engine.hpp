@@ -100,6 +100,11 @@ public:
     // change, so a request stays an exact extension of the last. A rebase's turn 0 carries it
     // too, only once the item itself has left the window.
     bool take_ephemeral(const std::string& prompt) override;
+    // The ledger as the loop holds it now. take_ephemeral sees it only when a payload is
+    // built, and begin_turn runs before that: without this the first turn of a session -- the
+    // one that just adopted a plan out of the maze -- asked the pod for recall as if nothing
+    // were in flight.
+    void set_plan(const std::string& ledger) { plan_ = ledger; }
 
     void on_call(const agent::CallStats& st);   // tokens as the server counted them
     // ---- between turns (no turn running) ----

@@ -17,7 +17,7 @@ out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:1376-1385` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap. `full` is the instrument, not a bigger card: every call leaves a `Kind::Wire` line — the status that answered and the one that started a re-send, the sends and the wall clock the pauses cost, the prompt and the share of it served from cache, the session totals, the epoch and the tape, the watermarks, the ledger's revision and whether it is anchored, the last rebase decision — plus a second line with the response headers that are not transport plumbing; the status row adds `in`, `cache N (M%)`, `sent N · <waited>`, `http`, `rev`, `rebases`; the engine panel adds `in`/`sends`/`http`/`hdrs` and the tape panel `marks`/`rebase`/`ledger` | `Verbosity` and `Kind::Wire` in `include/dd/ui.hpp:267`, `wire_line` at `src/ui.cpp:1800`, pushed at `src/ui.cpp:1760`, the engine's `in` row at `src/ui.cpp:2581`, the tape's `marks` row at `src/ui.cpp:2658`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:1378-1379`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger is handed over as the agent's ephemeral prompt and the tape engine commits it as numbered revisions on the tape — an anchor carrying the list, deltas after it, the list restated whenever no anchor survives a rebase, never in the request's tail — and an emptied ledger retires itself | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1501`, `src/ui.cpp:2458`, `src/dd_tui.cpp:1831`, `src/context/engine.cpp:607` |
+| Plan ledger | `todo` registered in both binaries; every state is also written to the maze as an append-only revision (`ariadne:plan:<session>:<rev>`, newest wins), adopted back by a fresh start, `/resume` and `/clear`, and carried into the turn's deep recall query; the ledger is handed over as the agent's ephemeral prompt and the tape engine commits it as numbered revisions on the tape — an anchor carrying the list, deltas after it, the list restated whenever no anchor survives a rebase, never in the request's tail — and an emptied ledger retires itself | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1501`, `src/ui.cpp:2458`, `src/dd_tui.cpp:1831`, `src/context/engine.cpp:607` |
 | Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1419-1515`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1344-1375`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:1201-1218`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2652`, asserted in `tests/ui_test.cpp:1160-1230` |
 
@@ -286,6 +286,24 @@ each step built, tested, then looked at:
    plan behind the payload sat in front of the engine's turn checkpoint, so every
    call fell back to a periodic one (every 16,384 tokens read) and re-read up to
    that much. The tape engine now takes the plan (`take_ephemeral`).
+   *Extended 2026-11-04:* the ledger is not a property of the run. Every state
+   it reaches is written to the maze as a node of its own,
+   `ariadne:plan:<session>:<rev>`, append-only and newest-wins like the tape's
+   revisions, chained to the turn that was newest when it moved — so `think`
+   from a plan reaches the work, and a turn is adjacent to the plan it worked
+   under (`src/context/plan.cpp`, `Soaker::plan`). The write rides the soak
+   queue and its spool, so a dead pod delays a plan instead of losing it. The
+   read side is a label walk plus one primary-key read — no embedding, so a boot
+   asks it before anything is warm. A fresh start adopts the newest OPEN plan
+   (within 72h) instead of handing the model a window with no plan in it,
+   `/resume` brings that session's plan back with its turns, `/clear` carries an
+   open list into the new session, and an emptied ledger writes a closing
+   revision instead of leaving a stale plan open in the graph. The turn signal
+   carries the open items into the deep recall query (`src/know/trigger.cpp`),
+   and a plan id is kept out of the window set so a recall hit that IS the plan
+   node is not dropped as already-on-the-tape (`TapeEngine::in_window`). Proved
+   live: two revisions written and the newest read back, and a headless boot
+   printing `◈ plan adopted from the maze`.
    *Corrected 2026-11-04:* the first correction stopped at the carrier. The
    restatement still asked whether the newest revision — always a delta after a
    tick — had left the window, which it never had, so a new epoch opened with
@@ -301,11 +319,17 @@ Also shipped here, each with its number: the wire's transient retry (proved
 against a loopback endpoint that answers 500 then 200 and never answers twice) — and, since
 2026-11-04, a rate limit is no longer filed as a verdict: 429 with `Retry-After` is waited out for as
 long as the server asked, and a wait past the 150 s retry budget is refused with the number in the
-error instead of slept away — and the same gate run against a
+error instead of slept away. The same day, a provider that died *before its first token* stopped being
+an answer: OpenRouter reports it inside a 200 — `Upstream error from Sail Research: The response
+stream was interrupted and could not be recovered. Please retry the request.` — so the turn ended with
+nothing handed out, every time; and a 200 whose body is a JSON error rather than a stream was read as a
+successful call with no words at all. Both are `Transient` now, capped at one more send, because a
+verdict on the request comes back identically the second time (`src/agent/retry.cpp:66`,
+`src/agent/http_llm.cpp:369`, the cap at `src/agent/http_llm.cpp:437`). And the same gate run against a
  keep-alive endpoint — no `Content-Length`, no `Connection: close`, socket held 4s past the last byte — which is how
  llama-server, vLLM and OpenAI actually answer: the turn has to end at `data: [DONE]`, not at EOF, so a whole answer
  arrives in under a second on exactly one send, a reader that stops mid-stream counts as `completed`
- (`include/dd/agent/chat_stream.hpp:38`, `src/agent/http_llm.cpp:101`, `include/dd/agent/retry.hpp:55`), and a
+ (`include/dd/agent/chat_stream.hpp:38`, `src/agent/http_llm.cpp:135`, `include/dd/agent/retry.hpp:55`), and a
  `CURLE_WRITE_ERROR` that lands beside the terminator keeps the answer instead of re-sending it. Reading to EOF cost
  every turn the stall timeout and filed a finished answer as a stalled server; under `--serve` the held socket kept
  `busy_` set, so the first request never answered and every later one 409d behind it.

@@ -52,6 +52,7 @@
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
 #include "dd/tools/skill_provenance.hpp"
+#include "dd/context/plan.hpp"
 #include "dd/tools/todo_tool.hpp"
 #include "dd/tools/mcp.hpp"
 #include "dd/tools/mcp_schema_cache.hpp"
@@ -893,6 +894,7 @@ int main(int argc, char** argv) {
     // ---- the registry; every handler reports its run to the scene ----
     dd::tools::ToolRegistry reg;
     dd::tools::TodoStore todos;              // one ledger per session, model-owned
+    dd::context::PlanLog plan_log;           // ... and its half in the maze: a revision per change
     std::function<void()> publish_plan;      // bound below, once the agent exists
     auto add_tool = [&](ToolEntry e) {
         if (disabled_tools.count(e.name)) return;   // never registered, so never deckable
@@ -1243,7 +1245,10 @@ int main(int argc, char** argv) {
                                  "the items named and keeps the rest. The list rides the tape as numbered revisions: "
                                  "the first of an epoch carries the whole list, a later one only what moved, and a "
                                  "higher revision wins. After a rebase the list comes back as the anchor of the new "
-                                 "epoch; re-write it if the list is gone.";
+                                 "epoch; re-write it if the list is gone. Every state is also written to mazemaker "
+                                 "(ariadne:plan:<session>:<rev>), so an unfinished plan is picked up by the next "
+                                 "run instead of dying with this one: keep the list honest, an item you leave open "
+                                 "is work somebody continues.";
         Json item = json_obj({{"id", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("short identifier you choose; keep it stable across merges"))}}))},
                               {"content", jsp(json_obj({{"type", jsp(json_str("string"))}, {"description", jsp(json_str("the step, one line"))}}))},
                               {"status", jsp(json_obj({{"type", jsp(json_str("string"))},
@@ -1469,8 +1474,10 @@ int main(int argc, char** argv) {
         u.last_wait_ms = st.last_wait_ms;
         u.retry_after_s = st.retry_after_s;
         u.headers = st.headers;
-        scene.llm_end(u);
+        // The engine takes the call's own count first, so the tape row this call's accounting
+        // reads is the tape this call carried -- the other order shows the previous call's tape.
         engine.on_call(st);
+        scene.llm_end(u);
         // fopen("") fails and the line is dropped; an empty DD_TAPE_LOG means "no log", not
         // "a log at the empty path".
         if (const char* log = std::getenv("DD_TAPE_LOG"); log && *log) {   // one line per call: is the prefix reused?
@@ -1498,9 +1505,13 @@ int main(int argc, char** argv) {
     // the todo results carry it inside an epoch, a rebase's turn 0 after one. Nothing rides the
     // tail, so the checkpoint in front of the answer stays good for the next call. An empty
     // ledger empties the prompt, so the weight disappears the moment the work is done.
-    publish_plan = [&todos, &scene, &agent] {
+    publish_plan = [&todos, &scene, &agent, &engine, &soaker, &plan_log] {
         const auto inj = todos.format_for_injection();
         agent.ephemeral_system_prompt = inj ? *inj : "";
+        // The turn's own copy of the ledger: begin_turn runs before the first payload is built,
+        // and on the first turn of a session -- the one that just adopted a plan -- the tape
+        // holds no plan at all, so the pod would be asked to recall for a turn with no work in it.
+        engine.set_plan(agent.ephemeral_system_prompt);
         dd::ui::PlanView p;
         for (const auto& it : todos.items) {
             dd::ui::PlanView::Marker m = dd::ui::PlanView::Pending;
@@ -1512,7 +1523,47 @@ int main(int argc, char** argv) {
             p.items.emplace_back(m, it.content);
         }
         scene.set_plan(p);
+
+        // The other half of the ledger. Every state the list reaches is a node in the maze, so
+        // the plan outlives the window, the process and the session: a later ariadne reads the
+        // newest one back and continues the work instead of starting from an empty list. It
+        // rides the soaker -- the same queue, spool and replay the turns use -- because a plan
+        // is not less durable than a turn, and this thread must never wait on the pod.
+        if (plan_log.session() != engine.session().id()) plan_log.session(engine.session().id());
+        dd::context::PlanDoc doc;
+        if (!plan_log.moved(todos.items, static_cast<long long>(std::time(nullptr)), &doc)) return;
+        const std::string label = dd::context::plan_label(doc.session, doc.rev);
+        soaker.plan(engine.session().id(), label, dd::context::plan_content(doc), engine.session().generation());
+        if (doc.done)
+            scene.note("✔ plan closed — " + std::to_string(doc.items.size()) + " items, revision " +
+                       std::to_string(doc.rev) + " in the maze as " + label);
     };
+
+    // A plan outlives its session. The newest open plan in the maze is this run's work as much
+    // as the dead run's: a fresh start is not a fresh task. Without this every run handed the
+    // model a window with no plan in it while the maze held one -- the nakedness this closes.
+    std::string adopted_label;
+    if (maze->up() && todos.items.empty()) {
+        dd::context::PlanDoc doc;
+        if (dd::context::plan_newest_open(*maze, &doc)) {
+            const long long age_h = (static_cast<long long>(std::time(nullptr)) - doc.unix_s) / 3600;
+            if (age_h <= 72) {
+                todos.items = doc.items;
+                plan_log.session(engine.session().id());
+                plan_log.adopt(doc);
+                publish_plan();
+                adopted_label = dd::context::plan_label(doc.session, doc.rev);
+                scene.note("◈ plan adopted from the maze: session " + doc.session + " revision " +
+                           std::to_string(doc.rev) + " · " +
+                           std::to_string(dd::context::plan_open(doc.items)) + " of " +
+                           std::to_string(doc.items.size()) + " open · " + std::to_string(age_h) + "h old");
+            } else {
+                scene.note("◈ an open plan is in the maze from session " + doc.session + " (" +
+                           std::to_string(age_h / 24) + " days old, revision " + std::to_string(doc.rev) +
+                           "): /resume " + doc.session + " to carry it on");
+            }
+        }
+    }
 
     const int tool_count = static_cast<int>(reg.get_all_tool_names().size());
     {
@@ -1852,6 +1903,9 @@ int main(int argc, char** argv) {
                                         : it.status == "cancelled" ? "✗ " : "○ ";
                         out += (out.empty() ? "" : "\n") + std::string(g) + it.content;
                     }
+                    if (plan_log.rev() > 0)   // where this list lives outside the window
+                        out += "\nmaze: " + dd::context::plan_label(plan_log.session(), plan_log.rev()) +
+                               " (append-only; a later run adopts the newest revision)";
                     scene.note(out);
                 }
             } else if (cmd == "/effort" || cmd == "/reasoning") {
@@ -1887,9 +1941,14 @@ int main(int argc, char** argv) {
                 } else {
                     engine.reset();
                     scene.clear();
-                    todos.items.clear();
-                    publish_plan();   // a new session starts with no plan
-                    scene.note("new session " + engine.session().id() + " · the maze still has the last one");
+                    // The plan is the operator's work, not the session's: a new session keeps an
+                    // open list (it is in the maze either way) and drops a finished one.
+                    const bool carried = dd::context::plan_open(todos.items) > 0;
+                    if (!carried) todos.items.clear();
+                    plan_log.session(engine.session().id());   // the plan's revisions continue under the new session
+                    publish_plan();
+                    scene.note("new session " + engine.session().id() + " · the maze still has the last one" +
+                               (carried ? ", and its open plan came along" : ""));
                 }
             } else if (cmd == "/context") {
                 auto report = [&scene, &engine] {
@@ -1934,7 +1993,24 @@ int main(int argc, char** argv) {
                                     break;
                                 }
                         scene.clear();
-                        if (!engine.resume(sid, &why)) scene.error("resume " + sid + ": " + why);
+                        if (!engine.resume(sid, &why)) {
+                            scene.error("resume " + sid + ": " + why);
+                            return;
+                        }
+                        // The plan comes back with the session: the maze is where a plan outlives
+                        // the run that wrote it, and a resumed turn with no list in it is the model
+                        // picking up text without the work it was doing.
+                        dd::context::PlanDoc doc;
+                        todos.items.clear();
+                        if (dd::context::plan_of(*maze, sid, &doc)) {
+                            todos.items = doc.items;
+                            plan_log.session(engine.session().id());
+                            plan_log.adopt(doc);
+                            scene.note("◈ plan of " + sid + " from the maze: revision " + std::to_string(doc.rev) +
+                                       " · " + std::to_string(dd::context::plan_open(doc.items)) + " of " +
+                                       std::to_string(doc.items.size()) + " open" + (doc.done ? " (closed)" : ""));
+                        }
+                        publish_plan();
                     });
                 }
             } else if (cmd == "/rebase") {
