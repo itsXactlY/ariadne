@@ -9,7 +9,7 @@ out of a README.
 
 | Area | Today | Evidence |
 |---|---|---|
-| Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:232,337,383-403,420` |
+| Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:241,273,279,492,859` |
 | Retrieval | One `Router` at turn start, after tool batches, on failure; local BM25f catalogues + async pod leg | `src/know/trigger.cpp`, `src/know/router.cpp` |
 | Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/ariadne/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
 | Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:1089-1099` |
@@ -103,7 +103,7 @@ prompt typed earlier enters earlier however the slots wrapped. Overflow is held 
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:419`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
-`TapeEngine::on_steering` (`src/context/engine.cpp:752`) stamps each one with `steered`, so the
+`TapeEngine::on_steering` (`src/context/engine.cpp:807`) stamps each one with `steered`, so the
 fold is a fact of the tape rather than a widget's guess: the prompt card carries
 `·◈ steered · 1 prompt entered this turn` whether or not the sidebar has room for it; the
 sidebar's history row counts it too, but the tape panel is a vertical budget — cards can eat the
@@ -271,14 +271,30 @@ each step built, tested, then looked at:
 2. **Workflow contract.** `PromptComposer::workflow_contract()`, toggled by
    `agent.contract`. `README.md:76-77` names it; its old "built-in tool
    preamble" claim was drift — no such string ever existed.
-3. **Plan lifecycle.** `todo` registered in both binaries; the ledger rides
-   `ephemeral_system_prompt`, never the tape, so the cached prefix stays
-   byte-identical and the plan survives a rebase by construction. Sidebar panel,
-   `/plan`, and a count on the status row in verbose.
+3. **Plan lifecycle.** `todo` registered in both binaries; the ledger rides the
+   tape as numbered revisions — the first revision of an epoch is an ANCHOR and
+   carries the whole list, each later revision carries only what moved, and every
+   revision says a higher number wins. An item records which of the two it is
+   (`include/dd/context/tape.hpp:36`), so a rebase asks whether the *list* is
+   still on the wire rather than whether some revision is: when no anchor
+   survives the cut, the list is restated as the epoch's own anchor and the
+   deltas that rode with the dropped one go with it
+   (`src/context/engine.cpp:132`, `src/context/engine.cpp:607`). An emptied
+   ledger retires itself with a revision that says so. Sidebar panel, `/plan`,
+   and a count on the status row in verbose.
    *Corrected 2026-10-28:* the premise was wrong on Strata's hybrid models. The
    plan behind the payload sat in front of the engine's turn checkpoint, so every
    call fell back to a periodic one (every 16,384 tokens read) and re-read up to
    that much. The tape engine now takes the plan (`take_ephemeral`).
+   *Corrected 2026-11-04:* the first correction stopped at the carrier. The
+   restatement still asked whether the newest revision — always a delta after a
+   tick — had left the window, which it never had, so a new epoch opened with
+   "what moved since revision N, the list itself is the anchor above" and no
+   anchor above it: the plan was gone, and the model read changes against a list
+   it could not see. Measured by putting that one condition back: `0 anchor,
+   1 delta`, three assertions red (`e13e648`). The same pass stopped a merge
+   entry with no `id` being dropped: the content it repeats names the item it
+   means, anything else is a new item (`src/tools/todo_tool.cpp:130`).
 4. **This ledger**, plus the README line that drifted.
 
 Also shipped here, each with its number: the wire's transient retry (proved
@@ -296,7 +312,7 @@ error instead of slept away — and the same gate run against a
 Then the later waves, each with its number: redaction of untrusted server text at the point it enters the prompt, the MCP
 schema cache at boot, the duplicated inline logic folded into the ported
 modules, and the doc audit that re-measures this file's citations instead of
-trusting them (`make doc-audit`: 182 citations, 0 unresolved or drifting). Calibration closed
+trusting them (`make doc-audit`: 186 citations, 0 unresolved or drifting). Calibration closed
 on `main` — the thresholds are now measured numbers, not guesses (see
 above). The tool output budget and mid-turn steering shipped here — the first
 because it is what makes verbose honest about a result, the second because a

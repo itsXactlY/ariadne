@@ -221,7 +221,7 @@ token cost.
 **Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:419`)
 runs at the round boundary — after the tool results are appended, before the next request,
 never while a tool call is executing — and what it returns rides as user messages, which
-`TapeEngine::on_steering` (`src/context/engine.cpp:752`) stamps `steered` so the fold is a fact
+`TapeEngine::on_steering` (`src/context/engine.cpp:807`) stamps `steered` so the fold is a fact
 of the tape. The count is the turn's (`begin_turn` resets it at `:370`). `/interrupt` keeps its
 meaning and stays the only mid-call action.
 
@@ -267,9 +267,9 @@ moves code cannot leave a doc pointing somewhere else.
 | the README defers the unwired list to the tool | `README.md:443` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
 | a citation must point at the thing it describes | `citations()` | every backticked path-and-line is resolved and compared with the paragraph that cites it; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (10 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts beside the binary (`config.yaml`, `brief.md`, `report.md`, `SKILL.md`) are excluded |
 | anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:405`, `src/context/engine.cpp:466`, `src/context/engine.cpp:772`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:422`, `src/context/engine.cpp:483`, `src/context/engine.cpp:827`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
-`make doc-audit`: clean — 182 citations, 0 unresolved or drifting, 0 wiring claims.
+`make doc-audit`: clean — 186 citations, 0 unresolved or drifting, 0 wiring claims.
 
 ## W10 — no locks, no queues: every hand-off becomes atomic ownership
 
