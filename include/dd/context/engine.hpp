@@ -59,6 +59,16 @@ struct TapeStats {
     size_t history = 0, tape = 0;   // session messages, rendered messages on the tape
     long tokens = 0, pool = 0, rebase_at = 0, high_at = 0, fast_layer = 0;
     long prompt = 0, reused = 0;    // the last call: prompt tokens, of which served from cache
+    long window = 0;                // the server's own window, as it reports it (0: not known yet)
+    // The ledger's own state: how many revisions this session has written, and whether the
+    // newest of them on the tape is the list itself (an anchor) or only what moved (a delta,
+    // which means nothing without the anchor above it).
+    int plan_rev = 0;
+    bool plan_anchored = false;
+    // Rebase decisions, counted: a completed one and a refused one are both decisions, and
+    // "why, into which epoch, at what size" is the whole of what the operator cannot see.
+    int rebases = 0, rebases_skipped = 0;
+    std::string rebase_last;
     std::string level = "ok", prep, server;
     int visible = 0, deferred = 0, main_slot = 0;
     bool maze = false;
@@ -147,6 +157,8 @@ private:
     ItemPtr plan_item_;    // the ledger on the tape: appended when it changes, never per call
     std::string plan_on_tape_;   // the ledger state plan_item_ carries, as the loop handed it over
     int plan_rev_ = 0;           // revisions appended this epoch: each one names itself the current list
+    int rebases_ = 0, rebases_skipped_ = 0;   // completed / refused, this session
+    std::string rebase_last_;                 // the last decision, one line, for the sidebar
     long tokens_ = 0, prompt_ = 0, reused_ = 0;
     size_t tool_chars_ = 0;   // results appended since the last call
     int steered_ = 0;         // prompts folded in at round boundaries since begin_turn

@@ -26,6 +26,13 @@ struct CallStats {
     double latency_ms = 0, gen_tps = 0, pp_tps = 0;
     long prompt_tokens = 0, completion_tokens = 0, cached_tokens = 0;
     int attempts = 1;   // sends this call needed; more than one means the endpoint was slow
+    // What the wire did, for the operator who asked to see it (/verbose verbose). A turn that
+    // was rate-limited and came back is the same turn either way; only these numbers say so.
+    long status = 0;         // the response line of the send that answered
+    long first_status = 0;   // the status that started a re-send, 0 when the first send answered
+    double waited_ms = 0, last_wait_ms = 0;   // paused between sends: the whole call, the last pause
+    long retry_after_s = 0;  // the server's own Retry-After, when it named one
+    std::string headers;     // the response headers worth reading, "name: value · ..."
 };
 
 // A message as the server reads it: reasoning goes out as

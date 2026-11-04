@@ -1743,11 +1743,22 @@ void Scene::apply(Event& e) {
         turn_out_ += e.llm.completion_tokens;
         close_live(e.at, e.llm.latency_ms);
         last_ = e.llm;
+        in_total_ += e.llm.prompt_tokens;
+        out_total_ += e.llm.completion_tokens;
+        cached_total_ += e.llm.cached_tokens;
         ++calls_total_;
         ++turn_calls_;
         if (e.llm.gen_tps > 0) {
             tps_hist_.push_back(e.llm.gen_tps);
             if (tps_hist_.size() > 24) tps_hist_.pop_front();
+        }
+        // Verbose keeps the wire: one line per call with what answered, what the sends cost and
+        // what the prompt was made of, plus the response headers worth reading. It is pushed
+        // here, on the render thread, so the mode decides whether the entry exists at all --
+        // the feed side cannot read the mode without racing the operator's /verbose.
+        if (verb_ == Verbosity::Verbose) {
+            push(Kind::Wire, wire_line(e.llm, tape_, in_total_, out_total_, cached_total_));
+            if (!e.llm.headers.empty()) push(Kind::Wire, "headers · " + e.llm.headers);
         }
         break;
     case Ev::TurnBegin:
@@ -1780,6 +1791,50 @@ void Scene::apply(Event& e) {
         break;
     }
     }
+}
+
+// What one call did, on one line, for /verbose verbose: every clause is a fact the call
+// produced. "http 200 (first 429) · 3 sends · 1.9s waited" is a rate limit that was waited out;
+// "in 4,123 (960 cached, 23%)" is a prompt the server mostly already held. The tape and the
+// ledger ride along because the interesting question about a call is what history it carried.
+std::string wire_line(const LlmStats& s, const TapeView& tape, long in_total, long out_total, long cached_total) {
+    auto pct = [](long a, long b) {
+        return b > 0 ? std::to_string(static_cast<int>(100.0 * static_cast<double>(a) / static_cast<double>(b) + 0.5)) + "%"
+                     : std::string("—");
+    };
+    std::string w = s.status > 0 ? "http " + std::to_string(s.status) : std::string("http —");
+    if (s.first_status > 0) w += " (first " + std::to_string(s.first_status) + ")";
+    w += " · " + std::to_string(s.attempts) + (s.attempts == 1 ? " send" : " sends");
+    if (s.waited_ms > 0) {
+        w += " · " + fmt_ms(s.waited_ms) + " waited (last " + fmt_ms(s.last_wait_ms) + ")";
+        if (s.retry_after_s > 0) w += ", server asked " + std::to_string(s.retry_after_s) + "s";
+    }
+    if (s.prompt_tokens > 0) {
+        w += " · in " + group(s.prompt_tokens);
+        if (s.cached_tokens > 0) w += " (" + group(s.cached_tokens) + " cached, " + pct(s.cached_tokens, s.prompt_tokens) + ")";
+    }
+    if (s.completion_tokens > 0) w += " · out " + group(s.completion_tokens);
+    if (s.gen_tps > 0) w += " · " + fmt1(s.gen_tps) + " t/s";
+    if (s.pp_tps > 0) w += " · prefill " + fmt1(s.pp_tps) + " t/s";
+    if (s.latency_ms > 0) w += " · " + fmt_ms(s.latency_ms);
+    if (in_total > 0) {
+        w += " · session " + fmt_tok(in_total) + " in / " + fmt_tok(out_total) + " out";
+        if (cached_total > 0) w += " (" + pct(cached_total, in_total) + " cached)";
+    }
+    if (tape.on) {
+        w += " · epoch " + std::to_string(tape.epoch) + " · tape " + std::to_string(tape.tape) + "/" +
+             std::to_string(tape.history) + " msgs · " + fmt_tok(tape.tokens) + " tok";
+        if (tape.rebase_at > 0)   // the watermarks a rebase is cut from: high, fast layer, the point itself
+            w += " · marks " + fmt_tok(tape.high_at) + "/" + fmt_tok(tape.fast_layer) + "/" + fmt_tok(tape.rebase_at);
+    }
+    if (tape.plan_rev > 0)
+        w += " · ledger rev " + std::to_string(tape.plan_rev) + (tape.plan_anchored ? " anchor" : " delta");
+    if (tape.rebases + tape.rebases_skipped > 0) {
+        w += " · rebases " + std::to_string(tape.rebases);
+        if (tape.rebases_skipped) w += "+" + std::to_string(tape.rebases_skipped) + " skipped";
+        if (!tape.rebase_last.empty()) w += " (" + tape.rebase_last + ")";
+    }
+    return w;
 }
 
 void Scene::close_live(clock::time_point at, double latency_ms) {
@@ -2188,6 +2243,15 @@ Canvas Scene::render(const Entry& e, int w) const {
         for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k), lines[k], Style{th_.muted});
         return c;
     }
+    case Kind::Wire: {
+        // A measurement, not part of the conversation: dim, with the wire's own mark, so a row
+        // that names an HTTP status can never be read as something the model said.
+        const auto lines = wrap(e.text, w - 4);
+        Canvas c(w, static_cast<int>(lines.size()));
+        if (!lines.empty()) c.put(0, 0, U'⟐', Style{th_.accent});
+        for (size_t k = 0; k < lines.size(); ++k) c.text(2, static_cast<int>(k), lines[k], Style{th_.muted, kNone, kDim});
+        return c;
+    }
     case Kind::Error: {
         const auto lines = wrap(e.text, w - 4, verb_ == Verbosity::Minimal ? 3 : verb_ == Verbosity::Verbose ? 32 : 8);
         const int h = static_cast<int>(lines.size()) + 3;
@@ -2427,10 +2491,16 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
     const int pshown = plan_.items.empty() ? 0 : std::min<int>(static_cast<int>(plan_.items.size()), verbose ? 12 : 6);
     const int ph = plan_.items.empty() ? 0 : pshown + 2;
     const int rest = h - sh - ph;
-    const bool engine = rest >= (verbose ? 15 : 20);
-    const int eh = engine ? 7 : 0;
-    const bool tape = tape_.on && rest - eh >= (verbose ? 8 : 21);
-    const int tph = tape ? 7 : 0;
+    // Verbose opens three more rows in each panel -- the wire, the watermarks, the ledger's
+    // revisions -- and pays for them in height. Where the height is not there the panel keeps
+    // the rows it always had: a mode that shows more must not cost a panel that showed less.
+    const bool engine_full = verbose && rest >= 19;
+    const bool engine = rest >= (engine_full ? 19 : (verbose ? 15 : 20));
+    const int eh = engine ? (engine_full ? 10 : 7) : 0;
+    const bool tape_full = verbose && rest - eh >= 18;
+    const int tph_need = tape_full ? 10 : 7;
+    const bool tape = tape_.on && rest - eh >= (tape_full ? 18 : (verbose ? 8 : 21));
+    const int tph = tape ? tph_need : 0;
     const int th = rest - eh - tph;
 
     f.box(x, y, w, sh, b, true);
@@ -2504,6 +2574,24 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
                 if (text_width(form) <= vw) { out = form; break; }
             if (out.empty()) out = forms.back();   // nothing fits: show the bare call
             row(ey + 5, "last", out, val);
+            if (verbose) {
+                // The wire in the open: the prompt this call carried and what of it the server
+                // already held, the sends and the wall clock they cost, the status that answered,
+                // and the response headers that are not transport plumbing.
+                row(ey + 6, "in", last_.prompt_tokens > 0
+                                  ? fmt_tok(last_.prompt_tokens) +
+                                        (last_.cached_tokens > 0 ? " · " + fmt_tok(last_.cached_tokens) + " cached" : std::string())
+                                  : std::string("—"),
+                    val);
+                std::string sends = std::to_string(last_.attempts) + (last_.attempts == 1 ? " send" : " sends");
+                if (last_.waited_ms > 0) sends += " · " + fmt_ms(last_.waited_ms) + " waited";
+                row(ey + 7, "sends", sends, last_.attempts > 1 ? Style{th_.warn} : val);
+                std::string http = last_.status > 0 ? std::to_string(last_.status) : "—";
+                if (last_.first_status > 0) http += " (first " + std::to_string(last_.first_status) + ")";
+                row(ey + 8, "http", http,
+                    last_.status >= 200 && last_.status < 300 ? Style{th_.ok} : val);
+                row(ey + 9, "hdrs", last_.headers.empty() ? std::string("—") : last_.headers, mut);
+            }
         }
     }
 
@@ -2563,6 +2651,25 @@ void Scene::paint_sidebar(Frame& f, int x, int y, int w, int h) const {
         if (grammars_.moved_hues() + th_.palette_fixed > 0)
             lg += " · " + std::to_string(grammars_.moved_hues() + th_.palette_fixed) + " hues moved";
         row(py + 6, "code", lg, grammars_.languages() ? Style{th_.ok} : Style{th_.warn});
+        if (verbose) {
+            // The watermarks the rebase point is cut from, and the two decisions a run cannot
+            // otherwise show: how far the ledger has been revised (and whether the newest
+            // revision on the tape is the list itself), and why the last rebase ran.
+            row(py + 7, "marks", tape_.rebase_at > 0
+                                      ? fmt_tok(tape_.high_at) + "/" + fmt_tok(tape_.fast_layer)
+                                      : std::string("—"),
+                val);
+            std::string rb = tape_.rebases + tape_.rebases_skipped == 0
+                                 ? std::string("none yet")
+                                 : std::to_string(tape_.rebases) +
+                                       (tape_.rebases_skipped ? "+" + std::to_string(tape_.rebases_skipped) + " skip" : "") +
+                                       (tape_.rebase_last.empty() ? std::string() : " · " + tape_.rebase_last);
+            row(py + 8, "rebase", rb, tape_.rebases_skipped ? Style{th_.warn} : val);
+            std::string led = tape_.plan_rev > 0
+                                  ? "rev " + std::to_string(tape_.plan_rev) + (tape_.plan_anchored ? " · anchor" : " · delta")
+                                  : std::string("none yet");
+            row(py + 9, "ledger", led, mut);
+        }
     }
 
     if (th < 3) return;
@@ -2713,9 +2820,31 @@ void Scene::paint_status(Frame& f, int y, int w) const {
         // that shows only the last one resets the number every call.
         const long turn_out = turn_out_ + (live_say_ ? live_say_->n : 0) + (live_reason_ ? live_reason_->n : 0);
         if (turn_out > 0) segs.push_back({"out ", fmt_tok(turn_out)});
-        if (last_.cached_tokens > 0) segs.push_back({"cache ", fmt_tok(last_.cached_tokens)});
-        if (last_.attempts > 1) segs.push_back({"sent ", std::to_string(last_.attempts)});
+        // The prompt the call carried and how much of it the server already held: a call that
+        // re-read 40k tokens and one served from cache cost the same on the wire and nothing
+        // like the same in time, so both numbers are on the row.
+        if (last_.prompt_tokens > 0) segs.push_back({"in ", fmt_tok(last_.prompt_tokens)});
+        if (last_.cached_tokens > 0) {
+            std::string cache = fmt_tok(last_.cached_tokens);
+            if (last_.prompt_tokens > 0)
+                cache += " (" + std::to_string(static_cast<int>(100.0 * static_cast<double>(last_.cached_tokens) /
+                                                                 static_cast<double>(last_.prompt_tokens) + 0.5)) + "%)";
+            segs.push_back({"cache ", cache});
+        }
+        // A re-send is the anomaly, and the pause is what it cost: a rate limit that cleared is
+        // invisible in a row that only says ×3. The status follows, so the two read together.
+        if (last_.attempts > 1) {
+            std::string sends = std::to_string(last_.attempts);
+            if (last_.waited_ms > 0) sends += " · " + fmt_ms(last_.waited_ms);
+            segs.push_back({"sent ", sends});
+        }
+        if (last_.status > 0) segs.push_back({"http ", std::to_string(last_.status)});
         if (tape_.on) segs.push_back({"epoch ", std::to_string(tape_.epoch) + " · " + fmt_tok(tape_.tokens)});
+        if (tape_.on && tape_.plan_rev > 0)
+            segs.push_back({"rev ", std::to_string(tape_.plan_rev) + (tape_.plan_anchored ? " anchor" : " delta")});
+        if (tape_.on && tape_.rebases + tape_.rebases_skipped > 0)
+            segs.push_back({"rebases ", std::to_string(tape_.rebases) +
+                                            (tape_.rebases_skipped ? "+" + std::to_string(tape_.rebases_skipped) : std::string())});
         if (tape_.on && tape_.deferred > 0) segs.push_back({"deferred ", std::to_string(tape_.deferred)});
         if (plan_.total > 0) segs.push_back({"plan ", std::to_string(plan_.open) + "/" + std::to_string(plan_.total)});
         segs.push_back({"mode ", "verbose"});

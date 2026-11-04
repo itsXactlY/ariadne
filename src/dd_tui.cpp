@@ -1429,6 +1429,14 @@ int main(int argc, char** argv) {
         v.tape = static_cast<long>(t.tape);
         v.tokens = t.tokens;
         v.rebase_at = t.rebase_at;
+        v.window = t.window;
+        v.high_at = t.high_at;
+        v.fast_layer = t.fast_layer;
+        v.plan_rev = t.plan_rev;
+        v.plan_anchored = t.plan_anchored;
+        v.rebases = t.rebases;
+        v.rebases_skipped = t.rebases_skipped;
+        v.rebase_last = t.rebase_last;
         v.prompt = t.prompt;
         v.reused = t.reused;
         v.level = t.level;
@@ -1455,6 +1463,12 @@ int main(int argc, char** argv) {
         u.completion_tokens = st.completion_tokens;
         u.cached_tokens = st.cached_tokens;
         u.attempts = st.attempts;
+        u.status = st.status;
+        u.first_status = st.first_status;
+        u.waited_ms = st.waited_ms;
+        u.last_wait_ms = st.last_wait_ms;
+        u.retry_after_s = st.retry_after_s;
+        u.headers = st.headers;
         scene.llm_end(u);
         engine.on_call(st);
         // fopen("") fails and the line is dropped; an empty DD_TAPE_LOG means "no log", not

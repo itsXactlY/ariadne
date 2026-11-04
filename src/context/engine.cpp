@@ -317,6 +317,12 @@ TapeStats TapeEngine::compute_stats() const {
     s.fast_layer = fast_layer();
     s.prompt = prompt_;
     s.reused = reused_;
+    s.window = window();
+    s.plan_rev = plan_rev_;
+    s.plan_anchored = has_plan_anchor(session_->items());
+    s.rebases = rebases_;
+    s.rebases_skipped = rebases_skipped_;
+    s.rebase_last = rebase_last_;
     s.level = level(tokens_);
     s.prep = prep_running_.load() ? "warming" : ready_.load() ? "ready" : "";
     s.server = !ep_.info().local ? "remote"
@@ -484,6 +490,9 @@ bool TapeEngine::adopt(long pool, bool turn_start) {
     note("⟲ rebase (prewarmed" + std::string(p->warmed ? "" : ", not warmed") + "): epoch " +
          std::to_string(session_->generation()) + " · " + thousands(pool) + " tokens · " + std::to_string(before) +
          " → " + std::to_string(session_->items().size()) + " messages");
+    ++rebases_;
+    rebase_last_ = "prewarmed → epoch " + std::to_string(session_->generation()) + ", " + thousands(before) + "→" +
+                   std::to_string(session_->items().size()) + " msgs";
     tokens_ = 0;
     tool_chars_ = 0;
     return true;
@@ -504,6 +513,8 @@ bool TapeEngine::rebase(const char* why) {
         if (skipped_gen_ != session_->generation())
             note(std::string("⟲ rebase skipped (") + why + "): a new epoch would still be ~" + thousands(after) +
                  " tokens (high watermark " + thousands(high_at()) + ") — the window stays over the fast layer");
+        ++rebases_skipped_;
+        rebase_last_ = std::string("skipped (") + why + "): no room to cut, ~" + thousands(after) + " tok";
         skipped_gen_ = session_->generation();
         return false;
     }
@@ -513,6 +524,9 @@ bool TapeEngine::rebase(const char* why) {
     note(std::string("⟲ rebase (") + why + "): epoch " + std::to_string(session_->generation()) + " · " +
          thousands(tokens) + " → ~" + thousands(after) + " tokens · " + std::to_string(before) + " → " +
          std::to_string(session_->items().size()) + " messages · " + (recalled ? "recall in turn 0" : "no recall"));
+    ++rebases_;
+    rebase_last_ = std::string(why) + " → epoch " + std::to_string(session_->generation()) + ", " + thousands(tokens) +
+                   "→~" + thousands(after) + " tok";
     tokens_ = 0;
     tool_chars_ = 0;
     return true;

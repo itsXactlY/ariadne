@@ -427,11 +427,17 @@ int main() {
     // ── Three rate limits in a row are waited out, not three sends and a dead turn ──
     {
         const std::string limited = http(429, "{\"error\":{\"message\":\"rate limit\"}}");
-        FakeEndpoint ep({limited, limited, limited, http(200, kSse, "text/event-stream")}, 0);
+        // The answer carries the headers an operator would act on, next to the plumbing that
+        // says nothing about the call: /verbose verbose shows the first and never the second.
+        FakeEndpoint ep({limited, limited, limited,
+                         http(200, kSse, "text/event-stream",
+                              "x-ratelimit-remaining-requests: 199\r\nserver: fake-openrouter\r\n")},
+                        0);
         ep.start();
         HttpLLM llm = endpoint_llm(ep);
         int sends_seen = 0;
-        llm.on_stats = [&](const CallStats& st) { sends_seen = st.attempts; };
+        CallStats seen;
+        llm.on_stats = [&](const CallStats& st) { sends_seen = st.attempts; seen = st; };
         const auto t0 = std::chrono::steady_clock::now();
         std::string answer;
         bool threw = false;
@@ -443,6 +449,16 @@ int main() {
         chk(sends_seen == 4, "the reply says four sends");
         chk(elapsed >= 1700.0, "the quick rungs were waited out: 250 ms + 500 ms + 1 s (" +
                                    std::to_string(static_cast<long>(elapsed)) + " ms)");
+        // The numbers a verbose run shows are the numbers the call measured: what answered,
+        // what started the climb, the wall clock the pauses cost, and the headers.
+        chk(seen.status == 200, "the stats name the status that answered");
+        chk(seen.first_status == 429, "and the status that started the re-sends");
+        chk(seen.waited_ms >= 1700.0 && seen.waited_ms <= elapsed,
+            "the wait is counted, and it is inside the call's own latency");
+        chk(seen.last_wait_ms >= 990.0, "the last pause is the last rung, 1 s");
+        chk(seen.headers.find("x-ratelimit-remaining-requests: 199") != std::string::npos,
+            "a header an operator can act on reaches the stats");
+        chk(seen.headers.find("content-type") == std::string::npos, "transport plumbing does not");
         std::printf("rate ladder live: %d sends over %ld ms (rungs 250/500/1000 ms)\n",
                     ep.served.load(), static_cast<long>(elapsed));
     }

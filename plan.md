@@ -165,6 +165,25 @@ single-shot curl call with no policy at all.
 | a call cut by Esc is never re-sent | `cancelled` in `WireResult` | one connection at most, no backoff paid, the error says `interrupted` |
 | the send count rides out, so a slow endpoint is visible | `CallStats.attempts` → `LlmStats.attempts`; `with_sends()` on the error | the suite asserts `attempts == 2` and that `latency_ms` counts the whole wait, not only the send that answered; the engine row renders it as `· ×2` and the verbose status row as `sent 2` (`dd_ui_tests`) |
 | `DD_WIRE_ATTEMPTS=1` is the old one-shot wire | `HttpLLM::retry_attempts` | the suite: one connection, and the error names the server's reason without a send count |
+| what a call *did* rides out beside how many sends it took: the status that answered, the status that started a re-send, the wall clock the pauses cost, the server's own `Retry-After`, and the response headers an operator can act on | `CallStats.status/first_status/waited_ms/last_wait_ms/retry_after_s/headers` → `LlmStats` → `wire_line` (`src/ui.cpp`) | same suite, live: three 429s then a 200 answer reports `status 200`, `first_status 429`, a waited time inside its own latency, `last_wait_ms` at the 1 s rung, and `x-ratelimit-remaining-requests: 199` in the headers with `content-type` absent; `dd_ui_tests` asserts the line itself and the panel rows that carry it |
+
+### W4b — `/verbose verbose` is the instrument, not a bigger card
+
+The double level is where a run is read rather than watched. At `Verbose`:
+
+- **every call leaves a line** (`Kind::Wire`): `http 200 (first 429) · 3 sends · 1.9s waited (last 1s),
+  server asked 1s · in 4,123 (960 cached, 23%) · out 300 · 61.2 t/s · prefill 410.0 t/s · session 41.0k in /
+  3.2k out · epoch 7 · tape 24/24 msgs · 21.0k tok · marks 64.0k/128.0k/96.0k · ledger rev 12 anchor ·
+  rebases 2 (turn start → epoch 7)`, and a second line with the response headers that are not transport
+  plumbing. The entry is pushed on the render thread, so `/verbose` decides whether the transcript holds
+  it at all — a normal run is byte-for-byte what it was.
+- **the status row** adds `in`, `cache N (M%)`, `sent N · <waited>`, `http <status>`, `rev N anchor|delta`
+  and `rebases N` to the accounting it already carried.
+- **the engine panel** adds `in`, `sends`, `http`, `hdrs`; **the tape panel** adds `marks`
+  (high watermark / fast layer), `rebase` (count and the last decision, skipped ones included) and
+  `ledger` (the revision, and whether the newest revision on the tape is the list itself). Both are paid
+  for in height and keep their shorter form on a terminal that cannot hold them — more must never cost a
+  panel that showed less.
 
 ## W5 — redact untrusted server text at the point it enters the prompt
 
@@ -265,10 +284,10 @@ moves code cannot leave a doc pointing somewhere else.
 | what | where | proof |
 |---|---|---|
 | reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 98 TUs, `ariadne-agent` 23, `ariadne-skills` 59; closure reaches **211 files** (99 TUs, 112 headers); **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers reached by none, 16 of 34 header-only ports unreached |
-| the README defers the unwired list to the tool | `README.md:443` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
+| the README defers the unwired list to the tool | `README.md:450` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
 | a citation must point at the thing it describes | `citations()` | every backticked path-and-line is resolved and compared with the paragraph that cites it; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (10 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts beside the binary (`config.yaml`, `brief.md`, `report.md`, `SKILL.md`) are excluded |
 | anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:422`, `src/context/engine.cpp:483`, `src/context/engine.cpp:827`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:428`, `src/context/engine.cpp:489`, `src/context/engine.cpp:841`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
 `make doc-audit`: clean — 187 citations, 0 unresolved or drifting, 0 wiring claims.
 
@@ -282,7 +301,7 @@ so it is engineer-decidable like every other wave:
 | what | where | why it is in scope |
 |---|---|---|
 | 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp` (jitter counter), `src/agent/prompt_cache_boundary.cpp` (x3), `include/dd/gateway/pairing.hpp` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere, and 10d deleted them. Each was reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guarded state no second thread reaches |
-| 5 queues | `src/context/maze.cpp:246` (`Job`), `src/context/maze.cpp:247` (`LedgerEntry`), `include/dd/know/router.hpp:120` (`opened_q_`), `include/dd/learn/sink.hpp:43` (`q_`), `include/dd/ui.hpp:485` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:1037`) posted an event per streamed delta, so a long answer was thousands of nodes and thousands of string copies on the hot path. These five lines are where each hand-off lives today: all five are `SlotRing`s |
+| 5 queues | `src/context/maze.cpp:246` (`Job`), `src/context/maze.cpp:247` (`LedgerEntry`), `include/dd/know/router.hpp:120` (`opened_q_`), `include/dd/learn/sink.hpp:43` (`q_`), `include/dd/ui.hpp:504` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:1037`) posted an event per streamed delta, so a long answer was thousands of nodes and thousands of string copies on the hot path. These five lines are where each hand-off lives today: all five are `SlotRing`s |
 | 6 deques | `src/core/json.cpp:201`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:520`, `include/dd/ui.hpp:522`, `include/dd/ui.hpp:528` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
 | `core::park` / `unpark`, 12 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp`, `src/limbo/spawn.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
 | `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:265`, `src/context/maze.cpp:288`, `src/context/maze.cpp:307`, `src/learn/ledger.cpp:47` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |

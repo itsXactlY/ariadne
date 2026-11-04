@@ -88,7 +88,7 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
 - **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
 - **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
-- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:92`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:55`), never a reason to re-send an answer the caller already holds.
+- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:135`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:55`), never a reason to re-send an answer the caller already holds.
 - **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
 
 ## Execution model
@@ -231,6 +231,12 @@ Highlights:
 - UTF-8 line editing, history, bracketed paste, mouse wheel, key decoding, and terminal restoration.
 - Live reasoning cards and streamed answer cards without moving content below the live tail.
 - `/context`, `/rebase`, `/resume`, `/plan`, `/learn`, `/reasoning`, `/effort`, `/verbose`, and related REPL commands.
+- **`/verbose verbose` is the instrument.** Every call leaves a dim accounting line — `http 200
+  (first 429) · 3 sends · 1.9s waited · in 4,123 (960 cached, 23%) · out 300 · epoch 7 · tape 24/24
+  msgs · ledger rev 12 anchor · rebases 2 (turn start → epoch 7)` — with the response headers worth
+  reading on the line under it; the status row, the engine panel and the tape panel grow the same
+  numbers (`in`, `sent N`, `http`, `marks`, `ledger`, `rebase`). The rows a call leaves exist only
+  at that level (`Kind::Wire`, `src/ui.cpp:1760`), so a normal run's transcript is unchanged.
 - SIMD cell-diff and text-width kernels selected at runtime: AVX-512, AVX2, or scalar.
 - **Code colour comes off disk, not from a compiled table.** `skills/highlight.yaml` names a
   language and which kind each word is (`skills/highlight.yaml:35-46` lists the kinds,
@@ -354,7 +360,7 @@ Two transports, two vocabularies. The harness never guesses what a model's diale
 | `agent.thinking_budget: N > 0` | `reasoning_budget_tokens: N` plus an instruction message, on engine calls only | caps one thinking field; a `/v1` upstream never sees it |
 | `agent.thinking_budget: 0` — the default | nothing | no cap: the template decides the thinking length |
 
-- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:193`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
+- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:260`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
 - A request offers only what this model implements: `Endpoint::efforts()` returns the levels the chat template the server reported actually has (`src/context/endpoint.cpp:184`), and a level above that ceiling steps down through the `offered` check (`src/dd_tui.cpp:1173` uses `efforts` and `kEfforts`) until the boot note names the level that is running.
 - A cap is never named for a request that did not choose a level — the shape callback is gated on `effort > 0` (`src/dd_tui.cpp:1347` calls `ep.shape` with `effort.load(...) > 0`), so neither no-preference nor `off` invites the model to think. Where a cap is named, `Endpoint::shape` writes `reasoning_budget_tokens` on engine calls (`src/context/endpoint.cpp:179`) and returns early for a remote API, which gets the OpenAI fields only (`src/context/endpoint.cpp:173-174`).
 
@@ -362,7 +368,7 @@ Two transports, two vocabularies. The harness never guesses what a model's diale
 
 A model's id is not a server. A `/v1` upstream serves one model through several providers, same weights behind different servers and different quantizations, and the name a request carries cannot say which one answers. On that API the provider is a request field: `provider.only` names one, spelled as that endpoint's own model list spells it, and `provider.allow_fallbacks: false` refuses a substitute, which makes a provider other than the one asked for an error rather than a silent swap.
 
-  The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:220` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose.
+  The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:252` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose.
 
 | Request state | On the wire | What it does |
 |---|---|---|

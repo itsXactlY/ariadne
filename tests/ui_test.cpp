@@ -485,7 +485,14 @@ int main() {
             return lines_of(s.drain_inline(80, false, false));
         };
         chk(reason(Verbosity::Minimal).size() == 2, "quiet folds reasoning to its header row");
-        chk(reason(Verbosity::Verbose).size() == 30 + 3, "verbose shows every reasoning line");
+        {   // verbose adds the call's accounting line; every reasoning line is still shown
+            std::string all;
+            for (const auto& l : reason(Verbosity::Verbose)) all += l + "\n";
+            bool every = true;
+            for (int i = 0; i < 30; ++i)
+                if (all.find("line " + std::to_string(i)) == std::string::npos) every = false;
+            chk(every, "verbose shows every reasoning line");
+        }
         chk(reason(Verbosity::Normal).size() == Scene::kReasonRows + 3, "normal keeps the tail cap");
     }
 
@@ -574,6 +581,92 @@ int main() {
         };
         chk(status_has(Verbosity::Verbose), "verbose status carries calls, out, cache, mode");
         chk(!status_has(Verbosity::Normal), "normal status carries no accounting");
+    }
+    {   // /verbose verbose is the whole deal: the wire, the watermarks, the ledger's revisions
+        LlmStats st;
+        st.prompt_tokens = 4123;
+        st.completion_tokens = 300;
+        st.cached_tokens = 960;
+        st.attempts = 3;
+        st.first_status = 429;
+        st.status = 200;
+        st.waited_ms = 1878;
+        st.last_wait_ms = 1000;
+        st.retry_after_s = 1;
+        st.gen_tps = 61.2;
+        st.pp_tps = 410.0;
+        st.latency_ms = 4200;
+        TapeView tv;
+        tv.on = true;
+        tv.epoch = 7;
+        tv.history = 24;
+        tv.tape = 24;
+        tv.tokens = 21000;
+        tv.rebase_at = 96000;
+        tv.high_at = 64000;
+        tv.fast_layer = 128000;
+        tv.window = 128000;
+        tv.plan_rev = 12;
+        tv.plan_anchored = true;
+        tv.rebases = 2;
+        tv.rebase_last = "turn start → epoch 7";
+        const std::string w = wire_line(st, tv, 41000, 3200, 9600);
+        chk(w.find("http 200 (first 429)") != std::string::npos,
+            "the wire line names the status that answered and the one that was waited out");
+        chk(w.find("3 sends") != std::string::npos && w.find("1.9s waited") != std::string::npos &&
+                w.find("server asked 1s") != std::string::npos,
+            "and the sends, the wall clock they cost, and what the server asked for");
+        chk(w.find("in 4,123 (960 cached, 23%)") != std::string::npos, "the prompt and the share of it that was cached");
+        chk(w.find("out 300") != std::string::npos && w.find("61.2 t/s") != std::string::npos, "the answer and its rate");
+        chk(w.find("session 41.0k in / 3.2k out (23% cached)") != std::string::npos, "the session's own totals");
+        chk(w.find("epoch 7 · tape 24/24 msgs") != std::string::npos, "the epoch and the tape it holds");
+        chk(w.find("marks 64.0k/128.0k/96.0k") != std::string::npos,
+            "the watermarks: high, fast layer, and the rebase point itself");
+        chk(w.find("ledger rev 12 anchor") != std::string::npos, "the ledger's revision, and that it is the anchor");
+        chk(w.find("rebases 2 (turn start → epoch 7)") != std::string::npos, "the last rebase decision");
+        // a plain call says so, and says nothing it does not know
+        LlmStats quiet;
+        quiet.status = 200;
+        quiet.prompt_tokens = 900;
+        const std::string q = wire_line(quiet, TapeView{}, 0, 0, 0);
+        chk(q.find("1 send") != std::string::npos && q.find("waited") == std::string::npos,
+            "one send is one send, and no pause is claimed");
+        chk(q.find("epoch") == std::string::npos && q.find("rebases") == std::string::npos,
+            "a run with no tape claims no tape");
+
+        // On the screen: the panels at verbose carry those rows, and normal carries neither the
+        // wire line nor the extra rows.
+        auto screen = [&](Verbosity v, int rows) {
+            Scene s{Theme{}};
+            s.set_verbosity(v);
+            Info info;
+            info.model = "m";
+            info.endpoint = "http://127.0.0.1:9/v1";
+            info.tools = 4;
+            info.max_turns = 10;
+            info.n_ctx = 128000;
+            s.set_info(info);
+            s.set_tape(tv);
+            s.turn_begin();
+            s.llm_begin();
+            s.llm_content("hi");
+            s.llm_end(st);
+            s.turn_end();
+            s.present(120, rows, true);
+            std::string all;
+            for (int y = 0; y < rows; ++y) all += s.row_text(y) + "\n";
+            return all;
+        };
+        const std::string loud = screen(Verbosity::Verbose, 44);
+        chk(loud.find("marks") != std::string::npos && loud.find("ledger") != std::string::npos,
+            "verbose opens the watermark and ledger rows");
+        chk(loud.find("rev 12") != std::string::npos && loud.find("2 · turn start") != std::string::npos,
+            "and the revision and the rebase decision in them");
+        chk(loud.find("⟐") != std::string::npos, "the call leaves its accounting line in the transcript");
+        const std::string plain = screen(Verbosity::Normal, 44);
+        chk(plain.find("⟐") == std::string::npos, "normal keeps no wire line");
+        chk(plain.find("ledger") == std::string::npos && plain.find("marks") == std::string::npos,
+            "and no watermark or ledger rows");
     }
     {   // the todo ledger: a sidebar panel in every mode, a count on the status row in verbose
         auto with_plan = [&](Verbosity v, int cols = 120) {
@@ -805,7 +898,10 @@ int main() {
         for (int y = 0; y < 30; ++y) again += s.row_text(y);
         chk(again.find("×") == std::string::npos, "a single send is not marked");
         chk(again.find("60 tok · 1.9s") != std::string::npos, "the bare call reads without a marker");
-        chk(again.find("800 c") == std::string::npos, "no cache segment is clipped mid-word");
+        // The verbose wire line spells the cache out ("800 cached, 67%") of its own accord; what
+        // this asserts is that no segment is *clipped* -- a "800 c…" would report a fact without
+        // saying what it was.
+        chk(again.find("800 c…") == std::string::npos, "no cache segment is clipped mid-word");
         chk(again.find("cache 800") != std::string::npos, "cache still reads on the status row");
     }
 

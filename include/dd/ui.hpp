@@ -261,7 +261,10 @@ bool looks_like_diff(const std::string& body);
 int paint_row(Canvas& c, int x, int y, const std::string& row, const Theme& th, CodeCtx& ctx,
               const Style& base, int max_w = -1);
 
-enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory };
+// Wire is the accounting line a call leaves at /verbose verbose: what answered, what the sends
+// cost, the prompt and how much of it was cached. It exists only in that mode, so a normal run
+// keeps the same transcript it always had.
+enum class Kind { User, Say, Tool, Note, Error, Rule, Reason, Memory, Wire };
 // How reasoning cards show: a fixed-height live tail, every line, or one line.
 enum class ReasonView { Tail, Full, Hide };
 
@@ -349,6 +352,12 @@ struct LlmStats {
     double latency_ms = 0, gen_tps = 0, pp_tps = 0;
     long prompt_tokens = 0, completion_tokens = 0, cached_tokens = 0;
     int attempts = 1;   // sends this call needed; shown only when the endpoint made it re-send
+    // The wire, for /verbose verbose: what answered, what the sends cost in wall clock, and the
+    // response headers that are not transport plumbing. Zero/empty on a hand-made LlmStats.
+    long status = 0, first_status = 0;
+    double waited_ms = 0, last_wait_ms = 0;
+    long retry_after_s = 0;
+    std::string headers;
 };
 
 // The context tape as the sidebar shows it (dd/context TapeStats, flattened).
@@ -356,6 +365,10 @@ struct TapeView {
     bool on = false;
     int epoch = 0, visible = 0, deferred = 0, main_slot = 0;
     long history = 0, tape = 0, tokens = 0, rebase_at = 0, prompt = 0, reused = 0;
+    long window = 0, high_at = 0, fast_layer = 0;   // the watermarks the rebase point is cut from
+    int plan_rev = 0, rebases = 0, rebases_skipped = 0;
+    bool plan_anchored = false;
+    std::string rebase_last;   // the last rebase decision, one line
     std::string level = "ok", prep, server;
     bool maze = false;
     unsigned long long soaked = 0, soak_queue = 0, spooled = 0, unledgered = 0;
@@ -377,6 +390,12 @@ struct Info {
     long n_ctx = 0;
     std::vector<std::string> sources;  // "mazemaker 34", "local 4"
 };
+
+// The accounting line one call leaves at /verbose verbose (Kind::Wire): what answered, what the
+// sends cost in wall clock, the prompt and how much of it the server already held, and where the
+// tape and the ledger stood. Pure -- the caller hands over what it measured -- so the line can be
+// tested without a terminal.
+std::string wire_line(const LlmStats& s, const TapeView& tape, long in_total, long out_total, long cached_total);
 
 class Scene {
 public:
@@ -529,6 +548,8 @@ private:
     long calls_total_ = 0;
     int turn_calls_ = 0, turns_ = 0, tools_turn_ = 0;
     long turn_out_ = 0;      // output tokens this turn: each call's completion_tokens added
+    // The session's own totals, as the server counted them: what verbose calls "session".
+    long in_total_ = 0, out_total_ = 0, cached_total_ = 0;
     Phase phase_ = Phase::Idle;
     bool busy_ = false;
     std::string running_tool_;

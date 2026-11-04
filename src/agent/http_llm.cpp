@@ -39,6 +39,7 @@ struct StreamSink {
     ChatStream cs;
     std::string raw;
     long retry_after_s = 0;   // the server's own Retry-After, read off the response headers
+    std::vector<std::pair<std::string, std::string>> headers;   // the ones worth reading, in arrival order
     const std::atomic<bool>* cancel = nullptr;
     curl_off_t recv = 0;    // bytes the write callback has seen
     long stall_s = 0;       // 0 = no stall guard
@@ -76,12 +77,44 @@ int abort_if(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     return 0;
 }
 
+// A header line, kept only when an operator could act on it. The transport's own plumbing
+// (date, lengths, encodings, CORS) says nothing about the call; a rate limit's remaining quota,
+// the request id to quote, Retry-After and the provider that answered all do. Name lowercased
+// once, so a header repeated by a proxy is not shown twice.
+void keep_header(StreamSink& s, const std::string& line) {
+    const size_t c = line.find(':');
+    if (c == std::string::npos) return;   // the status line, or the blank that ends a block
+    std::string name;
+    for (size_t i = 0; i < c; ++i) {
+        const char ch = line[i];
+        if (ch == ' ' || ch == '\t') continue;
+        name.push_back(ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch);
+    }
+    static const char* const kPlumbing[] = {
+        "date", "content-type", "content-length", "connection", "keep-alive", "transfer-encoding",
+        "cache-control", "vary", "access-control-allow-origin", "access-control-expose-headers",
+        "strict-transport-security", "x-content-type-options", "alt-svc", "set-cookie", "server-timing"};
+    for (const char* p : kPlumbing)
+        if (name == p) return;
+    std::string val = line.substr(c + 1);
+    while (!val.empty() && (val.back() == '\n' || val.back() == '\r')) val.pop_back();
+    const size_t b = val.find_first_not_of(" \t");
+    val = b == std::string::npos ? std::string() : val.substr(b);
+    if (val.empty() || val.size() > 120) return;
+    for (const auto& [n, v] : s.headers)
+        if (n == name) return;   // one line per name: the first block is the one that answered
+    if (s.headers.size() >= 12) return;
+    s.headers.emplace_back(name, val);
+}
+
 // Every response header line, once: a 429 or a 503 says how long to wait, and a client that
 // guesses its own backoff instead comes back early and is refused again.
 std::size_t stream_header_cb(char* p, std::size_t, std::size_t n, void* ud) {
     auto* s = static_cast<StreamSink*>(ud);
-    const long secs = net::retry_after_seconds(std::string(p, n));
+    const std::string line(p, n);
+    const long secs = net::retry_after_seconds(line);
     if (secs > 0) s->retry_after_s = secs;
+    keep_header(*s, line);
     return n;
 }
 
@@ -264,6 +297,11 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
     const int sends = retry_attempts > 1 ? retry_attempts : 1;
     const auto t0 = std::chrono::steady_clock::now();   // the caller's wait: every send and every pause in it
     std::string last;   // the failure the caller finally gets, in curl's own words
+    // What the send loop did to this call, for the operator who asked to see the wire: the pause
+    // it sat through, and the status that made it sit. A rate limit that cleared is invisible
+    // without these, and looks exactly like a slow endpoint.
+    double waited_ms = 0.0, last_wait_ms = 0.0;
+    long first_status = 0;
 
     for (int attempt = 1; attempt <= sends; ++attempt) {
         StreamSink sink;
@@ -355,6 +393,15 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
             if (on_stats) {   // llama-server and Strata report their own speeds under "timings"
                 CallStats st;
                 st.attempts = attempt;   // more than one: the endpoint was slow enough that this turn re-sent
+                st.status = status;
+                st.first_status = first_status;
+                st.waited_ms = waited_ms;
+                st.last_wait_ms = last_wait_ms;
+                st.retry_after_s = sink.retry_after_s;
+                for (const auto& [k, v] : sink.headers) {
+                    if (!st.headers.empty()) st.headers += " · ";
+                    st.headers += k + ": " + v;
+                }
                 st.latency_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 st.prompt_tokens = static_cast<long>(num_at(resp, "usage", "prompt_tokens"));
                 st.completion_tokens = static_cast<long>(num_at(resp, "usage", "completion_tokens"));
@@ -377,6 +424,9 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
                                          : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);
         if (wait < 0.0) throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms));
+        if (first_status == 0) first_status = status;
+        last_wait_ms = wait;
+        waited_ms += wait;
         if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
     }
 
