@@ -567,22 +567,34 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // ladder's worth: a status said nothing about wanting a wait (200), and if the second
         // send comes back with the same sentence, the request is what it dislikes.
         if (upstream_hiccup && attempt >= 2) throw std::runtime_error(with_sends(last, attempt));
-        const double left = wait_room(t0, retry_budget_ms, sink.retry_after_s, retry_after_cap_ms,
+        // A PROVIDER-level 429 is a routing fact, not an instruction to this client. The number in
+        // Retry-After is the endpoint's window for requests that must come BACK to that endpoint; the
+        // next send may land on another one, so sitting through it is how a first prompt became three
+        // minutes of "⟳ 429 · waiting 180s" against a provider that was simply saturated. Two quick
+        // sends on the ladder, then the server's own sentence and the knob that decides who may route.
+        const bool routed_refusal = status == 429 && last.find("Provider returned error") != std::string::npos;
+        if (routed_refusal && attempt >= 2)
+            throw std::runtime_error(with_sends(last, attempt) +
+                                     " (an endpoint behind the route refused it: that is a routing fact, not a wait -- which "
+                                     "providers may answer is the account's own allowed-provider setting, and a pinned or "
+                                     "throttled one is the usual cause)");
+        const long instruction = routed_refusal ? 0L : sink.retry_after_s;   // a refused route is not a wait
+        const double left = wait_room(t0, retry_budget_ms, instruction, retry_after_cap_ms,
                                      retry_after_total_ms, instructed_spent);
-        const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
-                                         : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);
+        const double wait = status == 429 ? wire_rate_wait_ms(attempt, instruction, left)
+                                         : wire_wait_ms(attempt, instruction, 250.0, 2000.0, left);
         if (wait < 0.0)
-            throw std::runtime_error(budget_spent(last, attempt, sink.retry_after_s, retry_budget_ms,
+            throw std::runtime_error(budget_spent(last, attempt, instruction, retry_budget_ms,
                                                   retry_after_cap_ms, retry_after_total_ms, instructed_spent));
         if (first_status == 0) first_status = status;
         last_wait_ms = wait;
         waited_ms += wait;
-        if (sink.retry_after_s > 0) instructed_spent += wait;
+        if (instruction > 0) instructed_spent += wait;
         // A pause of two minutes must not look like a dead program: say it before going quiet -- with
         // the reason the server gave, because "429" alone leaves the operator guessing whether it is a
         // rate limit, an exhausted key or a pin on a throttled provider -- and say it again when the
         // wait ends. The operator can still stop the turn while it sleeps.
-        if (on_wait) on_wait(status, sink.retry_after_s, wait, last);
+        if (on_wait) on_wait(status, instruction, wait, last);
         if (!wait_backoff(wait, cancel)) throw std::runtime_error("interrupted");
         if (on_wait) on_wait(0, 0, 0.0, std::string());
     }
