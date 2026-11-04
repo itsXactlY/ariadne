@@ -790,6 +790,65 @@ static void test_router_deep(const fs::path& tmp) {
 }
 
 // a recall still running when the next turn starts is not that turn's answer: it is let go and the new turn asks its own
+// The pod is asked BETWEEN turns, about what the session is working on. A recall takes 6-24 s on a
+// pod on another machine, so a question that arrives after the ask finds its answer already being
+// written. The query is a guess, and everything here follows from that: the answer is background
+// unless a real question adopts it, and the pod is never asked two things at once.
+static void test_router_prefetch(const fs::path& tmp) {
+    auto s = make_stack(tmp, "prefetch1");
+    s->pod->echo_query = true;
+    s->pod->recall_ms = 200;
+    s->router->on(turn("QUESTIONONE how do the quadlet generators restart"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(260));
+    const auto first = s->router->late();
+    chk(first && has(first->note, "QUESTIONONE"), "prefetch: turn 1's answer landed, so the pod is free");
+    const int asked = s->pod->recalls.load();
+    s->router->prefetch("QUESTIONIDLE the open ledger: t1 restart the quadlet units");
+    // the ask happens on its own thread: give it the round trip it needs, and no more
+    for (int i = 0; i < 40 && s->pod->recalls.load() == asked; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    chk(s->pod->recalls.load() == asked + 1, "prefetch: the pod is asked between turns");
+    chk(s->router->stats().deep_proactive.load() == 1, "prefetch: counted as asked on a guess");
+    s->router->prefetch("QUESTIONIDLE the open ledger: t1 restart the quadlet units");
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    chk(s->pod->recalls.load() == asked + 1, "prefetch: the same guess is not asked twice");
+    chk(s->router->stats().deep_proactive.load() == 1, "prefetch: and is not counted twice");
+
+    // A question arriving while the guess is still running TAKES IT OVER rather than queueing a
+    // second one behind it: a pod that answers one at a time would otherwise answer this turn last.
+    auto d = s->router->on(turn("QUESTIONTWO restart the kernel cache units"));
+    chk(s->pod->recalls.load() == asked + 1, "prefetch: no second question is put behind the first");
+    chk(s->router->stats().deep_adopted.load() == 1, "prefetch: the question adopted the running guess");
+    chk(has(d.note, "QUESTIONIDLE"), "prefetch: the adopted answer is this turn's note (" + d.summary + ")");
+    chk(!d.deep_late, "prefetch: and it landed in time, because the pod had a head start");
+
+    // A guess that lands with nobody to hand it to is background for the next turn, and says so.
+    auto s2 = make_stack(tmp, "prefetch2");
+    s2->pod->echo_query = true;
+    s2->pod->recall_ms = 120;
+    s2->router->prefetch("QUESTIONIDLE2 the open ledger: t3 finish the plan mirror");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));   // it landed; no turn took it
+    auto d2 = s2->router->on(turn("QUESTIONLATER where is the ledger kept"));
+    chk(d2.carried && has(d2.note, "QUESTIONIDLE2"), "prefetch: the earlier guess rides the next turn");
+    chk(has(d2.note, "Recalled between turns"), "prefetch: and says it was a guess, not an answer");
+    chk(s2->router->stats().deep_adopted.load() == 0, "prefetch: a landed guess is not adopted, it is carried");
+
+    // The switch: an operator who does not want the head start pays nothing for it.
+    auto s3 = make_stack(tmp, "prefetch3");
+    {
+        Policy p;
+        p.proactive = false;
+        p.deep_ms = 60;
+        auto off = make_stack(tmp, "prefetch3off", p);
+        off->pod->echo_query = true;
+        off->router->prefetch("QUESTIONIDLE3 the open ledger");
+        chk(off->pod->recalls.load() == 0, "prefetch: knowledge.proactive false means no call at all");
+        chk(off->router->stats().deep_proactive.load() == 0, "prefetch: and nothing counted");
+    }
+    s3->pod->echo_query = true;
+    s3->router->prefetch("");
+    chk(s3->pod->recalls.load() == 0, "prefetch: an empty guess asks nothing");
+}
+
 static void test_router_deep_turns(const fs::path& tmp) {
     // A recall is the answer to the QUESTION that asked it, not a property of the turn that was open
     // when it was submitted. A pod on another machine -- a tunnel to a second box -- answers after
@@ -1245,6 +1304,7 @@ int main() {
     test_router_open_head(tmp);
     test_router_budget(tmp);
     test_router_deep(tmp);
+    test_router_prefetch(tmp);
     test_router_deep_turns(tmp);
     test_demand_guard(tmp);
     test_router_midturn(tmp);

@@ -869,7 +869,20 @@ void TapeEngine::after_tools() {
 void TapeEngine::end_turn(const std::string& final_response, bool interrupted) {
     if (!turn_open_) return;   // never begun, or already ended: nothing to close twice
     turn_open_ = false;
-    if (router_) router_->end_turn();
+    if (router_) {
+        router_->end_turn();
+        // ... and the answer for the NEXT question, asked while nothing is waiting on it. The open
+        // ledger is the most concrete statement of what this session is working on, and the question
+        // just answered is the best guess at the one coming; a pod two machines away needs the head
+        // start, because its six to twenty seconds otherwise land on the operator's clock. An
+        // interrupted turn is work abandoned, so nothing is asked on its behalf.
+        if (!interrupted) {
+            std::string q = question_;
+            const std::string working = plan_open_text(plan_, 300);
+            if (!working.empty()) q += (q.empty() ? "" : "\n") + std::string("working on: ") + working;
+            router_->prefetch(q);
+        }
+    }
     if (!interrupted && !final_response.empty() && soaker_)
         soaker_->turn(session_->id(), question_, final_response, session_->generation());
     // the final answer's thinking is never sent again this turn: soak it now

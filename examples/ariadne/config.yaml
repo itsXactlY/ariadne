@@ -26,6 +26,11 @@ model:
 agent:
   max_turns: 50            # LLM calls per turn; keep it low on a slow local model
   system_prompt: ""        # the operator's own voice; the composer adds role, workflow, retrieval
+  retry:                   # what one call does when the wire says "not now"
+    attempts: 9            # sends per call; 1 turns the retry off entirely
+    budget_ms: 150000      # wall clock one call spends on sends and on pauses it CHOSE
+    retry_after_cap_ms: 300000  # a wait the SERVER named (Retry-After) is obeyed past the budget, up to this
+                           # ceiling; 0 = no ceiling. Past it the error names the seconds and this knob.
   reasoning_effort: none   # off | low | medium | high | xhigh | max | ultra (only what the template has)
   # thinking: reasoning_effort is the switch; the model's own chat template is the size.
   #   empty/absent  -> no thinking field, no cap: the template's default answers
@@ -62,6 +67,8 @@ compression:
 
 memory:
   turn_recall: true        # look something up for the question; false switches every offer below off
+  recall_timeout_ms: 120000 # how long ONE pod recall may take before its request is given up. The turn never waits
+                           # that long (knowledge.deep_ms is the turn's patience); this is the pod's own room.
   soak:
     window_turns: 18       # an epoch's head window: 2x this many messages before the question
 
@@ -75,8 +82,13 @@ skills:
 
 # What the harness looks up for the model, and when (docs/KNOWLEDGE.md).
 knowledge:
-  deep_ms: 1500            # a turn start waits this long for the pod's recall; a late answer rides the next tool result
-  deep_recall_ms: 30000    # ... and this long when the question is about the past ("what did we decide ...")
+  deep_ms: 8000            # a turn start waits UP TO this long for the pod's recall: a local pod answers at once, a pod
+                           # on another machine gets longer than one turn. Patience, not a deadline -- a late answer is
+                           # carried into the next turn, never dropped. After the first answer, the wait is measured.
+  deep_recall_ms: 60000    # ... and this long when the question is about the past ("what did we decide ...")
+  proactive: true          # ask the pod BETWEEN turns, about the open ledger and the question just answered, so the next
+                           # question finds its answer already being written. A question that arrives while it runs takes
+                           # that answer over; a guess nobody took rides the next turn as background.
   budget:
     turn_tokens: 600       # the note on a question
     hint_tokens: 250       # a note after a tool batch

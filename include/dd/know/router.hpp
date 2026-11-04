@@ -62,6 +62,14 @@ public:
     std::optional<Delivery> late();                 // a deep answer that missed its deadline and has landed since
     void set_ratio(Deliverer::Ratio r) { deliver_ = Deliverer(std::move(r)); }
     void end_turn();                                // the turn is over: learning closes its exposures
+    // Ask the pod BETWEEN turns, about what this session is actually working on. A recall costs
+    // 6-24 s on a pod on another machine; asked after the question arrives, every one of those
+    // seconds is on the operator's clock, and asked before it exists the answer is waiting. The
+    // query is a guess (the open ledger plus the last question asked), so the answer is delivered
+    // as background -- never as a claim to answer something nobody asked yet. One question at a
+    // time: a prefetch still in flight when the next question lands is ADOPTED as that turn's
+    // probe rather than replaced, so a slow pod is never asked two things at once.
+    void prefetch(const std::string& query);
     void note_tripwire(const std::string& rule);   // a rule held a call
     void set_sink(std::shared_ptr<EventSink> s) { sink_ = s ? std::move(s) : std::make_shared<NullSink>(); }   // before the first signal
     // Demand, from the same overlay the catalogues read for priors. It never moves version(), so asking it is
@@ -89,6 +97,7 @@ public:
         // Calls submitted, and what came back: an answer that landed after its turn (carried to the
         // next one), one that found nothing (spent, said nothing), one the carry would not hold.
         std::atomic<uint64_t> deep_carried{0}, deep_empty{0}, deep_dropped{0};
+        std::atomic<uint64_t> deep_proactive{0}, deep_adopted{0};   // asked between turns, and the ones a question took over
         std::atomic<uint64_t> refused{0};   // candidate slots the demand guard declined, over the process
         std::atomic<uint64_t> opened_lost{0};   // opens the ring refused: counted, named, never a silent drop
     };
@@ -101,6 +110,7 @@ private:
         std::atomic<uint32_t> done{0};   // 1 when `result` is in; the waiter parks on it
         context::Prefetch result;
         std::string query;        // what it asked, so a carried answer can say which question it was
+        bool proactive = false;   // asked between turns, on a guess about what comes next
         int turn = 0;
         bool delivered = false;   // the agent thread's
     };
@@ -125,6 +135,7 @@ private:
     core::SlotRing<64, Opened> opened_q_;
     std::shared_ptr<DeepJob> inflight_;   // the newest: the one this turn may wait on
     int deep_last_ms_ = 0;   // what THIS pod has been taking lately (smoothed): the deadline's own measurement
+    std::string last_prefetch_;   // the last guess: asking the same thing twice buys nothing
     // Earlier turns' recalls that no one has delivered yet. The pod can be on another machine --
     // the operator's is behind a tunnel on a second box, where 6-20 s is ordinary -- so most
     // answers arrive after their turn. Dropping them is what made a slow maze mute: the answer
@@ -148,6 +159,7 @@ private:
     IdfFn idf_fn() const;
     void run(const Intent& in, Delivery& d, std::vector<std::string>& notes);
     void submit_deep(const std::string& query);
+    void launch(const std::shared_ptr<DeepJob>& job);   // the thread that asks: shared by the turn's leg and the prefetch
     std::optional<Delivery> take_carry();   // a carried answer, when one is ready and there is budget
     int patience_ms() const;                // how long a waiting turn gives the pod, from its own recent answers
     void note_latency(long ms);             // the pod's measurement, folded in

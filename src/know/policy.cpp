@@ -14,6 +14,7 @@ Policy Policy::from(const core::Config& cfg) {
     };
     num("knowledge.deep_ms", p.deep_ms);
     num("knowledge.deep_recall_ms", p.deep_recall_ms);
+    flag("knowledge.proactive", p.proactive);
     num("knowledge.budget.turn_tokens", p.turn_tokens);
     num("knowledge.budget.hint_tokens", p.hint_tokens);
     num("knowledge.budget.max_turn_tokens", p.max_turn_tokens);

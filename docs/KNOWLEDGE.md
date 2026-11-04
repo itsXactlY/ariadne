@@ -363,7 +363,8 @@ classDiagram
 | Signal | Fires when | What | How | Where / budget | Guard |
 |---|---|---|---|---|---|
 | Session start | process start / `/new` | pins (`user:`+`feedback:`, flagged `invariant:`: <= 800 tokens), catalogue map (<= 250) | one `get` batch, 3 s deadline, cached copy in `<home>/cache` if the pod is down | system prefix (stable, KV-cached) | built once per launch |
-| Turn start | every non-trivial turn | skills + curated memory + tools | local lexical sync (< 5 ms); deep pod recall async, deadline = `knowledge.deep_ms` or what this pod has shown it needs (+25%); a late answer rides a later round or the next turn, marked as its question's answer | question note <= 600 tokens | skip `trivial_prompt`; ladder by confidence |
+| Turn start | every non-trivial turn | skills + curated memory + tools | local lexical sync (< 5 ms); deep pod recall async, deadline = `knowledge.deep_ms` or what this pod has shown it needs (+25%); a late answer rides a later round or the next turn, marked as its question's answer. A prefetch still running from the last turn is adopted, never duplicated | question note <= 600 tokens | skip `trivial_prompt`; ladder by confidence |
+| Turn end (**prefetch**) | after a turn that was not interrupted | big chance: `knowledge.proactive` | the pod is asked about the open ledger + the question just answered, so its 6-24 s is spent before the next question exists; the answer is background unless a real question adopts it | charged to the turn that receives it | skipped when the pod is down, already answering, or already asked the same thing |
 | After a tool batch (**shift**) | >= 2 new content terms (tool args, `intent`, path project/extension, binaries) not covered by this epoch's offers | skills, `invariant:` / `rule:` cards | local only | after-tools note <= 250 | not within 2 rounds of the last note; cards once per epoch |
 | Failure | exit != 0 / error head, and (second failure of that tool family this turn, or the error signature matches a card) | `bug:` `invariant:` `ops:` cards, debugging skills | local, plus deep async | after-tools <= 300 | one per signature |
 | Stall | identical call x2, or 3 blind explorations (`list_dir`/`read_file` misses, `ls`/`find`/`grep` with nothing new) | redirect notice + retrieval on the *question* | local + deep | after-tools <= 350 | once per turn |
@@ -605,6 +606,13 @@ to the missing half; its cost is the pod's 6-17 s, so it stays asynchronous.
   and never past `knowledge.deep_recall_ms`. `memory.recall_timeout_ms` is the pod's own room for one request.
 - A carried answer costs its turn's token budget like any other note: what cannot be afforded waits in the carry (three is the
   most it holds) rather than being spent or thrown away.
+- **Prefetch (`knowledge.proactive`, default on).** The turn is not the unit of a recall either. At `end_turn` the router asks the
+  pod about the open ledger and the question just answered — the best available guess at what is coming — so the six to twenty
+  seconds a pod two machines away needs are spent while nothing waits on them. A question that arrives while that is still
+  running **adopts** it (`Router::submit_deep` sets its turn to the current one) instead of queueing a second question behind it
+  on a pod that answers one at a time; a guess that lands with nobody to hand it to rides the next turn's note, prefixed
+  "[Recalled between turns …]". Asking the same guess twice is refused (`last_prefetch_`), and so is asking while the pod is
+  still answering something — a prefetch is an optimisation and never queues behind itself.
 - Rules are one regex on the arguments of a call, checked before it runs (no stream abort); `scope: tool:<name>` narrows it.
 - The contract of 5.3 as built: `open(const Uri&)` (the page rides in the Uri), `refresh()` is blocking and the owner
   (`Refresher`) picks the thread, and `cancel(bool)` was added so `Refresher::stop()` can ask a sync in progress to stop.

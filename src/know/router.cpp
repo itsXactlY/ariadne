@@ -182,6 +182,15 @@ void Router::submit_deep(const std::string& query) {
     // One question at a time within a turn: this turn's recall that nobody has taken yet (running,
     // or landed) is not replaced by a new one.
     if (inflight_ && inflight_->turn == ws_.turn() && !inflight_->delivered) return;
+    if (inflight_ && inflight_->proactive && !inflight_->delivered && !inflight_->done.load(std::memory_order_acquire)) {
+        // It was asked between turns about the work in flight, and the question that just arrived is
+        // more of the same work. Adopting it is the whole point of asking early: the pod is already
+        // seconds into this answer. Replacing it would start the clock again and leave a second
+        // question queued behind the first on a pod that answers one at a time.
+        inflight_->turn = ws_.turn();
+        ++stats_.deep_adopted;
+        return;
+    }
     if (inflight_ && !inflight_->delivered) {
         // An older turn's recall is not this turn's answer -- but it IS the answer to the question
         // that asked it, and a pod on another machine takes longer than a turn lasts. It moves to
@@ -198,12 +207,39 @@ void Router::submit_deep(const std::string& query) {
     job->turn = ws_.turn();
     job->query = query;
     inflight_ = job;
+    launch(job);
+}
+
+// The thread that asks, whichever leg asked: one place that owns how a recall is sized and how its
+// result is handed to the waiter (the atomic the parked turn sleeps on).
+void Router::launch(const std::shared_ptr<DeepJob>& job) {
     const size_t chars = std::clamp<size_t>((policy_.max_turn_tokens > ws_.turn_tokens() ? policy_.max_turn_tokens - ws_.turn_tokens() : 0) * 4, 1200, 6000);
-    std::thread([job, rec = recaller_, query, win = last_in_window_, earlier = last_earlier_, chars] {
+    std::thread([job, rec = recaller_, query = job->query, win = last_in_window_, earlier = last_earlier_, chars] {
         job->result = rec.run(query, win, earlier, chars);
         job->done.store(1, std::memory_order_release);
         core::unpark(job->done);
     }).detach();
+}
+
+// Between turns, with nothing waiting: the one question worth asking is what this session is working
+// on, and the ledger is the best statement of it the harness has. If the pod is busy, or already was
+// asked this, say nothing -- a prefetch is an optimisation and must never queue behind itself.
+void Router::prefetch(const std::string& query) {
+    if (!policy_.proactive || query.empty()) return;
+    if (!pod_ || !pod_->configured()) return;
+    if (inflight_ && !inflight_->delivered) return;   // it is already answering something
+    if (query == last_prefetch_) return;              // the same guess again buys nothing
+    if (!pod_->up()) {
+        if (!pod_->probe() || !pod_->up()) return;
+    }
+    last_prefetch_ = query;
+    auto job = std::make_shared<DeepJob>();
+    job->turn = ws_.turn();
+    job->query = query;
+    job->proactive = true;
+    inflight_ = job;
+    ++stats_.deep_proactive;
+    launch(job);
 }
 
 void Router::run(const Intent& in, Delivery& d, std::vector<std::string>& notes) {
@@ -386,7 +422,7 @@ Delivery Router::on(const Signal& s) {
                 }
                 note_latency(d.deep.ms);
                 ++stats_.deep_in;
-                deep_state = "in";
+                deep_state = inflight_->proactive ? "prefetched" : "in";
             } else if (mine && !inflight_->delivered) {
                 d.deep_late = true;
                 deep_state = "late";
@@ -464,8 +500,11 @@ std::optional<Delivery> Router::take_carry() {
         if (out || left < 100) { ++it; continue; }   // one per placement, and only with room for it
         Delivery d;
         d.deep = job->result;
-        d.note = "[Answered late: the recall for an earlier question in this session, which the pod could not answer \n"
-                 "in time. It is background about this work, not an answer to what was just asked.]\n" +
+        d.note = (job->proactive ? "[Recalled between turns, about the work this session has in flight -- background, "
+                                   "not an answer to the question just asked.]\n"
+                                 : "[Answered late: the recall for an earlier question in this session, which the pod "
+                                   "could not answer in time. It is background about this work, not an answer to what "
+                                   "was just asked.]\n") +
                  d.deep.block;
         d.carried = true;
         note_latency(d.deep.ms);
