@@ -269,7 +269,7 @@ moves code cannot leave a doc pointing somewhere else.
 | anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
 | findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:422`, `src/context/engine.cpp:483`, `src/context/engine.cpp:827`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
-`make doc-audit`: clean — 186 citations, 0 unresolved or drifting, 0 wiring claims.
+`make doc-audit`: clean — 187 citations, 0 unresolved or drifting, 0 wiring claims.
 
 ## W10 — no locks, no queues: every hand-off becomes atomic ownership
 

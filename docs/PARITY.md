@@ -12,13 +12,13 @@ out of a README.
 | Context tape | Append-only render, epoch per generation, rebase from retrieval at watermarks, prewarm between turns | `42ea640` is an ancestor of HEAD; `src/context/engine.cpp:241,273,279,492,859` |
 | Retrieval | One `Router` at turn start, after tool batches, on failure; local BM25f catalogues + async pod leg | `src/know/trigger.cpp`, `src/know/router.cpp` |
 | Skills as guidelines | Bodies read on demand: `read_file("skill://name")`, `#2`, `#all`; offer thresholds in config, not code | `src/know/prompt.cpp:30-34`, `examples/ariadne/config.yaml:71-79`, `src/know/policy.cpp:24-28` |
-| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:1089-1099` |
+| Rules | Tripwires that cost nothing until a pattern fires, loaded from `./rules/*.md` and `rule:` rows, `knowledge.rules` on/off | `src/dd_tui.cpp:1401-1407` |
 | Learning | `dd::learn` service: episodes, credit, priors, drafted skills, lifecycle | `docs/LEARN.md`, `src/learn/*` |
-| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:1063-1080` |
+| One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:1376-1385` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, per-call token accounting and epoch/plan on the status row, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap | `Verbosity` in `include/dd/ui.hpp`, `src/ui.cpp`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:1378-1379`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; the ledger rides `ephemeral_system_prompt`, which the tape engine takes into a rebase's turn 0 (never the request's tail), draws as a sidebar panel, `/plan` reads it back | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1485`, `src/ui.cpp:2394-2427`, `src/dd_tui.cpp:1827` |
-| Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1384-1480`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1309-1341`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:1201-1218`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
+| Plan ledger | `todo` registered in both binaries; the ledger is handed over as the agent's ephemeral prompt and the tape engine commits it as numbered revisions on the tape — an anchor carrying the list, deltas after it, the list restated whenever no anchor survives a rebase, never in the request's tail — and an emptied ledger retires itself | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1485`, `src/ui.cpp:2394-2427`, `src/dd_tui.cpp:1831`, `src/context/engine.cpp:607` |
+| Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1419-1515`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1344-1375`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:1201-1218`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2495-2500`, asserted in `tests/ui_test.cpp:1160-1230` |
 
 ## What is missing — measured, not assumed
@@ -97,8 +97,8 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
-typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1609`) and `Agent::steer_hook`
-(`src/dd_tui.cpp:1669`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1613`) and `Agent::steer_hook`
+(`src/dd_tui.cpp:1673`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 prompt typed earlier enters earlier however the slots wrapped. Overflow is held in a list the key handler
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:419`) — after the tool results are
@@ -109,7 +109,7 @@ fold is a fact of the tape rather than a widget's guess: the prompt card carries
 sidebar's history row counts it too, but the tape panel is a vertical budget — cards can eat the
 rows that open it — so it is asserted offscreen (`tests/ui_test.cpp`) at 120x30 verbose and
 120x46 normal, and the row degrades to the message count rather than clipping the fold to
-"1 s…". `begin_turn` resets the count (`:370`) so the number belongs to the turn, never to the
+"1 s…". `begin_turn` resets the count (`:387`) so the number belongs to the turn, never to the
 session. A prompt
 typed after the last round is left to the idle loop rather than folded mid-turn — a fold there
 would silently swap the answer the operator asked for (`tests/agent_loop_test.cpp`) — and
@@ -312,7 +312,7 @@ error instead of slept away — and the same gate run against a
 Then the later waves, each with its number: redaction of untrusted server text at the point it enters the prompt, the MCP
 schema cache at boot, the duplicated inline logic folded into the ported
 modules, and the doc audit that re-measures this file's citations instead of
-trusting them (`make doc-audit`: 186 citations, 0 unresolved or drifting). Calibration closed
+trusting them (`make doc-audit`: 187 citations, 0 unresolved or drifting). Calibration closed
 on `main` — the thresholds are now measured numbers, not guesses (see
 above). The tool output budget and mid-turn steering shipped here — the first
 because it is what makes verbose honest about a result, the second because a
@@ -325,6 +325,6 @@ Next, in priority order, not promised: sub-agents.
 
 `make test` runs every binary in `$(TEST_BINS)` serially with
 `DD_TEST_TMP=$(BUILD)/tmp` (`mk/README.md`). The Scene renders offscreen, so
-visual checks are assertions on `Scene::row_text(y)` (`tests/ui_test.cpp:170-173`)
+visual checks are assertions on `Scene::row_text(y)` (`tests/ui_test.cpp:332-334`)
 — a card's rows are read back as plain text, which is the same frame a tty
 would blit.
