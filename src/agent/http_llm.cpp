@@ -93,7 +93,9 @@ void keep_header(StreamSink& s, const std::string& line) {
     static const char* const kPlumbing[] = {
         "date", "content-type", "content-length", "connection", "keep-alive", "transfer-encoding",
         "cache-control", "vary", "access-control-allow-origin", "access-control-expose-headers",
-        "strict-transport-security", "x-content-type-options", "alt-svc", "set-cookie", "server-timing"};
+        "strict-transport-security", "x-content-type-options", "alt-svc", "set-cookie", "server-timing",
+        "referrer-policy", "permissions-policy", "cross-origin-opener-policy",
+        "cross-origin-resource-policy", "content-encoding", "etag"};
     for (const char* p : kPlumbing)
         if (name == p) return;
     std::string val = line.substr(c + 1);
@@ -361,7 +363,18 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         const bool cancelled = (rc == CURLE_ABORTED_BY_CALLBACK && !sink.stalled)
                             || (rc == CURLE_WRITE_ERROR && flag && !sink.completed);
 
-        const WireFailure f = wire_failure(wire_result(rc, status, sink, cancelled));
+        WireFailure f = wire_failure(wire_result(rc, status, sink, cancelled));
+        // A 200 whose body is neither a stream nor an answer still carries the failure: an
+        // upstream provider that died before its first token comes back that way. Read as an
+        // answer, the turn ends with an empty assistant message and the loop moves on as if the
+        // model had said nothing -- a dead turn with no cause on screen.
+        const bool bodiless = f == WireFailure::None && !sink.cs.saw_data() && !sink.cs.done() &&
+                              sink.raw.find("\"error\"") != std::string::npos;
+        if (bodiless) f = WireFailure::Transient;   // nothing was spoken: a second send can differ
+        // The provider's own failure before its first token, told apart from a socket fact by the
+        // response line: a provider always answered something (2xx), a cut socket never did.
+        const bool upstream_hiccup = bodiless || (f == WireFailure::Transient && status >= 200 &&
+                                                  status < 400 && !sink.spoke);
         if (f == WireFailure::None) {
             sink.cs.finish();
             Json resp;
@@ -420,6 +433,10 @@ core::Message HttpLLM::chat(const std::vector<core::Message>& messages, const Js
         // out and the budget has time for the wait. A cut call, a verdict on the request, a
         // capped body, a stalled server and the last send all end here.
         if (!transient(f) || attempt == sends) throw std::runtime_error(with_sends(last, attempt));
+        // The provider's own failure before its first token is worth one more send, not a
+        // ladder's worth: a status said nothing about wanting a wait (200), and if the second
+        // send comes back with the same sentence, the request is what it dislikes.
+        if (upstream_hiccup && attempt >= 2) throw std::runtime_error(with_sends(last, attempt));
         const double left = budget_left_ms(t0, retry_budget_ms);
         const double wait = status == 429 ? wire_rate_wait_ms(attempt, sink.retry_after_s, left)
                                          : wire_wait_ms(attempt, sink.retry_after_s, 250.0, 2000.0, left);

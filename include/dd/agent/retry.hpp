@@ -17,17 +17,21 @@ double jittered_backoff(int attempt, double base_delay = 5.0, double max_delay =
 // One send of a request is an experiment, and its outcome is either a fact about the
 // server or a state the server is in. A state that says "come back" can differ on a second
 // send; a verdict on the request cannot. So a refused connect, a cut socket, a 5xx that
-// handed nothing out, and a rate limit are worth one more send — everything else the
-// server answered (a 400, a 401, a 501, a body past the byte cap, an error chunk inside the
-// stream, a call the operator cut) is the answer this request gets every time it is sent;
-// re-sending it spends a turn to get the same words back, and on a stream it spends them
-// twice. A 429 is the case worth naming: the request was never refused, it was not served
-// *yet*, and the server says when to ask again (see `retry_after_s`).
+// handed nothing out, a rate limit, and a provider that failed *before the first token* are
+// worth one more send — everything else the server answered (a 400, a 401, a 501, a body past
+// the byte cap, an error chunk after a delta has already reached the caller, a call the
+// operator cut) is the answer this request gets every time it is sent; re-sending it spends a
+// turn to get the same words back, and on a stream it spends them twice. A 429 is the case
+// worth naming: the request was never refused, it was not served *yet*, and the server says
+// when to ask again (see `retry_after_s`). The other is an upstream provider's own failure,
+// which OpenRouter delivers as an error chunk inside an otherwise 200 stream ("Upstream error
+// from <provider>: The response stream was interrupted ... Please retry the request.") — the
+// server asks for the retry in words, and a turn used to die on it.
 enum class WireFailure {
     None,       // an acceptable answer arrived
     Answer,     // the server answered, but not with what was asked for: re-sending changes nothing
     Cancelled,  // curl stopped because the operator said stop; nobody asked for the call again
-    Transient,  // nothing reached the caller and a second send may differ: cut socket, 5xx, 429
+    Transient,  // nothing reached the caller and a second send may differ: cut socket, 5xx, 429, a provider's pre-token failure
 };
 
 // The server states that mean "ask again", never "this request is wrong": 408 (it gave up

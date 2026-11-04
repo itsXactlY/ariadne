@@ -187,8 +187,13 @@ int main() {
         "a socket cut after the stream spoke is an answer");
     chk(dd::agent::wire_failure(WireResult{CURLE_OK, 400, false, false, false, false, false}) == WireFailure::Answer,
         "a 400 is an answer, not a hiccup");
-    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 200, false, false, false, false, true}) == WireFailure::Answer,
-        "an error chunk inside the stream is an answer");
+    // An error chunk under a 200 is the provider failing: before the first token it is a state
+    // ("please retry the request", in the upstream's own words), after one it is an answer --
+    // a second send there would hand the caller the same words twice.
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 200, false, false, false, false, true}) == WireFailure::Transient,
+        "an error chunk before the first token is a provider hiccup");
+    chk(dd::agent::wire_failure(WireResult{CURLE_OK, 200, false, false, true, false, true}) == WireFailure::Answer,
+        "an error chunk after the stream spoke is an answer");
     chk(dd::agent::wire_failure(WireResult{CURLE_OK, 200, false, false, false, false, false}) == WireFailure::None,
         "a streamed answer is an answer");
     chk(dd::agent::wire_failure(WireResult{CURLE_ABORTED_BY_CALLBACK, 0, false, true, false, false, false}) == WireFailure::Cancelled,
@@ -335,6 +340,46 @@ int main() {
         chk(streamed == "half", "the delta the caller got is the delta the caller keeps");
         chk(ep.served.load() == 1, "a stream that spoke is never re-sent");
         chk(threw, "a cut stream is reported, not silently answered twice");
+    }
+
+    // ── The provider fails before the first token: nothing was spoken, so a re-send is free ──
+    // OpenRouter hands an upstream provider's failure over as an SSE error chunk inside a 200
+    // stream — "Upstream error from Sail Research: The response stream was interrupted and could
+    // not be recovered. Please retry the request." The server asks for the retry in words, and a
+    // 200 was filed as an answer: the turn died with nothing handed out.
+    {
+        const std::string upstream =
+            "data: {\"error\":{\"message\":\"Upstream error from Sail Research: The response stream "
+            "was interrupted and could not be recovered. Please retry the request.\"}}\n\n";
+        FakeEndpoint ep({http(200, upstream, "text/event-stream"), http(200, kSse, "text/event-stream")}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        CallStats seen;
+        llm.on_stats = [&](const CallStats& st) { seen = st; };
+        std::string answer;
+        bool threw = false;
+        try { answer = llm.chat({user("hi")}, json_arr()).content; } catch (const std::exception&) { threw = true; }
+        ep.halt();
+        chk(!threw && answer == "2 + 2 = 4", "a provider that failed before the first token is asked again");
+        chk(ep.served.load() == 2, "and that costs exactly one more connection");
+        chk(seen.status == 200 && seen.first_status == 200, "both sends were 200s: the body was the failure");
+    }
+
+    // ── The same failure as a plain JSON body under 200: a failure, never an empty answer ──
+    // A 200 whose body is not a stream and not an answer carries the error the operator needs;
+    // read as "the call succeeded with no words", the turn ends with an empty assistant message
+    // and the loop moves on as if the model had said nothing.
+    {
+        const std::string body =
+            "{\"error\":{\"message\":\"Upstream error from Sail Research: no first token\"}}";
+        FakeEndpoint ep({http(200, body), http(200, body)}, 0);
+        ep.start();
+        HttpLLM llm = endpoint_llm(ep);
+        std::string what;
+        try { llm.chat({user("hi")}, json_arr()); } catch (const std::exception& e) { what = e.what(); }
+        ep.halt();
+        chk(ep.served.load() == 2, "a bodiless 200 is asked again once");
+        chk(what.find("Sail Research") != std::string::npos, "then the upstream's own words come back");
     }
 
     // ── A call the operator cut: zero retries ──

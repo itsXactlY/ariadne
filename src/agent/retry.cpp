@@ -55,8 +55,15 @@ WireFailure wire_failure(const WireResult& r) {
     if (r.code == 0) {   // curl reached the server and got a response line
         // A state that says "come back" is not a verdict: if nothing was handed out yet, the
         // second send can get a different reply. A 400/401/501 is an answer about the
-        // request, so it comes back identically; so does an error chunk inside a stream.
+        // request, so it comes back identically.
         if (retryable_status(r.status) && !r.spoken) return WireFailure::Transient;
+        // An error chunk inside an otherwise-ok stream, with nothing handed to the caller yet,
+        // is the *provider* failing before the first token -- OpenRouter delivers it that way,
+        // in its own words ("Upstream error from <provider>: The response stream was interrupted
+        // and could not be recovered. Please retry the request."). The request was accepted and
+        // nothing was spoken, so a second send costs one pause and can differ. Once a delta has
+        // reached the caller it stays an answer: re-sending would hand the same words out twice.
+        if (r.stream_error && !r.spoken) return WireFailure::Transient;
         return r.status >= 400 || r.stream_error ? WireFailure::Answer : WireFailure::None;
     }
 
