@@ -179,11 +179,24 @@ std::vector<std::string> Router::map() const {
 
 void Router::submit_deep(const std::string& query) {
     if (!pod_ || query.empty()) return;
-    // one at a time within a turn, and this turn's recall that nobody has taken yet (running, or landed) is not replaced by a new
-    // question; an older turn's recall is not this turn's answer: it is let go (its thread ends, its result is dropped) and a fresh one is asked
+    // One question at a time within a turn: this turn's recall that nobody has taken yet (running,
+    // or landed) is not replaced by a new one.
     if (inflight_ && inflight_->turn == ws_.turn() && !inflight_->delivered) return;
+    if (inflight_ && !inflight_->delivered) {
+        // An older turn's recall is not this turn's answer -- but it IS the answer to the question
+        // that asked it, and a pod on another machine takes longer than a turn lasts. It moves to
+        // the carry instead of being dropped, so a slow maze still speaks; whichever turn it lands
+        // in says which question it belongs to. The cap is the queue's: three is more than a
+        // working pod ever has outstanding, so reaching it means the pod is not answering at all.
+        carry_.push_back(inflight_);
+        if (carry_.size() > 3) {
+            carry_.erase(carry_.begin());
+            ++stats_.deep_dropped;
+        }
+    }
     auto job = std::make_shared<DeepJob>();
     job->turn = ws_.turn();
+    job->query = query;
     inflight_ = job;
     const size_t chars = std::clamp<size_t>((policy_.max_turn_tokens > ws_.turn_tokens() ? policy_.max_turn_tokens - ws_.turn_tokens() : 0) * 4, 1200, 6000);
     std::thread([job, rec = recaller_, query, win = last_in_window_, earlier = last_earlier_, chars] {
@@ -303,6 +316,8 @@ Delivery Router::on(const Signal& s) {
     if (std::get_if<SessionStarted>(&s)) {   // a new session, or a resumed one: nothing was said in it yet
         ws_ = WorkingSet();
         inflight_.reset();
+        carry_.clear();   // another session's questions are not this one's background
+        deep_last_ms_ = 0;   // and its deadline is not this one's
         publish_reattach();
         return d;
     }
@@ -351,6 +366,7 @@ Delivery Router::on(const Signal& s) {
         if (!pod_->up() && std::get_if<TurnStarted>(&s)) pod_->probe();
         if (pod_->up()) {
             submit_deep(deep_query);
+            if (wait_ms > 0) wait_ms = std::max(wait_ms, patience_ms());   // patience is what this pod has shown it needs
             const bool mine = inflight_ && inflight_->turn == ws_.turn();   // never a recall an earlier turn asked
             if (mine && wait_ms > 0) {
                 const auto end = Clock::now() + std::chrono::milliseconds(wait_ms);
@@ -368,6 +384,7 @@ Delivery Router::on(const Signal& s) {
                     ws_.spend(deliver_.tokens(d.deep.block));
                     notes.push_back(d.deep.block);
                 }
+                note_latency(d.deep.ms);
                 ++stats_.deep_in;
                 deep_state = "in";
             } else if (mine && !inflight_->delivered) {
@@ -375,6 +392,15 @@ Delivery Router::on(const Signal& s) {
                 deep_state = "late";
             }
         }
+    }
+
+    // An earlier question's answer, when the pod has one ready. The deadline decides which turn
+    // WAITS for a recall; it never decides whether the answer is spoken at all.
+    if (auto carried = take_carry()) {
+        notes.insert(notes.begin(), carried->note);
+        if (d.deep.block.empty()) d.deep = carried->deep;   // the card shows what actually arrived
+        d.carried = true;
+        deep_state = "carried";
     }
 
     d.note = join(notes, "\n\n");
@@ -392,6 +418,7 @@ Delivery Router::on(const Signal& s) {
         if (d.deep.earlier) bits.push_back(std::to_string(d.deep.earlier) + " earlier");
         if (!d.deep.intent.empty()) bits.push_back(d.deep.intent);
     }
+    if (d.carried) bits.push_back("carried from an earlier question");
     if (d.deep_late) bits.push_back("deep recall pending");
     char buf[16];
     std::snprintf(buf, sizeof buf, "%.1fs", d.ms / 1000.0);
@@ -403,16 +430,82 @@ Delivery Router::on(const Signal& s) {
     return d;
 }
 
+// The other half of the deadline: an answer nobody could wait for. It is delivered when it is
+// ready, in the turn that is open then, and it says which question it answers -- a recall is
+// the answer to a question, not to the turn that happened to be waiting.
+// The deadline is the pod's, not a constant. A recall that came back in six seconds is not asked to
+// come back in one: the wait stretches to what this pod has shown it needs, with a quarter of margin.
+// A pod on a tunnel to another machine is slower AT ARRIVAL than one on the same host, and the one
+// number that knows how much slower is the last answer's own clock. Never below the configured
+// patience (which is a floor, not a target), never above the past-question budget.
+int Router::patience_ms() const {
+    if (deep_last_ms_ <= 0) return 0;
+    const long need = static_cast<long>(deep_last_ms_) + static_cast<long>(deep_last_ms_) / 4;
+    return static_cast<int>(std::clamp<long>(need, 0, policy_.deep_recall_ms));
+}
+
+void Router::note_latency(long ms) {
+    if (ms <= 0) return;
+    // smoothed: one outlier must not set the deadline for the rest of the session
+    deep_last_ms_ = deep_last_ms_ > 0 ? (3 * deep_last_ms_ + static_cast<int>(ms)) / 4 : static_cast<int>(ms);
+}
+
+std::optional<Delivery> Router::take_carry() {
+    std::optional<Delivery> out;
+    const size_t left = policy_.max_turn_tokens > ws_.turn_tokens() ? policy_.max_turn_tokens - ws_.turn_tokens() : 0;
+    for (auto it = carry_.begin(); it != carry_.end();) {
+        const auto& job = *it;
+        if (!job->done.load(std::memory_order_acquire)) { ++it; continue; }
+        if (job->result.block.empty()) {   // it answered, and the maze had nothing to say: spent
+            it = carry_.erase(it);
+            ++stats_.deep_empty;
+            continue;
+        }
+        if (out || left < 100) { ++it; continue; }   // one per placement, and only with room for it
+        Delivery d;
+        d.deep = job->result;
+        d.note = "[Answered late: the recall for an earlier question in this session, which the pod could not answer \n"
+                 "in time. It is background about this work, not an answer to what was just asked.]\n" +
+                 d.deep.block;
+        d.carried = true;
+        note_latency(d.deep.ms);
+        ws_.spend(deliver_.tokens(d.note));
+        ++stats_.deep_carried;
+        ++stats_.notes;
+        stats_.tokens += deliver_.tokens(d.note);
+        it = carry_.erase(it);
+        out = std::move(d);
+    }
+    return out;
+}
+
 std::optional<Delivery> Router::late() {
     drain_opened();
-    if (!inflight_ || !inflight_->done.load(std::memory_order_acquire) || inflight_->delivered) return std::nullopt;
+    if (!inflight_ || !inflight_->done.load(std::memory_order_acquire) || inflight_->delivered) return take_carry();
+    if (inflight_->turn != ws_.turn()) {
+        // An earlier turn's answer, still unclaimed: it belongs to the question that asked it, so it
+        // joins the carry instead of being spent on this turn's card as somebody else's number.
+        const auto job = inflight_;
+        inflight_.reset();
+        if (job->result.block.empty()) {
+            ++stats_.deep_empty;
+        } else {
+            carry_.push_back(job);
+            if (carry_.size() > 3) {
+                carry_.erase(carry_.begin());
+                ++stats_.deep_dropped;
+            }
+        }
+        return take_carry();
+    }
     inflight_->delivered = true;
-    if (inflight_->turn != ws_.turn() || inflight_->result.block.empty()) return std::nullopt;   // a past turn's, or nothing
+    if (inflight_->result.block.empty()) return take_carry();   // it answered, and there was nothing there
     const size_t left = policy_.max_turn_tokens > ws_.turn_tokens() ? policy_.max_turn_tokens - ws_.turn_tokens() : 0;
-    if (left < 100) return std::nullopt;
+    if (left < 100) return take_carry();   // no room this turn: it waits in the carry, not on the floor
     Delivery d;
     d.deep = inflight_->result;
     d.note = d.deep.block;
+    note_latency(d.deep.ms);   // the late path measures the pod too
     ws_.spend(deliver_.tokens(d.note));
     ++stats_.deep_late;
     ++stats_.notes;

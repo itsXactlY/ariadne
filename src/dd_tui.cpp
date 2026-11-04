@@ -1375,6 +1375,11 @@ int main(int argc, char** argv) {
     ec.ceiling = num_or("compression.hot_swap_hard_ratio", 0.85);
     ec.protect_last_n = static_cast<int>(num_or("compression.protect_last_n", 6));
     ec.turn_recall = !cfg.has("memory.turn_recall") || cfg.get_bool("memory.turn_recall");
+    // Not the turn's patience (that is knowledge.deep_ms): how long the POD may take to answer. The call
+    // runs on its own thread and its answer is delivered in whichever turn it becomes ready, so this
+    // bounds a wedged pod -- and a pod on a second box needs more room than one on the same machine.
+    maze->recall_timeout_ms = static_cast<long>(num_or("memory.recall_timeout_ms", 120000));
+    ec.recall_timeout_ms = maze->recall_timeout_ms;
     ec.prewarm = !cfg.has("compression.prewarm") || cfg.get_bool("compression.prewarm");
     if (const char* v = std::getenv("DD_FAST_LAYER")) ec.fast_layer_tokens = std::atol(v);   // tests force a rebase
     {   // one voice: the preamble, the operator's text and what a server asked for, then the harness's side of retrieval

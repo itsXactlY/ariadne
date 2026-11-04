@@ -67,8 +67,10 @@ struct Refusal {
 struct Policy {
     Confidence skills;
     Confidence memory{3, 6.5, 0.20, 2.0};   // curated rows are many and long: three terms, and never opened for the model
-    int deep_ms = 1500;                      // a turn start waits this long for the pod's recall
-    int deep_recall_ms = 30000;              // ... and this long when the question is about the past
+    int deep_ms = 8000;     // a turn start waits UP TO this long for the pod's recall: a local pod returns at once,
+                            // a pod on another machine gets longer than one turn. Patience, not a deadline -- an
+                            // answer that misses it is carried into the next turn, never dropped.
+    int deep_recall_ms = 60000;              // ... and this long when the question is about the past
     size_t turn_tokens = 600, hint_tokens = 250, failure_tokens = 300, stall_tokens = 350, max_turn_tokens = 1500;
     size_t open_head_bytes = 4200;           // the head opened for the model: ~1.2k tokens
     size_t open_max_bytes = 16000;           // a skill past this is never opened for the model, only pointed to

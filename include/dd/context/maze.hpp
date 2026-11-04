@@ -49,7 +49,12 @@ public:
     std::vector<Hit> labels(const std::string& prefix, int offset, int limit) override;
     int connect(const std::vector<Edge>& edges) override;
 
-    long recall_timeout_ms = 30000;
+    // How long the pod may take to answer ONE recall. A pod on another machine -- the operator's is
+    // behind a tunnel on a second box -- answers in seconds, not milliseconds, and under a dream
+    // cycle or an AFE pass it can take much longer. The call runs on the caller's own thread and its
+    // answer is delivered whichever turn it becomes ready in, so this bounds a wedged pod rather
+    // than the turn. memory.recall_timeout_ms overrides it.
+    long recall_timeout_ms = 120000;
 
 private:
     std::string url_, health_;

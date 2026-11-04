@@ -791,32 +791,68 @@ static void test_router_deep(const fs::path& tmp) {
 
 // a recall still running when the next turn starts is not that turn's answer: it is let go and the new turn asks its own
 static void test_router_deep_turns(const fs::path& tmp) {
-    // the next turn waits for its own answer, never the old one
+    // A recall is the answer to the QUESTION that asked it, not a property of the turn that was open
+    // when it was submitted. A pod on another machine -- a tunnel to a second box -- answers after
+    // its turn has closed, and dropping that answer is what made a slow maze mute. It is carried
+    // instead, delivered exactly once, and it says which question it belongs to. The deadline
+    // decides only which turn WAITS; it never decides whether the answer is ever spoken.
     auto s = make_stack(tmp, "deepturns1");
     s->pod->echo_query = true;
     s->pod->first_recall_ms = 700;   // turn 1's recall outlives its turn
     auto d1 = s->router->on(turn("QUESTIONONE how do the quadlet generators restart"));
-    chk(d1.deep_late && d1.deep.block.empty(), "stale: turn 1's slow recall is late");
+    chk(d1.deep_late && d1.deep.block.empty(), "carry: turn 1's slow recall is late");
     auto d2 = s->router->on(turn("what did we decide earlier about QUESTIONTWO the kernel cache?"));
-    chk(has(d2.deep.block, "QUESTIONTWO"), "stale: turn 2 got a recall of its own question");
-    chk(!has(d2.deep.block, "QUESTIONONE") && !has(d2.note, "QUESTIONONE"), "stale: turn 2 was not given turn 1's recall");
-    chk(s->pod->recalls.load() == 2 && s->router->stats().deep_in.load() == 1, "stale: two recalls asked, one delivered in turn");
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));   // the old recall ends
-    chk(!s->router->late(), "stale: the old recall is never delivered afterwards");
+    chk(has(d2.deep.block, "QUESTIONTWO"), "carry: turn 2 got a recall of its own question");
+    chk(!has(d2.note, "QUESTIONONE"), "carry: turn 2 was not handed an answer that had not arrived yet");
+    chk(s->pod->recalls.load() == 2 && s->router->stats().deep_in.load() == 1, "carry: two recalls asked, one delivered in turn");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));   // turn 1's recall ends; nobody has taken it
+    const auto old = s->router->late();
+    chk(old && old->carried && has(old->note, "QUESTIONONE"), "carry: turn 1's answer arrives after its turn, marked as its own");
+    chk(old && has(old->note, "Answered late"), "carry: and it says in words which question it answers");
+    chk(!s->router->late(), "carry: once");
+    chk(s->router->stats().deep_carried.load() == 1, "carry: counted");
 
-    // the same through late(): turn 2's answer rides a later round, turn 1's never does
+    // the same through late(): this turn's answer first, then the earlier one when it lands
     auto s2 = make_stack(tmp, "deepturns2");
     s2->pod->echo_query = true;
     s2->pod->first_recall_ms = 450;
     s2->pod->recall_ms = 200;
     s2->router->on(turn("QUESTIONONE how do the quadlet generators restart"));
     auto e2 = s2->router->on(turn("QUESTIONTWO restart the kernel cache units"));
-    chk(e2.deep_late && !has(e2.note, "QUESTIONONE"), "stale: turn 2's own recall is late, not turn 1's");
+    chk(e2.deep_late && !has(e2.note, "QUESTIONONE"), "carry: turn 2's own recall is late, not turn 1's");
     std::this_thread::sleep_for(std::chrono::milliseconds(250));   // turn 2's is in, turn 1's still running
     const auto late = s2->router->late();
-    chk(late && has(late->note, "QUESTIONTWO") && !has(late->note, "QUESTIONONE"), "stale: late() brings turn 2's answer");
+    chk(late && has(late->note, "QUESTIONTWO") && !has(late->note, "QUESTIONONE"), "carry: late() brings this turn's answer first");
     std::this_thread::sleep_for(std::chrono::milliseconds(450));   // turn 1's ends
-    chk(!s2->router->late(), "stale: turn 1's answer never arrives");
+    const auto older = s2->router->late();
+    chk(older && older->carried && has(older->note, "QUESTIONONE"), "carry: then turn 1's, carried");
+    chk(!s2->router->late(), "carry: two answers, two notes, no third");
+
+    // and a turn start speaks what the last one could not wait for
+    auto s4 = make_stack(tmp, "deepcarry4");
+    s4->pod->echo_query = true;
+    s4->pod->first_recall_ms = 500;
+    s4->router->on(turn("QUESTIONCARRY where is the ledger kept"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));   // it landed; the turn was over
+    auto next = s4->router->on(turn("QUESTIONNEXT continue with the ledger"));
+    chk(next.carried && has(next.note, "QUESTIONCARRY"), "carry: the next turn start speaks the earlier answer");
+    chk(s4->router->stats().deep_carried.load() == 1, "carry: at a turn start it is counted too");
+
+    // The deadline is measured, not assumed: a pod on a tunnel to another machine is slower AT
+    // ARRIVAL, and the only number that knows how much slower is the last answer's own clock. After
+    // one 200 ms answer, a 60 ms deadline no longer cuts the next one off.
+    auto s5 = make_stack(tmp, "deepmeasured5");
+    s5->pod->echo_query = true;
+    s5->pod->recall_ms = 200;   // three times the configured patience
+    s5->router->on(turn("QUESTIONSLOW how do the quadlet generators restart"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(260));
+    const auto measured = s5->router->late();   // this delivery is the measurement
+    chk(measured && has(measured->note, "QUESTIONSLOW"), "patience: the slow answer was carried");
+    const auto t0 = std::chrono::steady_clock::now();
+    auto waited = s5->router->on(turn("QUESTIONWAIT restart the kernel cache units"));
+    const double spent = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    chk(has(waited.deep.block, "QUESTIONWAIT") && !waited.deep_late, "patience: the next turn waited the pod's own time, and got the answer");
+    chk(spent > 120, "patience: it waited longer than the configured 60 ms (" + std::to_string(spent) + " ms)");
 
     // a recall that landed and that nobody has taken is handed over by the next mid-turn trigger, not replaced by a new question
     auto s3 = make_stack(tmp, "deepkept");

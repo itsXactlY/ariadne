@@ -41,6 +41,7 @@ struct Delivery {
     std::vector<Uri> offered, opened;
     context::Prefetch deep;          // the pod's answer, when it came in time (the recall card, the ids)
     bool deep_late = false;          // it did not: late() has it when it lands
+    bool carried = false;            // this note is an earlier question's answer, which arrived after its turn
     std::string summary;             // one line for the recall card
     std::string skill;               // the best skill offered
     double ms = 0;
@@ -85,6 +86,9 @@ public:
 
     struct Stats {
         std::atomic<uint64_t> signals{0}, notes{0}, offered{0}, opened_for{0}, opened_by_model{0}, deep_in{0}, deep_late{0}, tokens{0};
+        // Calls submitted, and what came back: an answer that landed after its turn (carried to the
+        // next one), one that found nothing (spent, said nothing), one the carry would not hold.
+        std::atomic<uint64_t> deep_carried{0}, deep_empty{0}, deep_dropped{0};
         std::atomic<uint64_t> refused{0};   // candidate slots the demand guard declined, over the process
         std::atomic<uint64_t> opened_lost{0};   // opens the ring refused: counted, named, never a silent drop
     };
@@ -96,6 +100,7 @@ private:
     struct DeepJob {
         std::atomic<uint32_t> done{0};   // 1 when `result` is in; the waiter parks on it
         context::Prefetch result;
+        std::string query;        // what it asked, so a carried answer can say which question it was
         int turn = 0;
         bool delivered = false;   // the agent thread's
     };
@@ -118,7 +123,14 @@ private:
     // and a refusal is counted (`stats_.opened_lost`) — an open that never reached the demand
     // channel is a number the log line names, not a read the guard silently missed.
     core::SlotRing<64, Opened> opened_q_;
-    std::shared_ptr<DeepJob> inflight_;
+    std::shared_ptr<DeepJob> inflight_;   // the newest: the one this turn may wait on
+    int deep_last_ms_ = 0;   // what THIS pod has been taking lately (smoothed): the deadline's own measurement
+    // Earlier turns' recalls that no one has delivered yet. The pod can be on another machine --
+    // the operator's is behind a tunnel on a second box, where 6-20 s is ordinary -- so most
+    // answers arrive after their turn. Dropping them is what made a slow maze mute: the answer
+    // waits here and is delivered in whichever turn it becomes available, saying which question
+    // it answers. Bounded, because a dead-slow pod must not grow a queue of stale answers.
+    std::vector<std::shared_ptr<DeepJob>> carry_;
     std::set<long> last_in_window_;
     std::vector<long> last_earlier_;
     core::SnapCell<std::string> reattach_;
@@ -136,6 +148,9 @@ private:
     IdfFn idf_fn() const;
     void run(const Intent& in, Delivery& d, std::vector<std::string>& notes);
     void submit_deep(const std::string& query);
+    std::optional<Delivery> take_carry();   // a carried answer, when one is ready and there is budget
+    int patience_ms() const;                // how long a waiting turn gives the pod, from its own recent answers
+    void note_latency(long ms);             // the pod's measurement, folded in
     void log(const char* signal, const Delivery& d, const std::string& reason, const char* deep) const;
     bool seen(const Uri& u, Placement where) const;
     bool refused(const Uri& u);      // demand refused: it may not take a slot this turn (the probe window moves it)

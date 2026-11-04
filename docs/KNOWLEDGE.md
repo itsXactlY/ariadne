@@ -363,7 +363,7 @@ classDiagram
 | Signal | Fires when | What | How | Where / budget | Guard |
 |---|---|---|---|---|---|
 | Session start | process start / `/new` | pins (`user:`+`feedback:`, flagged `invariant:`: <= 800 tokens), catalogue map (<= 250) | one `get` batch, 3 s deadline, cached copy in `<home>/cache` if the pod is down | system prefix (stable, KV-cached) | built once per launch |
-| Turn start | every non-trivial turn | skills + curated memory + tools | local lexical sync (< 5 ms); deep pod recall async, 1.5 s deadline; late result becomes an after-tools note | question note <= 600 tokens | skip `trivial_prompt`; ladder by confidence |
+| Turn start | every non-trivial turn | skills + curated memory + tools | local lexical sync (< 5 ms); deep pod recall async, deadline = `knowledge.deep_ms` or what this pod has shown it needs (+25%); a late answer rides a later round or the next turn, marked as its question's answer | question note <= 600 tokens | skip `trivial_prompt`; ladder by confidence |
 | After a tool batch (**shift**) | >= 2 new content terms (tool args, `intent`, path project/extension, binaries) not covered by this epoch's offers | skills, `invariant:` / `rule:` cards | local only | after-tools note <= 250 | not within 2 rounds of the last note; cards once per epoch |
 | Failure | exit != 0 / error head, and (second failure of that tool family this turn, or the error signature matches a card) | `bug:` `invariant:` `ops:` cards, debugging skills | local, plus deep async | after-tools <= 300 | one per signature |
 | Stall | identical call x2, or 3 blind explorations (`list_dir`/`read_file` misses, `ls`/`find`/`grep` with nothing new) | redirect notice + retrieval on the *question* | local + deep | after-tools <= 350 | once per turn |
@@ -597,8 +597,14 @@ to the missing half; its cost is the pod's 6-17 s, so it stays asynchronous.
 - `MemoryCatalogue` is local and cached in `cache/memory-cards.jsonl` (synced by id); `SessionCatalogue` was not built: the
   engine's ledger already does that job. The operator brief is `brief.md` beside the binary; deriving pins from the maze's
   `user:`/`feedback:` rows is not done.
-- A deep recall that outlives its deadline is delivered with the next tool result (`Router::late`), and a question about the past
-  waits for it (`knowledge.deep_recall_ms`).
+- A deep recall answers the QUESTION that asked it, not the turn that happened to be open. The deadline decides only which turn
+  *waits*; the answer is delivered exactly once, whenever it lands — with a later round of its own turn (`Router::late`), at the
+  start of the next turn, or with that turn's first tool batch — and always marked as an earlier question's answer. A pod on
+  another machine (a tunnel to a second box) is slower at arrival than a local one, so the deadline adapts: the first answer
+  measures the pod, and later turns wait 25% longer than it measured (`Router::patience_ms`), never below `knowledge.deep_ms`
+  and never past `knowledge.deep_recall_ms`. `memory.recall_timeout_ms` is the pod's own room for one request.
+- A carried answer costs its turn's token budget like any other note: what cannot be afforded waits in the carry (three is the
+  most it holds) rather than being spent or thrown away.
 - Rules are one regex on the arguments of a call, checked before it runs (no stream abort); `scope: tool:<name>` narrows it.
 - The contract of 5.3 as built: `open(const Uri&)` (the page rides in the Uri), `refresh()` is blocking and the owner
   (`Refresher`) picks the thread, and `cancel(bool)` was added so `Refresher::stop()` can ask a sync in progress to stop.
