@@ -47,14 +47,16 @@ static const std::string EXP2 =
     "{\"todos\": [{\"id\": \"1\", \"content\": \"new X\", \"status\": \"completed\"}, "
     "{\"id\": \"2\", \"content\": \"spaced\", \"status\": \"pending\"}, "
     "{\"id\": \"?\", \"content\": \"(no description)\", \"status\": \"pending\"}, "
-    "{\"id\": \"3\", \"content\": \"three\", \"status\": \"pending\"}], "
-    "\"summary\": {\"total\": 4, \"pending\": 3, \"in_progress\": 0, \"completed\": 1, \"cancelled\": 0}}";
+    "{\"id\": \"3\", \"content\": \"three\", \"status\": \"pending\"}, "
+    "{\"id\": \"t1\", \"content\": \"no id\", \"status\": \"pending\"}], "
+    "\"summary\": {\"total\": 5, \"pending\": 4, \"in_progress\": 0, \"completed\": 1, \"cancelled\": 0}}";
 
 static const std::string FMT2 =
     "[Your active task list -- the items still open]\n"
     "- [ ] 2. spaced (pending)\n"
     "- [ ] ?. (no description) (pending)\n"
-    "- [ ] 3. three (pending)";
+    "- [ ] 3. three (pending)\n"
+    "- [ ] t1. no id (pending)";
 
 static const std::string IN4 =
     R"JSON([{"id":"a","content":"alpha","status":"in_progress"},
@@ -100,7 +102,7 @@ int main() {
         auto fmt = s.format_for_injection();
         CHECK(fmt.has_value() && *fmt == FMT1, "todo1.format");
     }
-    // Case 2: merge-update existing id, append new id, skip empty id.
+    // Case 2: merge-update existing id, append new id; an entry with no id is an item too.
     {
         TodoStore s;
         s.write(json_parse(IN1), false);
@@ -110,6 +112,24 @@ int main() {
         CHECK(fmt.has_value() && *fmt == FMT2, "todo2.format");
         std::string readback = todo_tool(core::Json{}, false, s);
         CHECK(readback == EXP2, "todo2.read-eq-write");
+    }
+    // A merge that names no id still says something: the content it repeats is the item it means
+    // (a tick, a reword), and content no item carries is a new item. Both were dropped silently
+    // until 2026-11-07: the tool answered with an unchanged list while the model went on believing
+    // it had updated it.
+    {
+        TodoStore s;
+        todo_tool(json_parse(R"JSON([{"id":"a","content":"read the tape","status":"pending"},
+                                     {"id":"b","content":"write the anchor","status":"pending"}])JSON"), false, s);
+        const std::string got = todo_tool(json_parse(R"JSON([{"content":"read the tape","status":"completed"},
+                                                             {"content":"a third item"}])JSON"), true, s);
+        CHECK(s.items.size() == 3 && s.items[0].id == "a" && s.items[0].status == "completed",
+              "merge.by-content ticks the item it names");
+        CHECK(s.items.size() == 3 && s.items[1].content == "write the anchor" && s.items[1].status == "pending",
+              "merge.by-content leaves the items it did not name alone");
+        CHECK(s.items.size() == 3 && s.items[2].id == "t1" && s.items[2].content == "a third item",
+              "merge.by-content adds what no item carries, under a fresh id");
+        CHECK(got.find("\"t1\"") != std::string::npos, "merge.by-content answers with the item it added");
     }
     // Case 4: status markers + active-only filtering.
     {

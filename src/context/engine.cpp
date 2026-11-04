@@ -118,6 +118,23 @@ std::string plan_delta(const std::string& before, const std::string& after) {
     return out;
 }
 
+// Whether the list itself is on the wire. A delta names what moved and leans on the anchor above
+// it; once a rebase keeps the newest delta and drops the anchor, the list is gone even though a
+// revision item is still there. Presence of an anchor, not of any revision, is the question.
+bool has_plan_anchor(const std::vector<ItemPtr>& items) {
+    for (const auto& it : items)
+        if (it->plan_mark == Item::PlanAnchor) return true;
+    return false;
+}
+
+// The same question for the epoch a rebase is about to build: only items from `cut` on are kept,
+// so an anchor before it leaves the window even though it is still in the session it came from.
+bool plan_anchor_kept(const std::vector<ItemPtr>& items, long cut) {
+    for (long i = std::max(0L, cut); i < static_cast<long>(items.size()); ++i)
+        if (items[static_cast<size_t>(i)]->plan_mark == Item::PlanAnchor) return true;
+    return false;
+}
+
 }  // namespace
 
 // ---------------- free helpers ----------------
@@ -476,7 +493,8 @@ bool TapeEngine::rebase(const char* why) {
     if (std::unique_ptr<Prep> stale(ready_.exchange(nullptr)); stale && stale->slot >= 0) ep_.erase(stale->slot);
     bool recalled = false;
     drain_ledger();
-    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio(), turn_ids(false), plan_);
+    auto base = retrieval_base(session_->items(), session_->id(), &recalled, render_.ratio(), turn_ids(false), plan_,
+                               plan_rev_);
     const size_t before = session_->items().size();
     const long tokens = tokens_;
     // A rebase that cannot make room would rebase again on the next call,
@@ -528,7 +546,7 @@ long TapeEngine::prefix_tokens(double ratio) const {
 
 std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
                                                 bool* recalled, double ratio, const std::vector<long>& turn_ids,
-                                                const std::string& plan) const {
+                                                const std::string& plan, int plan_rev) const {
     long cur = -1;
     for (size_t i = items.size(); i-- > 0;)
         if (items[i]->msg.role == "user" && !items[i]->hidden) {
@@ -580,15 +598,13 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
         const std::vector<ItemPtr> dropped(items.begin() + cur + 1, items.begin() + std::max(cur + 1, cut));
         if (std::string t = turn_so_far(dropped); !t.empty()) blocks.push_back(t);
     }
-    // The ledger only needs re-stating here if its tape item left with the epoch; while the item
-    // is still in the window it is already on the wire, and a second copy is pure duplication.
+    // The list is re-stated only when no revision left on the tape carries it. The newest revision
+    // surviving is not enough: a delta names what moved and leans on the anchor above it, so a rebase
+    // that keeps the delta and drops the anchor leaves the model with changes against a missing list.
     // Re-stated, it is the ANCHOR of the new epoch and carries the label the model reads revisions
     // by — not todo_tool's header, which claims the list "was preserved across context compression"
     // at the exact moment this rebase is doing that, and says nothing about what a revision number means.
-    if (!plan.empty() && index_of(items, plan_item_) < cut)
-        blocks.push_back("[Your active task list, revision " + std::to_string(plan_rev_) +
-                         " -- the current list. A higher revision number wins; items not listed here are "
-                         "done or dropped.]\n" + plan_body(plan));
+    const bool restate_plan = !plan.empty() && !plan_anchor_kept(items, cut);
     std::string block;
     if (mem_ && mem_->up() && cur >= 0) {
         const std::string query = anchored_query(items, cur);
@@ -617,8 +633,24 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
     for (size_t i = 0; i < blocks.size(); ++i) anchor->msg.content += (i ? "\n\n" : "") + blocks[i];
     anchor->hidden = true;
     base.push_back(anchor);
+    if (restate_plan) {
+        auto p = std::make_shared<Item>();
+        p->msg.role = "system";
+        p->msg.content = "[Your active task list, revision " + std::to_string(plan_rev) +
+                         " -- the current list. A higher revision number wins; items not listed here are "
+                         "done or dropped.]\n" + plan_body(plan);
+        p->hidden = true;
+        p->plan_mark = Item::PlanAnchor;
+        base.push_back(std::move(p));
+    }
     for (long i = std::max(0L, cut); i < static_cast<long>(items.size()); ++i)
-        if (i != cur) base.push_back(items[static_cast<size_t>(i)]);
+        if (i != cur) {
+            // The anchor was just written from the list as it stands now: revisions that rode with
+            // the dropped one are deltas against a gone anchor, and keeping them would leave two
+            // items each claiming to be the newest revision.
+            if (restate_plan && items[static_cast<size_t>(i)]->plan_mark != Item::PlanNone) continue;
+            base.push_back(items[static_cast<size_t>(i)]);
+        }
     return base;
 }
 
@@ -689,12 +721,33 @@ void TapeEngine::on_call(const agent::CallStats& st) {
 bool TapeEngine::take_ephemeral(const std::string& prompt) {
     if (!cfg_.tape) return false;   // a payload rebuilt every call has no prefix to keep
     plan_ = prompt;
+    // What the tape still holds is an anchor or not. A rebase keeps the newest messages: the
+    // item it keeps can be a delta, which says what moved and means nothing without the anchor
+    // above it. So "a revision is on the tape" is not the question -- "the list is on the tape" is.
+    const bool anchored = has_plan_anchor(session_->items());
+    // The ledger empties itself the moment the work is done: format_for_injection returns nothing
+    // and the loop hands over "". Without a closing revision the newest item on the wire still
+    // claims an item is in progress, and the model picks the finished task back up.
+    if (prompt.empty()) {
+        if (plan_on_tape_.empty()) return true;   // nothing was on the wire: nothing to retire
+        ++plan_rev_;
+        Message m;
+        m.role = "system";
+        m.content = "[Your active task list, revision " + std::to_string(plan_rev_) +
+                    " -- nothing open: every item is done or dropped.]";
+        plan_item_ = session_->append(std::move(m), true);
+        plan_item_->plan_mark = Item::PlanAnchor;
+        plan_on_tape_.clear();
+        return true;
+    }
     const std::string plan_on_tape_before = plan_on_tape_;   // the state the anchor on the tape carries
     // The ledger rides the tape as real history. An appended item is committed with the turn, so
     // the next request is an exact extension of the last one; the ephemeral tail message this
     // replaced was never committed, and broke the prefix on every call inside an epoch. One item
     // per state, not one per call: the cost is per epoch, and an unchanged ledger costs nothing.
-    if (prompt.empty() || (plan_item_ && plan_on_tape_ == prompt)) return true;
+    // "Nothing changed" only saves the item while the list is still anchored: after a rebase that
+    // dropped the anchor, the unchanged list has to be written again or it is simply gone.
+    if (plan_on_tape_ == prompt && anchored) return true;
     // The tape is append only, so an earlier revision stays on the wire and the model reads it
     // too. Unlabelled they were N "active task lists" side by side, all but one stale, each
     // claiming to have survived a compression that never happened, and a small model followed
@@ -704,8 +757,9 @@ bool TapeEngine::take_ephemeral(const std::string& prompt) {
     const std::string body = plan_body(prompt);
     // The anchor is the full list. It is written once per epoch and re-written only when it has
     // left the window; after it, a change rides as what moved -- one short item, not a copy of
-    // the whole list. Append-only, so the prefix the GPU holds is never rewritten.
-    const bool anchor = index_of(session_->items(), plan_item_) < 0;
+    // the whole list. Append-only, so the prefix the GPU holds is never rewritten. A list that
+    // was empty until now has no anchor to move against, so it is written whole too.
+    const bool anchor = !anchored || plan_on_tape_before.empty();
     std::string delta = anchor ? std::string() : plan_delta(plan_body(plan_on_tape_before), body);
     // A delta only pays when it is shorter than the list it stands for. A list that is nearly
     // finished is shorter than the note about what left it, so restating it is the cheaper word.
@@ -724,6 +778,7 @@ bool TapeEngine::take_ephemeral(const std::string& prompt) {
                     ". A higher revision number wins; the list itself is the anchor above.]\n" + delta;
     }
     plan_item_ = session_->append(std::move(m), true);
+    plan_item_->plan_mark = (anchor || delta.empty()) ? Item::PlanAnchor : Item::PlanDelta;
     return true;
 }
 
@@ -819,14 +874,15 @@ void TapeEngine::start_prep() {
     drain_ledger();
     const std::vector<long> ids = turn_ids(false);   // the thread gets a copy, never the ledger
     const std::string plan = plan_;                   // and of the plan
+    const int plan_rev = plan_rev_;                   // and of the revision that plan is labelled with
     prep_cancel_.store(false);
     prep_running_.store(true);
     note("⟲ prewarming the next epoch: " + thousands(pool) + " tokens ≥ high watermark " + thousands(high_at()) +
          (slot >= 0 ? " · sidekick slot " + std::to_string(slot) : " · parked (one-conversation engine)"));
-    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio, ids, plan]() mutable {
+    prep_thread_ = std::thread([this, snapshot, gen, sid, slot, quiet, ratio, ids, plan, plan_rev]() mutable {
         auto p = std::make_unique<Prep>();
         bool recalled = false;
-        p->base = retrieval_base(snapshot, sid, &recalled, ratio, ids, plan);
+        p->base = retrieval_base(snapshot, sid, &recalled, ratio, ids, plan, plan_rev);
         if (high_at() > 0 && epoch_tokens(p->base, ratio) >= high_at()) {   // no room to make: nothing to warm
             note("⟲ prewarm dropped: the next epoch would not land under the high watermark");
             prep_running_.store(false);

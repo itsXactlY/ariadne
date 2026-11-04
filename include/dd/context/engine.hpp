@@ -178,7 +178,7 @@ private:
     // ratio: server tokens per chars/4, so the new epoch is sized as the server will count it
     std::vector<ItemPtr> retrieval_base(const std::vector<ItemPtr>& items, const std::string& session_id,
                                         bool* recalled, double ratio, const std::vector<long>& turn_ids,
-                                        const std::string& plan) const;
+                                        const std::string& plan, int plan_rev) const;
     void drain_ledger();
     std::set<long> in_window() const;              // ids written in this epoch: on the tape now
     std::vector<long> turn_ids(bool earlier_only) const;

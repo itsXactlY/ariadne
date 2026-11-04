@@ -29,6 +29,11 @@ struct Item {
     bool note = false;     // a retrieval note after a batch of tool results: it ages out with that batch
     bool steered = false;  // typed while the turn was running: folded in at a round boundary
     bool soaked = false;   // its reasoning went to the maze (render thread only)
+    // A ledger revision on the tape. Only an ANCHOR carries the whole list; a DELTA names what
+    // moved and means nothing without an anchor above it. A rebase can keep the newest revision
+    // and drop the anchor, so the mark is what says whether the list is still on the wire.
+    enum PlanMark : unsigned char { PlanNone = 0, PlanAnchor = 1, PlanDelta = 2 };
+    PlanMark plan_mark = PlanNone;
 };
 using ItemPtr = std::shared_ptr<Item>;
 

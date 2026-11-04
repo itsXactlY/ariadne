@@ -95,6 +95,14 @@ TodoItem TodoStore::validate(const core::Json& item) {
     return TodoItem{item_id, content, status};
 }
 
+// An id for an item a merge added without naming one: short, stable, and unused.
+static std::string fresh_id(const std::map<std::string, TodoItem>& existing) {
+    for (int n = 1;; ++n) {
+        const std::string id = "t" + std::to_string(n);
+        if (!existing.count(id)) return id;
+    }
+}
+
 std::vector<TodoItem> TodoStore::read() const { return items; }
 
 bool TodoStore::has_items() const { return !items.empty(); }
@@ -119,7 +127,26 @@ std::vector<TodoItem> TodoStore::write(const core::Json& todos_arr, bool merge) 
     for (const auto& sp : todos_arr.arr) {
         const core::Json& t = *sp;
         std::string item_id = py_strip(get_str(t, "id", ""));
-        if (item_id.empty()) continue;
+        if (item_id.empty()) {
+            // A merge that names no id still says something: the content it repeats is the item
+            // it means (a tick or a reword), and content no item carries is a new item. Dropping
+            // both silently was the bug: the tool answered with the unchanged list and the model
+            // went on believing it had updated it.
+            const std::string text = py_strip(get_str(t, "content", ""));
+            if (text.empty()) continue;
+            for (const auto& entry : existing)
+                if (entry.second.content == text) {
+                    item_id = entry.first;
+                    break;
+                }
+            if (item_id.empty()) {
+                TodoItem added = validate(t);
+                added.id = fresh_id(existing);
+                existing[added.id] = added;
+                items.push_back(added);
+                continue;
+            }
+        }
 
         auto it = existing.find(item_id);
         if (it != existing.end()) {

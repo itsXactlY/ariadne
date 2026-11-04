@@ -397,7 +397,13 @@ int main() {
                 items[1]->msg.content.find("read_file(/r1)") != std::string::npos,
             "what the turn already ran survives as one line per call");
         chk(items[1]->msg.content.find("[memory unreachable]") != std::string::npos, "a dead maze is said, not hidden");
-        chk(items[1]->msg.content.find("PLAN: [>] 1. wire the anchor") != std::string::npos, "the plan survives the rebase in turn 0");
+        // The list is its own item, not a block inside the retrieval anchor: only a separate item
+        // can say whether what it carries is the list or the change to it.
+        bool plan_anchor = false;
+        for (const auto& it : items)
+            if (it->plan_mark == Item::PlanAnchor && it->msg.content.find("PLAN: [>] 1. wire the anchor") != std::string::npos)
+                plan_anchor = true;
+        chk(plan_anchor, "the plan survives the rebase in turn 0, as the epoch's own anchor");
         chk(items.back()->msg.role == "tool" && items.back()->msg.content == "r5", "the protected tail stays");
         const auto p = wire(eng.payload());
         chk(p.size() == 1 + items.size(), "a new epoch renders the rebased history");
@@ -486,6 +492,52 @@ int main() {
         for (const auto& p : plans) all += static_cast<long>(p.size());
         chk(all < anchor * 3, "three states cost less than three full copies of the list (" +
                              std::to_string(all) + " vs " + std::to_string(anchor * 3) + " chars)");
+    }
+    {   // A rebase keeps the newest messages, and the newest revision can be a DELTA: it says what
+        // moved and leans on the anchor above it. Until 2026-11-07 the restatement was skipped
+        // whenever plan_item_ (always the newest revision) was inside the kept tail -- so a delta
+        // survived with its anchor dropped, and the model was handed a change against a list that
+        // was no longer on the wire. Presence of an anchor, not of any revision, is the question.
+        tools::ToolRegistry reg;
+        add_tool(reg, "read_file", "", true);
+        ToolDeck deck(reg, tools::ToolSearchConfig::from_raw(core::json_obj({{"enabled", jsp(core::json_str("off"))}})));
+        deck.arrange({"read_file"});
+        Endpoint ep("http://203.0.113.1/v1");
+        agent::HttpLLM llm;
+        EngineConfig cfg;
+        cfg.turn_recall = false;
+        cfg.prewarm = false;
+        cfg.protect_last_n = 3;   // the delta rides the tail, the anchor is behind it
+        TapeEngine eng(cfg, "sys", ep, std::make_shared<Maze>(""), nullptr, deck, llm, tmp_dir("spill_anchor"));
+        const std::string hdr = "[Your active task list was preserved across context compression]\n";
+        const std::string three = "- [ ] 3. prove the injected plan rides every call exactly once (pending)\n";
+        const std::string four = "- [ ] 4. rerun the context suite and the agent suite (pending)\n";
+        const std::string five = "- [ ] 5. rebuild the deployed binary and check the live turn (pending)";
+        eng.begin_turn("plan, then work it");
+        eng.take_ephemeral(hdr + three + four + five);   // revision 1: the anchor, the whole list
+        eng.payload();
+        eng.on_assistant(assistant_calls(1, "read_file", "/r1", ""));
+        eng.on_tool_results({tool_result(1, "r1")});
+        eng.take_ephemeral(hdr + four + five);           // revision 2: a delta, item 3 gone
+        eng.payload();
+        eng.on_assistant(assistant_calls(2, "read_file", "/r2", ""));
+        eng.on_tool_results({tool_result(2, "r2")});
+        eng.rebase_now();
+        chk(eng.session().generation() == 1, "rebase by hand: one epoch");
+        int anchors = 0, deltas = 0;
+        std::string anchor_text;
+        for (const auto& it : eng.session().items()) {
+            if (it->plan_mark == Item::PlanAnchor) { ++anchors; anchor_text = it->msg.content; }
+            if (it->plan_mark == Item::PlanDelta) ++deltas;
+        }
+        chk(anchors == 1 && deltas == 0,
+            "the new epoch holds one revision and it is the list, not a delta beside it (" +
+                std::to_string(anchors) + " anchor, " + std::to_string(deltas) + " delta)");
+        chk(anchors == 1 && anchor_text.find(four) != std::string::npos && anchor_text.find(five) != std::string::npos,
+            "the list itself is back on the wire, not only what moved");
+        const size_t before = eng.session().items().size();
+        eng.take_ephemeral(hdr + four + five);
+        chk(eng.session().items().size() == before, "an unchanged list costs no item while its anchor is on the wire");
     }
 
     {   // a tail of big results gives way: the new epoch lands under half the rebase point
