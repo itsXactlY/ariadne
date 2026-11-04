@@ -16,474 +16,789 @@
 
 ---
 
-## The thesis
+## What is Ariadne?
 
-Most agent stacks treat the transcript as the mind, the prompt as the architecture, and the framework as the product.
+Ariadne is a native C++20 agent harness built around a deceptively simple idea:
 
-**Ariadne treats the run loop as the executable core, the context as a managed data plane, and memory as an external system with its own lifecycle.**
+**An agent should be more than a conversation loop surrounded by tools.**
 
-The model is replaceable. The endpoint is replaceable. The terminal is replaceable. The state is not allowed to become accidental.
+It should be an execution system with explicit state, controlled context, persistent knowledge, predictable tool behavior, and an inference layer that can be replaced without rebuilding everything around it.
 
-This repository is Ariadne, a native C++20 port of the Python Daedalus agent: a real agent loop, real tools, real filesystem effects, a live OpenAI-compatible inference endpoint, a context tape designed for prefix reuse, and a TUI that renders changes rather than repainting the world.
+Ariadne is a native C++20 port of the Python Daedalus agent, developed into an independent systems architecture.
 
-The guiding constraint is simple:
+It combines:
 
-> Keep the working state explicit. Keep the hot path lean. Make every important claim measurable.
+- A real agent execution loop.
+- Live OpenAI-compatible inference.
+- Runtime-discovered Model Context Protocol (MCP) tools.
+- Native filesystem and terminal operations.
+- An append-oriented context tape designed for inference-prefix reuse.
+- Explicit context epochs and watermark-driven rebasing.
+- External long-term memory through MazeMaker.
+- Knowledge routing and adaptive skill discovery.
+- A concurrent, cell-diff terminal interface.
+- Instrumentation across inference, context, tools, and execution.
 
-## Architecture at a glance
+No Python runtime is required to execute the native agent.
+
+The model remains replaceable. The inference endpoint remains replaceable. The knowledge system remains external. The execution state remains explicit.
+
+Ariadne is not another attempt to build the largest agent framework.
+
+**It is an attempt to build a better execution substrate.**
+
+## The architectural idea
+
+Most agent frameworks start with a conversation and progressively attach more machinery to it.
+
+Ariadne takes a different approach.
+
+The execution loop is the center. Everything else exists to control what enters that loop, how work progresses, and what survives after a turn ends.
 
 ```mermaid
 flowchart TB
-    OP["Operator / stdin / TUI"] --> UI["Ariadne interface"]
-    UI --> RUN["Agent::run — single execution loop"]
-    CLI["ariadne-agent — headless entrypoint"] --> RUN
+    OP["Operator"] --> UI["TUI / CLI"]
+    UI --> AGENT["Native Agent Runtime"]
 
-    RUN --> ROUTER["Knowledge router"]
-    RUN --> TAPE["ContextEngine / TapeEngine"]
-    RUN --> DECK["Tool registry"]
-    RUN --> WIRE["LLM transport"]
+    AGENT --> KNOW["Knowledge Router"]
+    AGENT --> TAPE["Context Engine"]
+    AGENT --> TOOLS["Tool Registry"]
+    AGENT --> WIRE["Inference Transport"]
 
-    ROUTER --> CATALOGUE["Local catalogues\nskills + curated memories"]
-    ROUTER --> MAZE["MazeMaker memory service\nMCP"]
-    TAPE --> EPOCH["Context epochs"]
-    EPOCH --> PREFIX["Append-only payload prefix"]
-    EPOCH --> REBASE["Watermark-driven rebase"]
-    REBASE --> MAZE
+    KNOW --> LOCAL["Local Skills & Catalogues"]
+    KNOW --> MAZE["MazeMaker Memory"]
 
-    DECK --> FS["Filesystem tools"]
-    DECK --> SHELL["Terminal tool\n guarded, not sandboxed"]
-    DECK --> MCP["Live MCP discovery"]
-    WIRE --> LLM["llama.cpp-compatible endpoint"]
-    LLM --> WIRE
-    WIRE --> RUN
+    TAPE --> EPOCH["Context Epochs"]
+    EPOCH --> PREFIX["Stable Prompt Prefix"]
+    EPOCH --> REBASE["Watermark-driven Rebase"]
 
-    RUN --> SOAK["Background memory soak"]
+    TOOLS --> FS["Filesystem"]
+    TOOLS --> SHELL["Terminal"]
+    TOOLS --> MCP["MCP Servers"]
+
+    WIRE <--> LLM["Inference Endpoint"]
+
+    AGENT --> SOAK["Background Memory Soak"]
     SOAK --> MAZE
-    MAZE --> ROUTER
 
-    style RUN fill:#241b38,stroke:#bf9cff,color:#fff
+    style AGENT fill:#241b38,stroke:#bf9cff,color:#fff
     style TAPE fill:#172b3b,stroke:#6dd6ff,color:#fff
     style MAZE fill:#20352b,stroke:#8be0a2,color:#fff
 ```
 
-## What is real today
+The architecture has four primary responsibilities:
 
-This is not a concept deck. The following paths are implemented in the supplied tree.
+| Component | Responsibility |
+|---|---|
+| Agent Runtime | Executes tasks, coordinates tools, manages turns |
+| Context Engine | Controls prompt construction, reuse, and rebasing |
+| Knowledge Router | Finds relevant skills and prior experience |
+| Inference Transport | Communicates with replaceable model endpoints |
 
-- **Native agent binary:** `build/ariadne-agent` runs the ported agent loop against a live OpenAI-compatible endpoint.
-- **Real tool effects:** `read_file`, `write_file`, and `list_dir` operate on the filesystem; `run_terminal` executes child processes with a denylist guard.
-- **One run loop:** the interactive TUI and headless entrypoint drive the same `Agent::run` implementation.
-- **The model knows the contract.** One composed system prompt (`PromptComposer`): the
-  **workflow contract** (`PromptComposer::workflow_contract` in `src/know/prompt.cpp:46`,
-  toggled by `agent.contract` at `src/dd_tui.cpp:1378-1379`) — a plan before multi-step work,
-  facts from running not guessing, a change is done when it was run and looked at, skills are
-  guidelines you read — plus the operator's text, a retrieval contract (pointers must be opened
-  before acting, never guess a path or a name, live state is a command and memory is history), a
-  catalogue map, and `brief.md` if there is one. A pod's own protocol text is not pasted: it is
-  offered through `mcp_servers.<name>.instructions` (`src/dd_tui.cpp:870`), which reads the
-  server's instructions at `src/tools/mcp_client.cpp:304` and can be set to `harness`,
-  `verbatim` or `off`.
-- **Context tape:** requests reuse a stable prompt prefix within an epoch; rebases are explicit and watermark-driven.
-- **External memory:** finished turns and first-sent reasoning can be soaked to MazeMaker; recall feeds the next turn.
-- **Tool discovery:** enabled MCP servers are discovered at runtime and their schemas registered with the tool deck.
-- **Live stream rendering:** reasoning and answer deltas stream into a double-buffered, cell-diff terminal UI.
-- **Bounded tool output:** large results are cut at the source, with dropped bytes or lines accounted for and continuation hints.
-- **Safer wire behavior:** URL safety checks, bounded stream sinks, and retry rules distinguish failures before output from streams that have already spoken. A turn ends at the stream's own terminator (`done()`, `include/dd/agent/chat_stream.hpp:38`, stopped in `src/agent/http_llm.cpp:135`) and not at EOF: llama-server, vLLM and OpenAI keep an SSE socket open past `data: [DONE]` to wait for the next request, so reading to EOF cost every turn the stall timeout and filed a finished answer as a stalled server. A reader that stops mid-stream is `completed` (`include/dd/agent/retry.hpp:55`), never a reason to re-send an answer the caller already holds.
-- **Testable kernels:** SIMD paths are checked against scalar behavior where supported; serial and parallel output are compared for equivalence.
+The TUI, filesystem, MCP integration, learning system, and external memory extend these responsibilities without replacing the central execution model.
 
-## Execution model
+---
+
+## 1. The execution engine
+
+At the heart of Ariadne is one execution loop: `Agent::run`.
+
+It handles the complete interaction between the operator, the model, and the available tools.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor Human as Operator
-    participant UI as TUI / CLI
-    participant Agent as Agent::run
-    participant Tape as TapeEngine
-    participant Router as Knowledge Router
-    participant LLM as Inference Endpoint
-    participant Tools as Tool Deck
-    participant Maze as MazeMaker
+    actor Human
+    participant Agent as Agent Runtime
+    participant Knowledge as Knowledge Router
+    participant Tape as Context Engine
+    participant LLM as Inference
+    participant Tools as Tool Registry
+    participant Memory as MazeMaker
 
-    Human->>UI: Submit task
-    UI->>Agent: Run / enqueue input
-    Agent->>Router: Resolve relevant knowledge
-    Router-->>Agent: Skills, memory, deferred-tool hints
-    Agent->>Tape: Render current epoch payload
+    Human->>Agent: Submit task
+    Agent->>Knowledge: Resolve relevant knowledge
+    Knowledge-->>Agent: Skills and memory pointers
+
+    Agent->>Tape: Render current context
     Tape-->>Agent: Stable prefix + new material
-    Agent->>LLM: Chat completion / stream
-    LLM-->>Agent: Reasoning and answer deltas
+
+    Agent->>LLM: Send inference request
+    LLM-->>Agent: Stream response
+
     alt Tool call requested
-        Agent->>Tools: Validate and dispatch call
-        Tools-->>Agent: Bounded result + accounting
+        Agent->>Tools: Validate and execute
+        Tools-->>Agent: Bounded execution result
         Agent->>Tape: Append tool exchange
-        Agent->>LLM: Continue the same run loop
+        Agent->>LLM: Continue execution
     else Final answer
-        Agent-->>UI: Final response and call stats
+        Agent-->>Human: Deliver result
     end
+
     par Background persistence
-        Agent->>Maze: Soak completed turn
-        Maze-->>Router: Memory becomes retrievable
+        Agent->>Memory: Persist completed experience
     end
 ```
 
-The agent does not need a second orchestration framework to become agentic. The run loop already owns the cycle: model call, tool dispatch, result, continuation, completion. The architecture around it exists to control what enters that cycle and what survives it.
+The same `Agent::run` implementation powers both the interactive TUI and the headless agent executable.
 
-## Context is a data plane, not a growing string
+There is no second orchestration framework hiding behind the interface.
 
-The transcript is not the source of truth for every future request. The tape renders a payload once per epoch, appends new material as it arrives, and rebases deliberately when the context budget approaches its watermarks.
+The model requests a tool. The runtime validates and executes it. The result returns to the model. The execution continues until completion or an explicit stopping condition.
 
-```mermaid
-flowchart LR
-    START["New session / epoch"] --> RENDER["Render full view\nwith hygiene layers"]
-    RENDER --> PREFIX["Stable serialized prefix"]
-    PREFIX --> APPEND["Append new messages\nonce"]
-    APPEND --> CACHE["Inference KV / prefix reuse"]
-    CACHE --> CHECK{"Watermark crossed?"}
-    CHECK -- "No" --> APPEND
-    CHECK -- "Yes" --> PREWARM["Prepare next epoch"]
-    PREWARM --> REBASE["Rebase from explicit state"]
-    REBASE --> RENDER
+This separation keeps the execution model independent of the presentation layer.
 
-    MEM["External memory graph"] --> REBASE
-    TOOL["Tool results\nbounded before render"] --> APPEND
-    STATE["Current-turn ledger"] --> REBASE
-```
+### What the runtime actually does
 
-### Design invariants
+- Streams reasoning and answer deltas.
+- Validates and dispatches tool calls.
+- Handles multiple execution cycles within one task.
+- Limits tool output before it enters the context.
+- Accounts for omitted bytes and lines.
+- Applies transport retries only where replay is safe.
+- Prevents an already-delivered partial answer from being blindly replayed.
+- Persists completed experience asynchronously.
 
-- **Render once, append thereafter.** Within an epoch, the previous request should remain an exact prefix of the next.
-- **Rebase from named state.** The next epoch carries the current question, a rebase anchor, the current-turn ledger, one recall, and a protected tail.
-- **No summarizer required for the rebase path.** The architecture reconstructs a compact working view from explicit state and retrieval rather than depending on a generated summary.
-- **Never discard the live working group first.** When the tail must shrink, older complete tool groups yield before the newest group.
-- **Count every cut.** Tool output limits and context-window cuts report what was omitted and how to continue.
-- **Memory and live state are different things.** Commands describe the current machine; memory describes prior experience.
-- **No thread lock on the request path.** Gateway replay and kill marks are one atomic word per bucket (`include/dd/core/mark_set.hpp:76-82`): `dd::core::MarkSet` claims a slot with `fetch_add`, sweeps from a watermark instead of scanning the table, and rebases its minute offsets under a generation instead of growing without bound. Sweeping runs where the space is needed, never on a timer. The only locks the gateway still takes are `FileLock` flocks over the store files themselves — the device store (`src/gateway/devices.cpp:140`) and the pairing file (`src/gateway/devices.cpp:165`) — they guard a file against another process, not a request against a thread.
+A failed request and a failed execution are not necessarily the same thing.
 
-The supplied live measurements on a Strata endpoint with Qwen3.8-Flash-Next IQ1_M showed 88% prompt-token reuse over 11 calls across three turns. In a forced-watermark test, the next epoch was prewarmed during the idle interval and its first call reused 99.1% of the prompt. These are environment-specific measurements, not universal performance guarantees.
+Ariadne distinguishes failures before a response begins from interruptions after output has already reached the caller.
 
-## Knowledge routing: small local decisions, slow external recall
+That distinction matters when an agent is doing real work.
 
-The knowledge router combines local catalogues with an external memory service. Local skill and curated-memory matching is designed to be cheap; the remote recall path is deadline-bound because it is the slower leg.
+---
+
+## 2. Context engineering: a managed data plane
+
+A large context window is not a memory architecture.
+
+It is temporary working capacity.
+
+Ariadne's Context Engine treats context as a managed execution resource rather than an ever-growing transcript.
+
+Its central mechanism is the **context tape**.
+
+Instead of reconstructing the entire prompt for every request, Ariadne maintains a stable serialized prefix within an execution epoch and appends subsequent material.
 
 ```mermaid
 flowchart TD
-    SIGNAL["Turn start / shift / failure / stall"] --> DISTILL["Distill query\nremove pasted noise"]
-    DISTILL --> LOCAL["Local BM25F search"]
-    LOCAL --> CARDS["Skill + memory cards"]
-    DISTILL --> REMOTE["MazeMaker recall\nbounded by deadline"]
-    CARDS --> POLICY["Evidence / threshold policy"]
+    START["New execution epoch"] --> RENDER["Render context"]
+    RENDER --> PREFIX["Stable serialized prefix"]
+
+    PREFIX --> APPEND["Append new messages"]
+    APPEND --> KV["Inference KV / Prefix Cache"]
+
+    KV --> CHECK{"Watermark reached?"}
+
+    CHECK -->|No| APPEND
+    CHECK -->|Yes| PREPARE["Prepare next epoch"]
+
+    PREPARE --> REBASE["Reconstruct working context"]
+    REBASE --> RENDER
+
+    MEMORY["External memory"] --> REBASE
+    LEDGER["Current-turn ledger"] --> REBASE
+    TOOLS["Bounded tool results"] --> APPEND
+```
+
+### Why epochs?
+
+An execution epoch represents a period during which the serialized context prefix remains stable.
+
+Within that epoch:
+
+1. The initial context is rendered.
+2. New messages are appended.
+3. Existing serialized content is preserved.
+4. The inference backend can reuse its cached prefix.
+
+When a configured watermark is reached, Ariadne prepares a new epoch and reconstructs the working context from explicit state.
+
+This avoids treating the entire conversation history as indispensable working material.
+
+### Rebase invariants
+
+- **Render once, append thereafter.** Preserve the previous request as an exact prefix wherever the execution state permits.
+- **Rebase from explicit state.** Reconstruct from the current question, rebase anchor, current-turn ledger, retrieved memory, and protected recent context.
+- **No mandatory summarization dependency.** The rebase path does not require a generated conversation summary.
+- **Protect active work.** Older complete tool groups yield before the newest working group.
+- **Account for truncation.** Context and tool-output cuts are observable, not silent.
+- **Separate memory from machine state.** Live commands describe the current environment; external memory describes previous experience.
+
+### Prefix reuse in practice
+
+The supplied Strata measurements using Qwen3.8-Flash-Next IQ1_M recorded:
+
+| Experiment | Observed result |
+|---|---:|
+| Prompt reuse across 11 calls / 3 turns | 88% |
+| First call after a prewarmed rebase | 99.1% |
+
+These are measurements from a specific configuration, not universal guarantees.
+
+The important architectural property is that prefix reuse is deliberately supported by the execution model rather than left entirely to chance.
+
+---
+
+## 3. Knowledge routing and persistent memory
+
+Ariadne separates three things that agent frameworks frequently conflate:
+
+- What the agent currently knows about its environment.
+- What it should retrieve for the current task.
+- What it has learned from previous execution.
+
+The Knowledge Router handles the second.
+
+MazeMaker provides the external memory system.
+
+Local catalogues provide fast access to skills and curated knowledge.
+
+```mermaid
+flowchart TD
+    EVENT["New turn / tool shift / failure / stall"]
+    EVENT --> QUERY["Query distillation"]
+
+    QUERY --> LOCAL["Local BM25F retrieval"]
+    QUERY --> REMOTE["MazeMaker recall"]
+
+    LOCAL --> POLICY["Evidence and relevance policy"]
     REMOTE --> POLICY
-    POLICY --> OFFER["Offer pointers, not entire libraries"]
-    OFFER --> OPEN["Open only relevant material"]
-    OPEN --> TRACE["Record what was offered and opened"]
-    TRACE --> PRIORS["Background learning journal"]
+
+    POLICY --> POINTERS["Relevant knowledge pointers"]
+    POINTERS --> OPEN["Explicitly open selected material"]
+
+    OPEN --> EXEC["Agent execution"]
+    EXEC --> JOURNAL["Background learning journal"]
+
+    JOURNAL --> PRIORS["Updated retrieval priors"]
     PRIORS --> LOCAL
 ```
 
-- Skill catalogues merge local directories, configured external directories, and MazeMaker skill rows.
-- BM25F uses weighted fields for names, tags, groups, and gist; query terms are distilled before ranking.
-- Triggers include turn start, shifts in the tool-call working set, failures, and repeated stalls.
-- Skills and memory are opened through explicit pointers; the router does not indiscriminately paste the entire catalogue into every prompt.
-- A background learning worker records observed offers and openings, updates priors, and can draft a skill from a fixed failure.
-- Learned skills are probationary, traceable, and retire through tombstones rather than silent deletion.
+### Local knowledge
 
-## Concurrency without turning every token into an event
+The local catalogue combines:
 
-The UI separates lifecycle events from the token stream. The render thread owns scene state; producer threads publish fixed-slot events, while the streaming producer writes into its own byte buffer and publishes the committed length.
+- Built-in skill directories.
+- Configured external skill directories.
+- MazeMaker skill records.
+- Curated memory cards.
+
+Retrieval uses weighted BM25F ranking across names, tags, groups, and descriptive fields.
+
+Rather than dumping an entire skill library into every prompt, Ariadne offers relevant pointers and opens material when needed.
+
+### External memory
+
+MazeMaker is the persistent knowledge layer.
+
+Completed turns and selected reasoning are sent through a background memory-soak process. Relevant memories can subsequently be retrieved and incorporated into future execution.
+
+This allows the working context to remain bounded without making previous experience disposable.
+
+### Learning from execution
+
+The background learning journal records what was offered and what was actually opened.
+
+It can update retrieval priors and draft skills from recurring failures.
+
+Learned skills remain traceable and probationary. Their lifecycle includes provenance and retirement through tombstones rather than silent deletion.
+
+The result is a separation between immediate execution and longer-term knowledge formation.
+
+**The context window is where work happens. Memory is where experience survives.**
+
+---
+
+## 4. Native concurrency and the rendering pipeline
+
+Ariadne's UI is not a terminal repaint loop.
+
+It is a separate rendering system with explicit ownership and bounded event hand-off.
+
+The architecture separates lifecycle events from streaming bytes.
 
 ```mermaid
 flowchart LR
-    AGENT["Agent thread"] -->|event stamp + ownership| RING["Fixed-slot SlotRing"]
-    AGENT -->|stream bytes, then length| BUF["Producer-owned buffer"]
-    WORKER["Background worker"] -->|fixed-slot publish| RING
-    RING --> CLAIM["Render thread claims event"]
-    BUF --> SNAP["Render thread reads published bytes"]
-    CLAIM --> SCENE["Scene state"]
-    SNAP --> SCENE
-    SCENE --> FRAME["Canvas → Frame diff"]
-    FRAME --> TERM["Only changed terminal cells"]
+    AGENT["Agent Thread"] --> RING["Fixed-slot Event Ring"]
+    AGENT --> BUFFER["Producer-owned Stream Buffer"]
+
+    WORKER["Background Workers"] --> RING
+
+    RING --> CLAIM["Render Thread Claims Events"]
+    BUFFER --> SNAPSHOT["Published Byte Snapshot"]
+
+    CLAIM --> SCENE["Scene State"]
+    SNAPSHOT --> SCENE
+
+    SCENE --> CANVAS["Cell Canvas"]
+    CANVAS --> DIFF["Frame Diff"]
+    DIFF --> TERMINAL["Changed Terminal Cells"]
 ```
 
-The README's recorded measurement for a 200-delta turn is zero hand-off allocations in the new path, compared with 214 in the queue it replaced. `src/` and `include/` declare no mutex, no `lock_guard` and no `condition_variable`, and instantiate none: `grep -rn 'mutex\|lock_guard\|condition_variable' src include` returns only the comments that say why there is none, never a `std::mutex`, a `lock_guard` or a `condition_variable` in code. The locks that do exist are kernel-level, per-file, and off the request path: `flock(2)` on a sidecar lock file (`include/dd/core/fslock.hpp`, and a local `FileLock` in `src/gateway/devices.cpp`) held for the whole read-modify-write of a private file — pairing codes and device minting, not request authentication. A file lock that serializes two processes around a rewrite is not a mutex guarding shared memory, and it never sits between a request and its answer. Treat these as claims about this codebase and measured setup, not as a proof that lock-free designs are universally superior.
+### Concurrency model
 
-The implementation uses fixed-slot rings, atomic ownership publication, producer-owned stream buffers, and snapshots. Ring overflow is counted; live-byte loss is counted; interruption is shared through an atomic flag that also aborts an in-flight libcurl call.
+The implementation uses:
 
-## The terminal is a renderer, not a repaint loop
+- Fixed-slot event rings.
+- Atomic ownership publication.
+- Producer-owned streaming buffers.
+- Published-length snapshots.
+- Atomic interruption signaling.
+- Explicit overflow and dropped-byte accounting.
 
-The TUI uses a cell canvas and a frame diff. It owns a fixed layout, cards for messages and tool activity, live reasoning/answer streams, and explicit accounting for truncation and performance. Unchanged frames write nothing.
+The request and rendering paths avoid conventional C++ mutex-based hand-off.
 
-```mermaid
-flowchart TB
-    MODEL["Reasoning / answer deltas"] --> CARDS["Message + tool cards"]
-    EVENTS["Lifecycle events"] --> SCENE["Render-thread-owned scene"]
-    CARDS --> SCENE
-    SCENE --> LAYOUT["Widget layout"]
-    LAYOUT --> CANVAS["Cell canvas"]
-    CANVAS --> DIFF["Diff against prior frame"]
-    DIFF --> SYNC["Synchronized terminal output"]
-    SYNC --> SCREEN["Alternate screen"]
-```
+This is not a claim that the entire program is universally lock-free: the gateway uses kernel-level file locks for specific cross-process file operations.
 
-Highlights:
+The distinction is deliberate.
 
-- Double-buffered `Frame` / `Widget` / `Scene` rendering.
-- UTF-8 line editing, history, bracketed paste, mouse wheel, key decoding, and terminal restoration.
-- Live reasoning cards and streamed answer cards without moving content below the live tail.
-- `/context`, `/rebase`, `/resume`, `/plan`, `/learn`, `/reasoning`, `/effort`, `/verbose`, and related REPL commands.
-- **`/verbose verbose` is the instrument.** Every call leaves a dim accounting line — `http 200
-  (first 429) · 3 sends · 1.9s waited · in 4,123 (960 cached, 23%) · out 300 · epoch 7 · tape 24/24
-  msgs · ledger rev 12 anchor · rebases 2 (turn start → epoch 7)` — with the response headers worth
-  reading on the line under it; the status row, the engine panel and the tape panel grow the same
-  numbers (`in`, `sent N`, `http`, `marks`, `ledger`, `rebase`). The rows a call leaves exist only
-  at that level (`Kind::Wire`, `src/ui.cpp:1760`), so a normal run's transcript is unchanged.
-- SIMD cell-diff and text-width kernels selected at runtime: AVX-512, AVX2, or scalar.
-- **Code colour comes off disk, not from a compiled table.** `skills/highlight.yaml` names a
-  language and which kind each word is (`skills/highlight.yaml:35-46` lists the kinds,
-  `skills/highlight.yaml:93-107` the palette), read by `src/ui_grammar.cpp:273-327`; scan order
-  is precedence — shipped defaults beside the binary, then skill roots, then `highlight.paths`,
-  so the last file to name a language wins. A skin's own `colors.code_*` outranks a language
-  file, because the skin is a claim about colour and the file is a claim about structure.
-- **Every hue is measured before it lands.** `Theme::reconcile` runs WCAG relative luminance
-  against the skin's own text colour and pushes an unreadable hue away from it while keeping the
-  hue; it runs on the shipped palette too, since defaults are colours as well, and
-  `palette_fixed` counts what moved so a reconciled palette is visible instead of silent.
-- **Patch colour is scoped to the hunk's own claim.** `hunk_contract` in `src/ui.cpp:1309-1341`
-  reads `@@ -a,b +c,d @@` and allows at most `b + c` rows of patch colour, so a `-` after a
-  spent patch block is a bullet, not a deletion (`highlight_row` in `src/ui.cpp:1384-1480`).
-- OpenMP is used for sufficiently large rendering and indexing work; small work stays serial to avoid waking threads unnecessarily.
+Synchronization should exist where shared state requires it, not become an automatic tax on every token.
 
-## Tooling and trust boundaries
+### Measured event hand-off
 
-A tool-enabled agent is a system with side effects. The boundary needs to be explicit.
+A recorded 200-delta streaming experiment showed:
 
-| Surface | Current behavior |
+| Implementation | Hand-off allocations |
+|---|---:|
+| Previous queue path | 214 |
+| Fixed-slot publication path | 0 |
+
+The renderer also uses runtime-selected SIMD implementations for cell-diff and text-width operations:
+
+- AVX-512
+- AVX2
+- Scalar fallback
+
+OpenMP is used for sufficiently large rendering and indexing workloads, while smaller workloads remain serial.
+
+---
+
+## 5. The terminal interface
+
+The TUI is a native terminal application built around a cell canvas, widgets, scene state, and frame differences.
+
+It includes:
+
+- Double-buffered rendering.
+- Live reasoning and answer cards.
+- Tool execution cards.
+- UTF-8 input and line editing.
+- Command history and bracketed paste.
+- Mouse-wheel support.
+- Terminal restoration.
+- Runtime syntax highlighting.
+- Theme reconciliation using WCAG relative luminance.
+- Performance and context instrumentation.
+
+### Operational commands
+
+The interactive interface exposes commands including:
+
+| Command | Purpose |
 |---|---|
-| Filesystem | `read_file`, `write_file`, and `list_dir` perform real I/O |
-| Terminal | Executes commands with a denylist; **not a sandbox** |
-| MCP | Enabled servers are discovered live; input schemas are registered |
-| HTTP | URL safety checks run before clients connect |
-| Streaming | Response sink is capped; a turn ends at the stream's own `done()` terminator (`include/dd/agent/chat_stream.hpp:38`) and not at EOF, because llama-server, vLLM and OpenAI hold the SSE socket open past `data: [DONE]` to wait for the next request; once deltas have been emitted, the call is not replayed |
-| Retries | A refused connect, a socket cut before the response line, and the states that mean "come back" (408, 429, 500, 502, 503, 504) are re-sent while nothing has been handed out; 400/401/501/505 are verdicts and are not, nor is an interrupted call. A 429 climbs the rate ladder — three quick re-sends (250 ms, 500 ms, 1 s), then 1 s, 5 s, 15 s, 30 s, 1 min, the last rung repeating — and a server's own `Retry-After` wins over the rung whenever it is longer; a wait past the retry budget is refused with the number in the error. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:55`) — an answer the caller already holds is never re-sent |
-| Tool output | Bounded at production, with omitted bytes/lines accounted for |
-| Paths | Filesystem tools reject `..` path components |
-| Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
-| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
-| Learned skills | Provenance is tracked; model-edited skills are protected from blind draft overwrite |
+| `/context` | Inspect context state |
+| `/rebase` | Trigger context reconstruction |
+| `/resume` | Resume execution |
+| `/plan` | Inspect planning state |
+| `/learn` | Inspect learning behavior |
+| `/reasoning` | Configure reasoning |
+| `/effort` | Adjust reasoning effort |
+| `/verbose` | Inspect execution instrumentation |
 
-**Important:** a command denylist is not isolation. Do not expose the terminal tool to untrusted input or treat it as a security boundary. Use operating-system isolation and least privilege when running untrusted workloads.
+### Observability
 
-## Build and run
+Verbose mode exposes information that would otherwise remain invisible inside an agent framework:
+
+- HTTP status and retry count.
+- Waiting time.
+- Input and output tokens.
+- Cached prompt tokens.
+- Context epoch.
+- Tape message count.
+- Ledger revision.
+- Rebase history.
+
+The goal is simple: make expensive or unexpected behavior inspectable while the system is running.
+
+---
+
+## 6. Inference: bring your own engine
+
+Ariadne communicates with OpenAI-compatible inference endpoints.
+
+The inference backend is not the agent architecture.
+
+This means the same execution system can operate against different providers and local inference engines without changing its core tool, context, or knowledge architecture.
+
+Supported deployment patterns include:
+
+- Local llama.cpp servers.
+- Strata-compatible endpoints.
+- OpenAI-compatible remote providers.
+- Other compatible inference services.
+
+### Reasoning control
+
+Ariadne distinguishes reasoning effort from an explicit thinking-token budget.
+
+The configured reasoning effort is passed when selected and supported by the endpoint's reported capabilities.
+
+Available levels are discovered rather than blindly assumed.
+
+The supported effort ladder includes:
+
+`off → low → medium → high → xhigh → max → ultra`
+
+An omitted reasoning preference does not automatically impose a token cap.
+
+An explicit thinking budget is handled separately and applies to the harness's own engine-call shape rather than being injected into arbitrary remote `/v1` requests.
+
+### Provider routing
+
+Ariadne also supports passing additional request fields through `model.extra`.
+
+For example, OpenRouter provider selection can be configured without hardcoding provider-specific behavior into the transport.
+
+```yaml
+model:
+  extra:
+    provider:
+      only:
+        - baidu/fp8
+      allow_fallbacks: false
+```
+
+This requests the specified provider and refuses silent fallback.
+
+The actual responding provider must still be verified from the response metadata.
+
+Custom fields are merged into the outgoing request, while the harness retains control over its own fundamental request fields.
+
+---
+
+## 7. Tools, MCP, and execution boundaries
+
+An agent capable of taking action needs explicit boundaries.
+
+Ariadne provides native tools and runtime MCP discovery.
+
+| Capability | Implementation |
+|---|---|
+| Filesystem | Native read, write, and directory listing |
+| Terminal | Child-process execution with denylist guard |
+| MCP | Runtime server discovery and schema registration |
+| HTTP | URL safety checks and bounded response handling |
+| Tool output | Bounded before entering context |
+| Secrets | Long key-like tokens redacted from returned output |
+| Skills | Provenance tracking and protected learned-skill lifecycle |
+
+### Important security distinction
+
+**The terminal tool is guarded, not sandboxed.**
+
+A command denylist does not provide operating-system isolation.
+
+Filesystem restrictions and URL validation are additional protections, not substitutes for a proper security boundary.
+
+When running untrusted workloads, use OS-level isolation, least privilege, and an appropriately restricted execution environment.
+
+### Gateway protection
+
+The gateway also implements device-based authentication, replay protection, and identity checks before processing protected command bodies.
+
+Handshake nonces are tracked to prevent replay.
+
+These mechanisms are distinct from the ordinary agent tool loop.
+
+---
+
+## 8. Performance: measurements over adjectives
+
+Ariadne is developed with a preference for measurable engineering improvements rather than architectural claims based on intuition.
+
+The following results are recorded in the supplied project measurements.
+
+| Experiment | Recorded result |
+|---|---:|
+| Context prefix reuse | 88% |
+| Prewarmed epoch reuse | 99.1% |
+| Avoided prompt tokens in large grep-output experiment | 12,944 |
+| Net token reduction in two-place file edit | 22,277 |
+| UI hand-off allocations across 200 deltas | 0 |
+| Previous UI hand-off allocations | 214 |
+| Knowledge tokenizer throughput | 33 → 80 MB/s |
+| Local skill retrieval | 2–5 µs |
+| Curated memory index build | 80 → 20 ms |
+| Skill index build | 112 → 40 ms |
+
+The tokenizer measurement was recorded on a Ryzen 7 3800X setup.
+
+The measurements depend on their respective hardware, inference endpoint, model, input, corpus, and configuration.
+
+They should be reproduced before being used as comparative benchmarks.
+
+**Performance is an observed property of a particular execution, not a marketing guarantee.**
+
+---
+
+## 9. Build and run
 
 ### Requirements
 
-- GCC / `g++` with C++20 support
-- GNU Make
-- libcurl development headers and library for `ariadne-agent`
-- OpenMP support for targets that link the indexing or skill components
-- A running OpenAI-compatible inference endpoint, such as a local llama.cpp server
+- Linux development environment.
+- GCC / `g++` with C++20 support.
+- GNU Make.
+- libcurl development headers and library.
+- OpenMP support for targets that use indexing or skill components.
+- A running OpenAI-compatible inference endpoint.
 
 ### Build
 
 ```bash
 make
-make build/ariadne-skills
-make build/ariadne-agent
-make test
-make doc-audit
 
-# Build into a separate output tree
+# Individual products
+make build/ariadne-agent
+make build/ariadne-skills
+
+# Run the test suites
+make test
+
+# Audit documented implementation wiring
+make doc-audit
+```
+
+Build into an isolated output directory:
+
+```bash
 make BUILD=build-experiment build/ariadne-agent
 ```
 
-The Makefile is the build system. Each product target compiles its translation units in one `g++` invocation; `mk/*.mk` fragments add targets. Warnings are errors.
+The Makefile is the build system. Product targets compile their translation units through `g++`, with additional targets defined in `mk/*.mk`.
+
+Warnings are treated as errors.
 
 ### Run the headless agent
 
 ```bash
-# Read a message from stdin; config.yaml lives beside the binary
+# Read input from stdin
 build/ariadne-agent
 
-# Use an explicit config and pass a message
+# Use an explicit configuration
 build/ariadne-agent path/to/config.yaml -- "Explain this codebase"
 
 # Pipe a task
 printf '%s\n' 'List files in /tmp/' | build/ariadne-agent
 ```
 
-### Run the full harness
+### Run the interactive harness
 
 ```bash
+# Initialize the Ariadne home
 build/ariadne --init
+
+# Start Ariadne
 build/ariadne
 ```
 
-`--init` creates the home-owned config and the runtime directories beside the selected home. The binary's home resolution is explicit; the Python Daedalus home (`~/.daedalus`) is refused rather than silently reused.
+Initialization creates the application-owned configuration and runtime directories.
+
+Ariadne resolves its own home explicitly and refuses to silently reuse the Python Daedalus home.
 
 ### Install
 
 ```bash
 make install
+
+# Install all supported products
 make install-all
 ```
 
-The installer is a standalone C++ translation unit compiled by `g++`. It re-executes itself, builds the target, installs it, seeds the home through `ariadne --init`, and checks that the installed binary runs. It deliberately avoids duplicating configuration defaults that the application itself owns.
+The installer is itself a standalone C++ translation unit. It builds and installs the selected target, initializes its home, and checks that the installed binary runs.
 
-## Configuration
+---
 
-The following environment variables override configuration values:
+## 10. Configuration
+
+Ariadne reads its configuration from `config.yaml` in the selected application home.
+
+A reference configuration is provided at:
+
+`examples/ariadne/config.yaml`
+
+Environment variables can override selected settings.
 
 | Variable | Purpose |
 |---|---|
-| `DD_BASE_URL` | Override `model.base_url`; must end in `/v1` |
-| `DD_MODEL` | Override `model.name` |
-| `DD_API_KEY` | Override `model.api_key`; local llama.cpp setups may not need one |
-| `DD_WIRE_ATTEMPTS` | Sends per LLM call (default 9, the rate ladder's length); retries only the come-back states above |
-| `DD_WIRE_BUDGET_MS` | Wall clock one call may spend on sends and pauses (default 150000, the ladder's own sum); a server's `Retry-After` past it is refused rather than slept away |
-| `DD_MAX_TURNS` | Override `agent.max_turns`; cap it to avoid pathological loops |
-| `DD_TAPE_LOG` | Write per-call context-tape accounting |
-| `DD_FAST_LAYER` | Override the fast-layer token threshold for rebase testing |
-| `DD_NO_SOAK=1` | Disable memory writes while retaining recall behavior |
+| `DD_BASE_URL` | Override inference endpoint; must end in `/v1` |
+| `DD_MODEL` | Override model identifier |
+| `DD_API_KEY` | Override API key |
+| `DD_WIRE_ATTEMPTS` | Maximum sends per inference call |
+| `DD_WIRE_BUDGET_MS` | Maximum wall-clock retry budget |
+| `DD_MAX_TURNS` | Override maximum agent turns |
+| `DD_TAPE_LOG` | Enable context-tape accounting |
+| `DD_FAST_LAYER` | Override fast-layer threshold for rebase testing |
+| `DD_NO_SOAK=1` | Disable memory writes while retaining recall |
 | `DD_TUI_MOUSE=0` | Leave mouse input to the terminal |
 
-Configuration is resolved from the selected home and its `config.yaml`; see `examples/ariadne/config.yaml` for the shipped reference.
+The default retry configuration uses a bounded retry ladder for retryable failures, including rate limiting and temporary upstream errors.
 
-### Thinking: what a request tells the model
+The transport respects longer upstream `Retry-After` instructions within its configured budget.
 
-Two transports, two vocabularies. The harness never guesses what a model's dialect is: an OpenAI-shaped request carries one field, the harness's own engine calls can carry a cap, and the chat template compiled into the server has the last word on both. The default names no cap at all — `agent.thinking_budget` is 0 from the header up (`include/dd/context/endpoint.hpp:77` holds `int thinking_budget = 0`) and a config that omits the key is left uncapped by the loader (`src/dd_tui.cpp:1163` reads `cfg.has("agent.thinking_budget")`), which is what the shipped reference does as well.
+Already-delivered streaming output is not blindly replayed.
 
-| Request state | What is sent | What it does |
-|---|---|---|
-| `agent.reasoning_effort` empty or absent | nothing | the template's own default answers, and no cap is named either |
-| `agent.reasoning_effort: off` (`none`, `false`, `disabled`) | `reasoning_effort: "none"` | thinking off; llama-server and Strata both read that spelling, and no cap is named |
-| `agent.reasoning_effort: low` … `ultra` | `reasoning_effort: <level>` | the level's meaning is the template's; on the harness's own engine the cap below also applies |
-| `agent.thinking_budget: N > 0` | `reasoning_budget_tokens: N` plus an instruction message, on engine calls only | caps one thinking field; a `/v1` upstream never sees it |
-| `agent.thinking_budget: 0` — the default | nothing | no cap: the template decides the thinking length |
+---
 
-- A request that asked for no level sends no thinking field at all: `HttpLLM` sets `reasoning_effort` only when the effort callback returns a non-empty string (`src/agent/http_llm.cpp:260`), and `off` itself goes out as the string `"none"`, which llama-server and Strata read as thinking disabled (`src/dd_tui.cpp:113`). The ladder `/effort` and `/reasoning` walk is `off low medium high xhigh max ultra` (`src/dd_tui.cpp:115`).
-- A request offers only what this model implements: `Endpoint::efforts()` returns the levels the chat template the server reported actually has (`src/context/endpoint.cpp:184`), and a level above that ceiling steps down through the `offered` check (`src/dd_tui.cpp:1173` uses `efforts` and `kEfforts`) until the boot note names the level that is running.
-- A cap is never named for a request that did not choose a level — the shape callback is gated on `effort > 0` (`src/dd_tui.cpp:1347` calls `ep.shape` with `effort.load(...) > 0`), so neither no-preference nor `off` invites the model to think. Where a cap is named, `Endpoint::shape` writes `reasoning_budget_tokens` on engine calls (`src/context/endpoint.cpp:179`) and returns early for a remote API, which gets the OpenAI fields only (`src/context/endpoint.cpp:173-174`).
+## 11. Verification and engineering discipline
 
-### One model, many providers: what a request says about which one answers
+Ariadne distinguishes code that exists in the repository from code that actually participates in a shipped execution path.
 
-A model's id is not a server. A `/v1` upstream serves one model through several providers, same weights behind different servers and different quantizations, and the name a request carries cannot say which one answers. On that API the provider is a request field: `provider.only` names one, spelled as that endpoint's own model list spells it, and `provider.allow_fallbacks: false` refuses a substitute, which makes a provider other than the one asked for an error rather than a silent swap.
+This distinction matters.
 
-  The transport does not invent a grammar for that shape. What the operator writes under `model.extra` is merged into the request body before the fields the harness decides (`src/agent/http_llm.cpp:252` walks `extra.obj` first and every later `obj_set` wins the key), so `extra` can add a name this client has none of and cannot replace a `model`, a `messages` or a `stream` we chose.
+A compiled translation unit, a tested component, and a feature available through a product binary are three different things.
 
-| Request state | On the wire | What it does |
-|---|---|---|
-| no `model.extra` | nothing beyond our own fields | whoever the upstream picks answers, and the response names who did |
-| `model.extra.provider.only: [baidu/fp8]` | `{"provider":{"only":["baidu/fp8"]}}` | that provider answers; the response's `provider` field is the proof, not our inference |
-| `model.extra.provider.allow_fallbacks: false` | `false`, not a dropped key | a provider other than the one asked for is an error |
-
-- `model.extra` has no default: `src/dd_tui.cpp:1335` copies it into `HttpLLM::extra` (`include/dd/agent/http_llm.hpp`) and an unset key sends nothing, which is how a local `llama-server` stays untouched by a field it has never seen.
-- The contract is checked on the bytes `HttpLLM::body` builds, not on an upstream's answer: `tests/agent_wire_retry_test.cpp` asserts the merged provider object reaches the wire and that an `extra` key named `model` loses to the model we chose.
-- `provider` is the one shape this key exists for today, not a second vocabulary; the key is one word for any field a `/v1` endpoint reads and this client has none of, and today only provider routing needs it. Today: a `base_url` that is a real provider's `/v1` is the only setup that can use it.
-
-## Measurements, not mythology
-
-The project favors repeatable checks over adjectives. The supplied README and test descriptions record the following measurements in their specific environments:
-
-| Experiment | Recorded result |
-|---|---:|
-| Context tape | 88% prompt-token reuse across 11 calls / 3 turns |
-| Prewarmed rebase | 99.1% reuse on the first call of the next epoch |
-| Tool-output envelope | 12,944 prompt tokens per call avoided in a 1,009,800-byte grep-result experiment |
-| `edit_file` tool | −22,277 net tokens on a two-place edit of a 129-line file |
-| TUI event hand-off | 0 allocations across a 200-delta turn, vs. 214 in the replaced queue path |
-| Knowledge tokenizer | 33 → 80 MB/s on the recorded Ryzen 7 3800X setup |
-| Local skill search | 2–5 µs in the recorded catalogue setup |
-| Index build | 3.7k curated memory cards: 80 → 20 ms; 467 skills: 112 → 40 ms |
-
-These numbers are not benchmark promises. They are hypotheses with provenance: machine, model, configuration, input, and test path matter. Reproduce them before comparing them.
-
-## Verification
+Run:
 
 ```bash
 make test
 make doc-audit
 ```
 
-The test target runs every registered test binary, continues after individual failures, and fails at the end if any test failed. The documentation audit derives the wiring list and document anchors from the tree rather than trusting a manually maintained list.
+The test target executes the registered test binaries and reports failures across the suite.
 
-Useful focused checks mentioned in the project:
+The documentation audit derives implementation wiring and document anchors from the source tree.
 
-```bash
-make build/dd_sink_handback_probe
-build/dd_sink_handback_probe <skills-root> learned <name>
-```
+Additional focused checks and measurement experiments are available in:
 
-For a live prompt-cache or edit-tool experiment, see `bench/` and `DD_TAPE_LOG`. Test coverage and a successful local smoke run do not imply production hardening or isolation.
+- `tests/`
+- `bench/`
+- `docs/`
 
-## Repository map
+For context-prefix and prompt-cache experiments, inspect `DD_TAPE_LOG` and the benchmark material.
+
+A successful unit test or local smoke run does not imply production hardening.
+
+---
+
+## 12. Repository structure
 
 ```text
 .
 ├── src/
-│   ├── agent/       # Agent run loop, wire, execution and context integration
-│   ├── context/     # Context engine, tape, epochs and rebase behavior
-│   ├── tools/       # Filesystem, terminal, MCP and tool helpers
-│   ├── know/        # Knowledge router, catalogues and ranking
+│   ├── agent/       # Agent execution, inference transport
+│   ├── context/     # Context engine, tape, epochs, rebase
+│   ├── tools/       # Filesystem, terminal, MCP
+│   ├── know/        # Knowledge routing and ranking
 │   ├── learn/       # Learning journal and skill lifecycle
-│   ├── core/        # Paths, YAML, JSON, config, home resolution, lock-free hand-off
-│   ├── net/         # HTTP transport
+│   ├── core/        # Configuration, JSON, YAML, atomic primitives
+│   ├── net/         # HTTP infrastructure
 │   ├── skills/      # Skill scanning and registry
 │   ├── cron/        # Scheduling
-│   ├── gateway/     # Platform registry, pairing, sticker cache
-│   └── ui.cpp ui_simd.cpp ui_grammar.cpp   # the renderer: widgets, scene, canvas, frame diff, grammar
-├── include/dd/      # Public/internal C++ headers
+│   ├── gateway/     # Pairing, devices, gateway services
+│   └── ui*.cpp      # Terminal rendering and SIMD kernels
+│
+├── include/dd/      # C++ headers
 ├── tests/           # Test suites
-├── bench/            # Focused measurement scripts and corpora
-├── docs/             # Architecture and behavior notes
-├── examples/         # Reference configuration
-├── installer/        # Standalone native installer
-├── mk/               # Makefile target fragments
-└── build/            # Build outputs
+├── bench/           # Measurements and benchmark material
+├── docs/            # Architecture and behavior documentation
+├── examples/        # Reference configurations
+├── installer/       # Native installer
+├── mk/              # Makefile target fragments
+└── build/           # Build outputs
 ```
 
-The source tree is larger than the currently wired product surface. The documentation audit distinguishes code that is ported and tested from code that actually reaches a product binary. That distinction is intentional: **present in the repository** does not mean **present in the execution path**.
+The repository contains more ported code than is currently wired into product binaries.
 
-## Known boundaries
-
-- The AVX-512 kernels compile but have not been verified on AVX-512 hardware in the recorded environment.
-- The shell tool is guarded, not jailed.
-- Some ported translation units and headers are not wired into product binaries by design; use `make doc-audit` for the current measured list.
-- Live measurements depend on the endpoint, model, machine, corpus, and configuration.
-- The harness speaks to an OpenAI-compatible endpoint. It can also spawn and front its own engine (`--limbo`, the `dd::limbo` level), but that engine's weights and its build are not in this repository.
-
-## Direction of travel
-
-The stable floor is a working native harness. The frontier is the work that can now evolve without replacing that floor:
-
-- Wire the next ported capabilities only when there is a concrete execution path and a test.
-- Make tool and context costs observable before optimizing them.
-- Keep the inference backend replaceable.
-- Keep long-term memory outside the volatile prompt window.
-- Make changes locally measurable, reversible, and attributable.
-- Let the architecture evolve without allowing documentation to outrun the implementation.
-
-```mermaid
-flowchart LR
-    BASE["Working C++20 baseline"] --> OBS["Observe real bottleneck"]
-    OBS --> HYP["State a falsifiable hypothesis"]
-    HYP --> CHANGE["Change one architectural variable"]
-    CHANGE --> TEST["Run focused tests"]
-    TEST --> MEASURE["Measure against baseline"]
-    MEASURE --> DECIDE{"Evidence supports it?"}
-    DECIDE -- Yes --> INTEGRATE["Integrate + document"]
-    DECIDE -- No --> REVERT["Reject or revise"]
-    INTEGRATE --> OBS
-    REVERT --> OBS
-```
-
-## Philosophy
-
-**Do not worship the frontier. Instrument it.**
-
-A benchmark is a question, not a verdict. A transcript is a representation, not a mind. A ported file is not a feature until the execution path reaches it. A retry is not safe just because the request failed. A tool is not sandboxed because its command string was inspected. A context window is not memory because it is large.
-
-The objective is not to make the README sound futuristic. It is to build systems whose behavior can be inspected, measured, and changed without losing control of the whole.
+Use `make doc-audit` to distinguish implemented and tested components from the active product surface.
 
 ---
 
-<sub>Ariadne · Native C++20 agent harness · Experimental systems engineering at the edge of what one person can reasonably hold in their head.</sub>
+## 13. Current boundaries
+
+Ariadne is an evolving systems project. Its limitations should be as visible as its capabilities.
+
+- AVX-512 kernels compile but have not been verified on AVX-512 hardware in the recorded environment.
+- The terminal tool is not a sandbox.
+- Some ported components are not connected to product binaries.
+- Performance depends on the inference backend, model, hardware, and workload.
+- The harness primarily targets OpenAI-compatible inference endpoints.
+- Its optional Limbo engine integration does not include model weights or an engine build in this repository.
+
+These are engineering boundaries, not footnotes to be hidden.
+
+---
+
+## 14. Where Ariadne goes next
+
+The objective is not to accumulate features indefinitely.
+
+It is to improve the execution substrate without compromising its invariants.
+
+The development direction follows a continuous loop:
+
+```mermaid
+flowchart TD
+    BASE["Working native baseline"]
+    BASE --> OBS["Observe actual bottlenecks"]
+    OBS --> HYP["Form a falsifiable hypothesis"]
+    HYP --> CHANGE["Change one architectural variable"]
+    CHANGE --> TEST["Run focused verification"]
+    TEST --> MEASURE["Measure against baseline"]
+    MEASURE --> DECIDE{"Evidence supports it?"}
+
+    DECIDE -->|Yes| INTEGRATE["Integrate and document"]
+    DECIDE -->|No| REVISE["Reject or revise"]
+
+    INTEGRATE --> OBS
+    REVISE --> OBS
+```
+
+The priorities are:
+
+- Expand the native execution surface only when a concrete execution path and test exist.
+- Make inference, context, memory, and tool costs observable.
+- Preserve replaceable inference backends.
+- Keep long-term knowledge outside the volatile prompt window.
+- Improve retrieval without indiscriminately increasing prompt size.
+- Keep concurrency explicit and measurable.
+- Make changes reversible and attributable.
+- Ensure documentation never outruns implementation.
+
+The architecture should evolve without requiring the entire system to be rebuilt around each new idea.
+
+---
+
+## Philosophy
+
+> **Do not worship the frontier. Instrument it.**
+
+A transcript is a representation, not a mind.
+
+A context window is working capacity, not persistent memory.
+
+A tool is not sandboxed because its command was inspected.
+
+A retry is not safe merely because a request failed.
+
+A ported file is not a feature until the execution path reaches it.
+
+A benchmark is a question, not a verdict.
+
+Ariadne is built around these distinctions.
+
+The ambition is to make increasingly capable agents operate on increasingly sophisticated infrastructure without surrendering control over the machinery that makes them work.
+
+Not another wrapper around a wrapper.
+
+Not another framework that hides its own execution.
+
+**A native agent system whose behavior can be inspected, measured, and evolved.**
+
+---
+
+<p align="center">
+  <strong>ARIADNE</strong>
+  <br>
+  Native C++20 Agent Harness
+  <br><br>
+  <em>Build the substrate. Measure the frontier. Keep the system understandable.</em>
+</p>
