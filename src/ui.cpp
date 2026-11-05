@@ -1182,8 +1182,8 @@ size_t highlight_code(const std::string& row, size_t start, const Theme& th, std
                 const size_t np = pos + p.size();
                 if (np < row.size() && (row[np] == '!' || row[np] == ' ' || row[np] == '\t')) {
                     push(pos, row.size(), Style{cmt});           // shebang, or a bare directive line
-                    handled = true;
-                    break;
+                    return row.size();   // the line ends here; `handled` alone left pos unmoved and the
+                                         // loop matched the same word again — 2^28 spans from one row
                 }
                 if (np < row.size() && ascii_letter(row[np])) {   // #include, #define, #pragma
                     size_t e = np;

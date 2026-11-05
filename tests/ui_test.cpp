@@ -1672,6 +1672,25 @@ int main() {
         chk(ctx.carry.empty(), "a fence row ends a block the last one left open");
     }
 
+    {   // A preprocessor word in prose must not loop: the directive rule once matched "include" in
+        // "SPIRV-Headers include off the imported target", pushed the whole line, and went on
+        // matching it at the SAME position — 2^28 spans out of a 72-character row, and the vector's
+        // doubling took the box down. A directive line is one push, then the row is done.
+        const Theme th;
+        const GrammarSet shipped = GrammarSet::load({"skills"});
+        CodeCtx ctx;
+        ctx.set = &shipped;
+        ctx.fence = true;
+        highlight_row("```cpp", th, ctx);
+        const auto spans = highlight_row("0beb5b84b vulkan: take the SPIRV-Headers include off the imported target", th, ctx);
+        chk(!spans.empty() && spans.size() < 64,
+            "a directive word in prose colours once and the row ends (was: 2^28 spans from 72 chars)");
+        const bool done = std::any_of(spans.begin(), spans.end(), [](const Span& s) {
+            return s.text.find("imported target") != std::string::npos;
+        });
+        chk(done, "the row past the directive word is still on the card");
+    }
+
     if (g_fail) std::printf("%d FAILED\n", g_fail);
     else std::printf("ui: all passed (best kernels: %s)\n", best.c_str());
     return g_fail ? 1 : 0;
