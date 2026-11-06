@@ -107,6 +107,11 @@ $(BUILD)/dd_home_tests: $(CORE) $(COREHOME) $(HOMEINIT) include/dd/core/home.hpp
 $(BUILD)/dd_snap_cell_tests: include/dd/core/snap_cell.hpp tests/core_snap_cell_test.cpp
 	$(CXX) $(CXXFLAGS) tests/core_snap_cell_test.cpp -pthread -o $(BUILD)/dd_snap_cell_tests
 
+# The wire invariant a chat template may insist on (one system message, at index 0): pure model
+# code, so the test links the message TU and nothing else.
+$(BUILD)/dd_wire_messages_tests: $(CORE) include/dd/core/message.hpp tests/core_wire_messages_test.cpp
+	$(CXX) $(CXXFLAGS) $(CORE) tests/core_wire_messages_test.cpp -o $(BUILD)/dd_wire_messages_tests
+
 $(BUILD)/dd_park_tests: include/dd/core/park.hpp tests/core_park_test.cpp
 	$(CXX) $(CXXFLAGS) tests/core_park_test.cpp -pthread -o $(BUILD)/dd_park_tests
 
@@ -564,7 +569,8 @@ TEST_BINS := $(BUILD)/dd_tests \
   $(BUILD)/dd_state_scrub_tests \
   $(BUILD)/dd_state_sql_tests \
   $(BUILD)/dd_turn_context_tests \
-  $(BUILD)/dd_usage_pricing_tests
+  $(BUILD)/dd_usage_pricing_tests \
+  $(BUILD)/dd_wire_messages_tests
 
 # The race-detector list is a variable, not a hardcoded target: a level added by an mk fragment
 # adds its own racing binaries here, and `make tsan` runs whatever the tree actually contains.

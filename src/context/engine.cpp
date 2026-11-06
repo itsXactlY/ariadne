@@ -658,7 +658,12 @@ std::vector<ItemPtr> TapeEngine::retrieval_base(const std::vector<ItemPtr>& item
     base.push_back(anchor);
     if (restate_plan) {
         auto p = std::make_shared<Item>();
-        p->msg.role = "system";
+        // A user item, not a system one. Qwen3.5's chat template raises "System message must be
+        // at the beginning." for any system role that is not messages[0], and llama-server turns
+        // that into HTTP 500 for the whole turn (measured against 8080, 2026-11-06). The ledger
+        // labels itself, so its meaning does not depend on the role; `hidden` keeps it out of
+        // current_user() and out of the screen either way.
+        p->msg.role = "user";
         p->msg.content = "[Your active task list, revision " + std::to_string(plan_rev) +
                          " -- the current list. A higher revision number wins; items not listed here are "
                          "done or dropped.]\n" + plan_body(plan);
@@ -755,7 +760,7 @@ bool TapeEngine::take_ephemeral(const std::string& prompt) {
         if (plan_on_tape_.empty()) return true;   // nothing was on the wire: nothing to retire
         ++plan_rev_;
         Message m;
-        m.role = "system";
+        m.role = "user";   // never a system role past index 0: the template refuses it (see above)
         m.content = "[Your active task list, revision " + std::to_string(plan_rev_) +
                     " -- nothing open: every item is done or dropped.]";
         plan_item_ = session_->append(std::move(m), true);
@@ -788,7 +793,7 @@ bool TapeEngine::take_ephemeral(const std::string& prompt) {
     // finished is shorter than the note about what left it, so restating it is the cheaper word.
     if (!delta.empty() && delta.size() >= body.size()) delta.clear();
     Message m;
-    m.role = "system";
+    m.role = "user";   // never a system role past index 0: the template refuses it (see restate above)
     // The label is the whole cost of a revision, so it is short and never claims more than it
     // knows: a higher number wins, and only the anchor states the list.
     if (anchor || delta.empty()) {

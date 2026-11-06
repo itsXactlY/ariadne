@@ -242,7 +242,7 @@ static int plan_breaks(bool engine_takes, int* calls_out, int* late_system, int*
     // how many ledger items the session itself holds: the tape appends one per state, the
     // per-call tail appends none
     for (const auto& it : eng.session().items())
-        if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos)
+        if (it->msg.content.find("active task list") != std::string::npos)
             ++*ledger_items;
     *calls_out = static_cast<int>(script.requests.size());
     return breaks;
@@ -253,7 +253,11 @@ int main() {
     {   // the plan rides no tail: every request extends the last, before it every one broke
         int calls = 0, late = 0, carried = 0, items = 0;
         const int before = plan_breaks(false, &calls, &late, &carried, &items);
-        chk(calls == 6 && before == calls - 1 && late == calls && carried == calls && items == 0,
+        // The per-call plan is a user turn now, so it never counts as a late SYSTEM message:
+        // a system role past index 0 is refused by the template (Qwen3.5 500) — late == 0 is
+        // the wire invariant, not a regression. The appended user turn still breaks the cache
+        // prefix once per call (the cost that taking the plan onto the tape removes).
+        chk(calls == 6 && before == calls - 1 && late == 0 && carried == calls && items == 0,
             "plan behind the payload: every call breaks the prefix (" + std::to_string(before) + " of " + std::to_string(calls) + ")");
         const int after = plan_breaks(true, &calls, &late, &carried, &items);
         chk(after == 0 && carried == calls && items == 1,
@@ -432,7 +436,7 @@ int main() {
         eng.take_ephemeral(old_hdr + "- [>] b. run (in_progress)");   // unchanged: no third item
         std::vector<std::string> plans;
         for (const auto& it : eng.session().items())
-            if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);
+            if (it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);  // plan items are user-role on the tape (see the ledger: role is not the name)
         chk(plans.size() == 2, "one tape item per ledger state, none for an unchanged one (" + std::to_string(plans.size()) + ")");
         chk(plans.size() == 2 && plans[0].find("revision 1 ") != std::string::npos && plans[1].find("revision 2 ") != std::string::npos,
             "each ledger state is numbered in order");
@@ -475,7 +479,7 @@ int main() {
         eng.take_ephemeral(hdr + "- [>] 3. prove the injected plan rides every call exactly once (in_progress)\n" + four + five);
         std::vector<std::string> plans;
         for (const auto& it : eng.session().items())
-            if (it->msg.role == "system" && it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);
+            if (it->msg.content.find("active task list") != std::string::npos) plans.push_back(it->msg.content);  // plan items are user-role on the tape (see the ledger: role is not the name)
         chk(plans.size() == 3, "one tape item per ledger state (" + std::to_string(plans.size()) + ")");
         chk(plans.size() == 3 && plans[0].find("- [>] 1. read the tape") != std::string::npos &&
             plans[0].find(five) != std::string::npos, "revision 1 is the anchor: the whole list, once");

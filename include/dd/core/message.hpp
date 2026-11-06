@@ -9,6 +9,7 @@
 
 #include <string>
 #include <vector>
+#include <cstddef>
 #include <dd/core/json.hpp>
 
 namespace dd {
@@ -37,6 +38,19 @@ Json message_to_json(const Message& m);
 
 // Parse a wire message (dict form) back into the model.
 Message message_from_json(const Json& j);
+
+// THE WIRE INVARIANT: exactly one system message, and it is index 0.
+//
+// A chat template is free to refuse anything else, and some do: Qwen3.5's raises "System message
+// must be at the beginning." for any system role past the first (tokenizer.chat_template line 83),
+// which llama-server reports as HTTP 500 — the whole turn is lost. The harness has a legitimate
+// use for system-role text mid-conversation (plan revisions, compression notices) and those are
+// authored as hidden user items now, but a rule held only by convention is one refactor away from
+// returning. So the payload is normalized here, on the way to the wire: every system message's
+// content is merged, in order, into a single head message; if the list had none, the merged text
+// becomes the head. Returns how many messages were merged away (0 = the list was already valid,
+// which is the normal case and costs one scan).
+std::size_t collapse_system_messages(std::vector<Message>& msgs);
 
 }  // namespace core
 }  // namespace dd

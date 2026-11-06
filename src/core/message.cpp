@@ -2,6 +2,9 @@
 #include "dd/core/message.hpp"
 #include "dd/core/json.hpp"
 
+#include <cstddef>
+#include <utility>
+
 namespace dd {
 namespace core {
 
@@ -66,6 +69,40 @@ Message message_from_json(const Json& j) {
         }
     }
     return m;
+}
+
+std::size_t collapse_system_messages(std::vector<Message>& msgs) {
+    // Already the shape every template accepts: one system message, in front. The common case,
+    // and it must not disturb a byte — the prefix the server has cached is this list.
+    std::size_t systems = 0;
+    bool        head_is_system = false;
+    for (std::size_t i = 0; i < msgs.size(); ++i) {
+        if (msgs[i].role != "system") continue;
+        ++systems;
+        if (i == 0) head_is_system = true;
+    }
+    if (systems == 0) return 0;
+    if (systems == 1 && head_is_system) return 0;
+
+    std::string merged;
+    for (const Message& m : msgs) {
+        if (m.role != "system") continue;
+        if (!merged.empty() && !m.content.empty()) merged += "\n\n";
+        merged += m.content;
+    }
+    std::size_t removed = 0;
+    std::vector<Message> out;
+    out.reserve(msgs.size());
+    for (Message& m : msgs) {
+        if (m.role != "system") { out.push_back(std::move(m)); continue; }
+        ++removed;
+    }
+    Message head;
+    head.role = "system";
+    head.content = std::move(merged);
+    out.insert(out.begin(), std::move(head));
+    msgs = std::move(out);
+    return removed;
 }
 
 }  // namespace core

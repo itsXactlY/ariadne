@@ -375,8 +375,16 @@ Json HttpLLM::body(const std::vector<core::Message>& messages, const Json& tools
     if (extra.type == Json::Obj)
         for (const auto& [k, v] : extra.obj) core::obj_set(b, k, *v);
     core::obj_set(b, "model", core::json_str(model));
+
+    // Exactly one system message, at index 0 — the shape a chat template may insist on (Qwen3.5
+    // raises "System message must be at the beginning." otherwise, and llama-server turns that
+    // into HTTP 500 for the whole turn). core::collapse_system_messages holds the rule and its
+    // test; every emitter already writes the mid-conversation side channel as a hidden user item,
+    // so this costs one scan over an already-valid list.
+    std::vector<core::Message> wire = messages;
+    core::collapse_system_messages(wire);
     Json msgs = core::json_arr();
-    for (const auto& m : messages) core::arr_push(msgs, wire_message(m));
+    for (const auto& m : wire) core::arr_push(msgs, wire_message(m));
     core::obj_set(b, "messages", msgs);
     if (tools.type == Json::Arr && !tools.arr.empty()) core::obj_set(b, "tools", tools);
     if (effort)

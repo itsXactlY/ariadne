@@ -224,7 +224,10 @@ void attach_ephemeral(std::vector<core::Message>& payload, const std::string& pr
                       bool under_tape, bool standing_system) {
     if (prompt.empty()) return;
     core::Message ep;
-    ep.role = "system";
+    // A user turn, not a second system message: a template may require the system role to be
+    // messages[0] (Qwen3.5 raises "System message must be at the beginning." otherwise, and the
+    // server answers 500), and this block is an instruction, not the standing prompt.
+    ep.role = "user";
     ep.content = prompt;
     if (under_tape) payload.push_back(ep);
     else payload.insert(payload.begin() + (standing_system ? 1 : 0), ep);
