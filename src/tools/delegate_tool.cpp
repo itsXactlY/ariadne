@@ -226,7 +226,12 @@ Json run_one_child(int task_index, const std::string& goal, const std::string& c
         llm.retry_budget_ms = deps.transport->retry_budget_ms;
         llm.retry_after_cap_ms = deps.transport->retry_after_cap_ms;
         llm.retry_after_total_ms = deps.transport->retry_after_total_ms;
-        llm.on_wait = deps.transport->on_wait;
+        // NOT on_wait: the parent's closure captures the TUI's scene by reference,
+        // and a child runs on a worker thread — three children waiting on their wire
+        // (a 429, a stall, a backoff) would mutate the parent's scene concurrently
+        // and shred the heap; the next std::thread spawn then dies reading freed
+        // state (the parallel-batch segv of 2026-11-06). A child is quiet_mode:
+        // its waits are internal, they paint nothing.
     }
     llm.cancel = interrupt::current();   // the parent's Esc kills the child's wire call too
     llm.on_stats = [&prompt_tokens, &completion_tokens](const agent::CallStats& s) {
@@ -433,7 +438,8 @@ std::function<std::string(const Json&)> make_delegate_tool(const DelegateToolDep
             for (size_t i = 0; i < tasks.size(); ++i)
                 workers.emplace_back([&, i] {
                     results[i] = run_one_child(static_cast<int>(i), tasks[i].goal, tasks[i].context,
-                                               child_depth, max_iterations, deps, wanted, assigned[i]);
+                                               child_depth, max_iterations, deps, wanted,
+                                               assigned.empty() ? nullptr : assigned[i]);
                 });
             for (auto& t : workers) t.join();
         }

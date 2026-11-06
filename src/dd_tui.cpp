@@ -320,7 +320,32 @@ void leave() {   // async-signal-safe
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig);
 }
 
-void on_fatal(int sig) {
+// write(2) only — a handler here may call nothing else. It exists because the
+// re-raise below re-delivers the signal as SI_TKILL, and a core dumped on THAT
+// delivery carries the pid/uid union in place of the faulting address (what cost
+// the 2026-11-06 delegate-segv triage its si_addr). Name the fault first.
+void on_fatal(int sig, siginfo_t* si, void*) {
+    char buf[96];
+    size_t n = 0;
+    for (const char* h = "fatal signal "; *h && n < sizeof buf; ++h) buf[n++] = *h++;
+    if (sig >= 10) buf[n++] = static_cast<char>('0' + sig / 10);
+    buf[n++] = static_cast<char>('0' + sig % 10);
+    for (const char* h = " code "; *h && n < sizeof buf; ++h) buf[n++] = *h++;
+    const int c = si ? si->si_code : 0;
+    if (c < 0) { buf[n++] = '-'; }
+    {   // |si_code| as decimal, worst case three digits
+        int v = c < 0 ? -c : c; char d[8]; int k = 0;
+        do { d[k++] = static_cast<char>('0' + v % 10); v /= 10; } while (v && k < 8);
+        while (k && n < sizeof buf) buf[n++] = d[--k];
+    }
+    for (const char* h = " at 0x"; *h && n < sizeof buf; ++h) buf[n++] = *h++;
+    const unsigned long long a = static_cast<unsigned long long>(reinterpret_cast<unsigned long long>(si ? si->si_addr : nullptr));
+    for (int sh = 60; sh >= 0 && n < sizeof buf; sh -= 4)
+        buf[n++] = "0123456789abcdef"[(a >> sh) & 0xF];
+    buf[n < sizeof buf ? n : sizeof buf - 1] = '\n';
+    n = n < sizeof buf - 1 ? n + 1 : sizeof buf - 1;
+    const ssize_t wr = ::write(STDERR_FILENO, buf, n);
+    (void) wr;
     leave();
     std::signal(sig, SIG_DFL);
     std::raise(sig);
@@ -336,7 +361,10 @@ bool enter(bool mouse) {
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return false;
     g_active = true;
-    for (int s : {SIGQUIT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE}) std::signal(s, on_fatal);   // INT/TERM/HUP: on_term, see main
+    struct sigaction fatal{};   // SA_SIGINFO: on_fatal reads si_code/si_addr before the re-raise
+    fatal.sa_sigaction = on_fatal;
+    fatal.sa_flags = SA_SIGINFO;
+    for (int s : {SIGQUIT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE}) sigaction(s, &fatal, nullptr);   // INT/TERM/HUP: on_term, see main
     put(kEnter, sizeof kEnter - 1);
     if (mouse) put(kMouseOn, sizeof kMouseOn - 1);
     return true;
