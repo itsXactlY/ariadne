@@ -73,6 +73,10 @@ This is not a concept deck. The following paths are implemented in the supplied 
 - **Native agent binary:** `build/ariadne-agent` runs the ported agent loop against a live OpenAI-compatible endpoint.
 - **Real tool effects:** `read_file`, `write_file`, and `list_dir` operate on the filesystem; `run_terminal` executes child processes with a denylist guard.
 - **One run loop:** the interactive TUI and headless entrypoint drive the same `Agent::run` implementation.
+- **Sub-agents:** `delegate_task` runs focused tasks in fresh child agent loops — each with its own
+  transcript, todo ledger and tool registry, inheriting only the parent's wire, ToolGate and shell
+  denylist — capped at 3 concurrent children and 2 levels deep, every child reported back as a
+  structured result (`include/dd/tools/delegate_tool.hpp:36-38`, `src/tools/delegate_tool.cpp:1`).
 - **The model knows the contract.** One composed system prompt (`PromptComposer`): the
   **workflow contract** (`PromptComposer::workflow_contract` in `src/know/prompt.cpp:46`,
   toggled by `agent.contract` at `src/dd_tui.cpp:1378-1379`) — a plan before multi-step work,
@@ -216,6 +220,50 @@ The README's recorded measurement for a 200-delta turn is zero hand-off allocati
 
 The implementation uses fixed-slot rings, atomic ownership publication, producer-owned stream buffers, and snapshots. Ring overflow is counted; live-byte loss is counted; interruption is shared through an atomic flag that also aborts an in-flight libcurl call.
 
+## Sub-agents: fresh loops, one wire each
+
+`delegate_task` runs a focused task in a child agent loop instead of in the parent's context. The
+tool is the parent side of the Python harness's `delegate_task`, ported to `src/tools/delegate_tool.cpp`
+and wired into the main registry at `src/dd_tui.cpp:1305-1323`; the child is not a port — it *is*
+the ported `Agent::run`, executing on a fresh agent.
+
+- **Shape.** One child: `delegate_task(goal, context?, toolsets?, max_iterations?)`. A concurrent
+  batch: `tasks=[{goal, context?, toolsets?}, ...]`, capped at 3 children (`include/dd/tools/delegate_tool.hpp:36`).
+  The iteration cap defaults to 50 (`include/dd/tools/delegate_tool.hpp:38`).
+- **Inheritance is explicit and short.** A child takes exactly three things from its parent: the
+  wire config (copied field by field into its own transport), the shell denylist — including the
+  config's `command_denylist` extension (`src/dd_tui.cpp:1316-1318`) — and the parent's ToolGate
+  (`src/tools/delegate_tool.cpp:253`), so a device paired without local tools cannot reach them
+  through a child and a child's terminal runs under the same guarded, not-jailed shell.
+- **Everything else is the child's own.** Transcript, tool registry (the file and terminal sets,
+  filtered by the requested `toolsets`, `src/tools/delegate_tool.cpp:53-110`) and todo ledger; the
+  child does not see the parent's plan and does not write the parent's ephemeral prompt. Its system
+  prompt is the focused `delegate_child_prompt` (`src/tools/delegate_tool.cpp:284`), not the parent's
+  composed one.
+- **Depth bounds the tree.** A child gets `delegate_task` only while one hop remains under the
+  ceiling of 2 (`src/tools/delegate_tool.cpp:168-174`, `include/dd/agent/agent.hpp:112-115`) —
+  delegation ends two levels deep, not wherever recursion stalls.
+- **A child never touches the parent's UI.** The parent transport's `on_wait` closure captures the
+  TUI scene by reference; three children backing off on their wire from worker threads would mutate
+  that scene concurrently and shred the heap — the parallel-batch segfault of 2026-11-06. The child's
+  transport is built with `on_wait` deliberately unset and `quiet_mode` set: a child's waits are
+  internal and paint nothing (`src/tools/delegate_tool.cpp:229-234`).
+- **Transports are assigned before threads start.** The per-child transport (a copy, or one fresh
+  client per child from `llm_factory`) is handed out on the handler's thread before any worker is
+  spawned (`src/tools/delegate_tool.cpp:422-428`) — a thread-unsafe factory cannot be raced by this
+  tool; the workers only run and join (`src/tools/delegate_tool.cpp:436-444`). The single-task branch
+  guarded the empty-transport vector while the batch branch read it unconditionally; both now use the
+  same guard (`src/tools/delegate_tool.cpp:434`, `src/tools/delegate_tool.cpp:442`), pinned by
+  `tests/delegate_batch_race_test.cpp`.
+
+Interruption is shared, state is not: the parent's Esc is wired into the child's wire call
+(`src/tools/delegate_tool.cpp:236`), and an interrupted child reports `interrupted` rather than an
+error. The tool never throws — every failure becomes a result entry (`include/dd/tools/delegate_tool.hpp:61-63`)
+— and the parent's model reads back one JSON document, `results[{task_index,status,summary,api_calls,
+duration_seconds,exit_reason,tokens}]` plus `total_duration_seconds` (`src/tools/delegate_tool.cpp:188-198`,
+`src/tools/delegate_tool.cpp:448-452`). A summary is all the parent keeps; the child's transcript is
+discarded with the child.
+
 ## The terminal is a renderer, not a repaint loop
 
 The TUI uses a cell canvas and a frame diff. It owns a fixed layout, cards for messages and tool activity, live reasoning/answer streams, and explicit accounting for truncation and performance. Unchanged frames write nothing.
@@ -274,8 +322,9 @@ A tool-enabled agent is a system with side effects. The boundary needs to be exp
 | Retries | A refused connect, a socket cut before the response line, and the states that mean "come back" (408, 429, 500, 502, 503, 504) are re-sent while nothing has been handed out; 400/401/501/505 are verdicts and are not, nor is an interrupted call. A 429 climbs the rate ladder — three quick re-sends (250 ms, 500 ms, 1 s), then 1 s, 5 s, 15 s, 30 s, 1 min, the last rung repeating — and a server's own `Retry-After` wins over the rung whenever it is longer; a wait past the retry budget is refused with the number in the error. A reader that stops mid-stream counts as `completed` (`include/dd/agent/retry.hpp:55`) — an answer the caller already holds is never re-sent |
 | Tool output | Bounded at production, with omitted bytes/lines accounted for |
 | Paths | Filesystem tools reject `..` path components |
-| Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
-| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
+|| Gateway commands | Identity before shape: `status`/`health` answer anyone, a session handshake authenticates through its own proof, and every other command reaches a device check before the body is read (`src/gateway/device_gateway.cpp:176`) — a caller outside the boundary gets `Unauthorized`, never the shape of the protocol. A handshake nonce is answered once: the replay set records it the moment the first answer goes out (`src/gateway/device_gateway.cpp:129-139`), so a captured handshake is refused as `replay` rather than minting a second session |
+|| Delegation | A `delegate_task` child inherits the parent's ToolGate and shell denylist (`src/tools/delegate_tool.cpp:253`, `src/dd_tui.cpp:1316-1318`) and nothing wider: it cannot register tools the parent's scope refuses, and the depth cap of 2 (`include/dd/tools/delegate_tool.hpp:37`) bounds any tree of children. The terminal a child runs is the same guarded, **not-a-sandbox** shell the parent has |
+|| Secrets | Long key-like tokens are redacted from tool output before it re-enters the prompt |
 | Learned skills | Provenance is tracked; model-edited skills are protected from blind draft overwrite |
 
 **Important:** a command denylist is not isolation. Do not expose the terminal tool to untrusted input or treat it as a security boundary. Use operating-system isolation and least privilege when running untrusted workloads.
@@ -429,7 +478,7 @@ For a live prompt-cache or edit-tool experiment, see `bench/` and `DD_TAPE_LOG`.
 ├── src/
 │   ├── agent/       # Agent run loop, wire, execution and context integration
 │   ├── context/     # Context engine, tape, epochs and rebase behavior
-│   ├── tools/       # Filesystem, terminal, MCP and tool helpers
+│   ├── tools/       # Filesystem, terminal, delegation, MCP and tool helpers
 │   ├── know/        # Knowledge router, catalogues and ranking
 │   ├── learn/       # Learning journal and skill lifecycle
 │   ├── core/        # Paths, YAML, JSON, config, home resolution, lock-free hand-off
