@@ -27,6 +27,7 @@ CORE := src/core/path.cpp src/core/yaml.cpp src/core/json.cpp src/core/message.c
 SKILLS := src/skills/scanner.cpp src/skills/registry.cpp
 TOOLS := src/tools/registry.cpp src/tools/todo_tool.cpp
 TOOLRUN := src/tools/shell.cpp src/tools/fs_tools.cpp src/tools/path_security.cpp
+DELEGATE := src/tools/delegate_tool.cpp
 AGENT := src/agent/agent.cpp src/agent/chat_stream.cpp
 CONFIG := src/core/config.cpp
 GATEWAY := src/gateway/platform_registry.cpp
@@ -162,8 +163,8 @@ $(BUILD)/ariadne-skills: $(LEARN) $(PROVENANCE) $(CORE) $(KNOWDEP) $(KNOWPOD) $(
 
 # $(HTTPLLM) and $(NET) are here because this binary runs the harness's own transport, not a
 # copy of it: one send policy, one Retry-After parser, one place a 429 is understood.
-$(BUILD)/ariadne-agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET) src/dd_agent_main.cpp
-	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET)) src/dd_agent_main.cpp -lcurl -o $(BUILD)/ariadne-agent
+$(BUILD)/ariadne-agent: $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(INTERRUPT) $(DELEGATE) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET) src/dd_agent_main.cpp
+	$(CXX) $(CXXFLAGS) $(sort $(CORE) $(COREHOME) $(SKILLS) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(INTERRUPT) $(DELEGATE) $(AGENT) $(CONFIG) $(HTTPLLM) $(NET)) src/dd_agent_main.cpp -lcurl -o $(BUILD)/ariadne-agent
 
 # The sidegag: built first and built alone — one translation unit, bare $(CXX), no other
 # target in the tree — then it compiles the harness and installs it. `make install`
@@ -182,8 +183,8 @@ install: $(BUILD)/ariadne-install
 install-all: $(BUILD)/ariadne-install
 	@$< --booted --root . --home $(INSTALL_DIR) --agent --cli
 
-$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
-	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
+$(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(DELEGATE) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(DELEGATE) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne
 
 # The shipped binary itself, under ASan+UBSan. Every sanitizer target so far is a module
 # test: none of them ever runs ariadne's own startup, home resolution, argument parsing,
@@ -195,11 +196,11 @@ $(BUILD)/ariadne: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $
 # process exit and keeps the port. How long the PROCESS takes to leave is a sanitizer cost, not a gateway defect:
 # under host memory pressure it is LeakSanitizer scanning shadow memory at exit (7.8s measured, 2503 leaks at 2.42
 # MB of shadow, ~13.2 GB RSS), which a single ceiling once reported as "ignored SIGTERM".
-$(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
+$(BUILD)/ariadne_asan: $(SERVE) $(GWDEV) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(DELEGATE) $(TOOLLIMITS) $(THINTS) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(ENV) $(wildcard include/dd/*.hpp include/dd/*/*.hpp) src/dd_tui.cpp
 	# -O1 with sanitizers makes GCC trace through libstdc++'s <regex> NFA and report a
 	# maybe-uninitialized inside std::function: a compiler false positive in the standard library,
 	# not a dd bug. The TSan targets already suppress the same diagnostic.
-	$(CXX) $(CXXFLAGS) -fopenmp -O1 -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne_asan
+	$(CXX) $(CXXFLAGS) -fopenmp -O1 -g -Wno-maybe-uninitialized -fsanitize=address,undefined $(sort $(LEARN) $(CORE) $(COREHOME) $(HOMEINIT) $(KNOWDEP) $(TOOLS) $(TOOLRUN) $(DELEGATE) $(TOOLLIMITS) $(THINTS) $(PATCH) $(FUZZY) $(APPLY) $(PROVENANCE) $(ANSI) $(INTERRUPT) $(AGENT) $(CONFIG) $(MCP) $(MCPSCHEMA) $(TSEARCH) $(NET) $(HTTPLLM) $(CONTEXT) $(LIMBO) $(UI) $(SERVE) $(GWDEV) $(ENV)) src/dd_tui.cpp -pthread $(CURL_LIBS) $(TLS_LIBS) -o $(BUILD)/ariadne_asan
 
 # Walks that binary through the paths a module test never touches. Needs a backend for
 # the turn and the serve bind; without one those two probes skip and say so.

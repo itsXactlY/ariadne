@@ -49,6 +49,7 @@
 #include "dd/know/wiring.hpp"
 #include "dd/limbo/level.hpp"
 #include "dd/tools/fs_tools.hpp"
+#include "dd/tools/delegate_tool.hpp"
 #include "dd/tools/interrupt.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
@@ -893,6 +894,11 @@ int main(int argc, char** argv) {
     }
 
     // ---- the registry; every handler reports its run to the scene ----
+    // The run's agent and transport are declared here, before the tools, because
+    // delegate_task is registered with their addresses: a sub-agent copies the
+    // wire from this llm and takes its depth from this agent.
+    dd::agent::Agent agent;
+    dd::agent::HttpLLM llm;
     dd::tools::ToolRegistry reg;
     dd::tools::TodoStore todos;              // one ledger per session, model-owned
     dd::context::PlanLog plan_log;           // ... and its half in the maze: a revision per change
@@ -1269,6 +1275,24 @@ int main(int argc, char** argv) {
         };
         add_tool(e);
     }
+    {
+        // Sub-agents: a child is a fresh agent loop with its own transcript, its own
+        // ledger and this run's wire. Depth ends at kDelegateMaxDepth; the device
+        // scope and the tripwire still veto a child's calls (the parent's gate).
+        ToolEntry e;
+        e.name = "delegate_task";
+        e.schema = dd::tools::delegate_tool_schema();
+        dd::tools::DelegateToolDeps deps;
+        deps.parent = &agent;
+        deps.transport = &llm;
+        deps.workspace_hint = std::filesystem::current_path().string();
+        deps.skills_root = home.skills().string();
+        if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
+            for (const auto& sp : d->arr)
+                if (sp && sp->type == Json::Str) deps.shell_policy.extra_deny.push_back(sp->str);
+        e.handler = dd::tools::make_delegate_tool(deps);
+        add_tool(e);
+    }
 
     std::set<std::string> core_set{"read_file", "write_file", "edit_file", "list_dir", "run_terminal", "job", "find", "skill_load", "skills_list", "todo"};
     for (const auto& n : disabled_tools) core_set.erase(n);
@@ -1328,9 +1352,7 @@ int main(int argc, char** argv) {
     dd::context::Soaker soaker(maze, work + "/soak-spool.jsonl");
 
     // ---- the transport ----
-    dd::agent::Agent agent;
     dd::tools::interrupt::bind(&agent.interrupt_requested);   // the flag Esc and a signal flip
-    dd::agent::HttpLLM llm;
     llm.base_url = base_url;
     llm.model = model;
     llm.api_key = api_key;

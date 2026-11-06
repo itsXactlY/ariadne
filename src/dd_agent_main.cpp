@@ -18,6 +18,7 @@
 #include "dd/core/json.hpp"
 #include "dd/core/message.hpp"
 #include "dd/tools/todo_tool.hpp"
+#include "dd/tools/delegate_tool.hpp"
 #include "dd/tools/fs_tools.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/registry.hpp"
@@ -173,6 +174,23 @@ int main(int argc, char** argv) {
             agent.ephemeral_system_prompt = inj ? *inj : "";
             return r;
         };
+        reg.register_tool(e);
+    }
+
+    {
+        // Sub-agents: the headless run delegates exactly like the screen does —
+        // a child is a fresh agent loop with its own transcript and this run's wire.
+        ToolEntry e;
+        e.name = "delegate_task";
+        e.schema = dd::tools::delegate_tool_schema();
+        dd::tools::DelegateToolDeps deps;
+        deps.parent = &agent;
+        deps.transport = &llm;
+        deps.workspace_hint = std::filesystem::current_path().string();
+        if (const Json* d = cfg.get_list("command_denylist"); d && d->type == Json::Arr)
+            for (const auto& sp : d->arr)
+                if (sp && sp->type == Json::Str) deps.shell_policy.extra_deny.push_back(sp->str);
+        e.handler = dd::tools::make_delegate_tool(deps);
         reg.register_tool(e);
     }
 

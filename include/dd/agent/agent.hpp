@@ -109,6 +109,10 @@ public:
     int api_call_count = 0;
     // Set from another thread (a TUI's Esc); the loop polls it between steps.
     std::atomic<bool> interrupt_requested{false};
+    // How many delegate_task hops deep this agent runs: 0 for a top-level run,
+    // +1 per hop. The delegate tool reads it and registers itself into a child
+    // only while the depth stays under kDelegateMaxDepth (delegate_tool.hpp).
+    int delegate_depth = 0;
 
     // ---- run loop ----
     std::string run(const std::string& user_message);

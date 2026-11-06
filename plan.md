@@ -355,8 +355,9 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 
 **Needs an operator decision** (capability, spend, or a security posture):
 
-- sub-agents — none in C++; `cap_delegate_calls(...,3)` (`agent.cpp:363`) records
-  delegated calls the harness cannot execute. Running them is a new capability.
+- ~~sub-agents~~ — decided and landed (see below): the operator opted in, so
+  `delegate_task` runs children. The gate follows the child; the depth and the
+  width are the code's, not the model's.
 - a fetch/browser tool — until one exists there is no call site for
   `website_policy`, `threat_patterns`, `browser_camofox_state`, `tool_backend_helpers`
 - `ssl_guard` — wiring it would bypass the CA verification all three HTTP clients rely on
@@ -380,6 +381,13 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
 
 **Landed after this plan closed** — kept here so the file and the tree agree:
 
+- sub-agents (`delegate_task`, `src/tools/delegate_tool.cpp`). One call spawns one
+  focused child or up to three concurrently, each a fresh `agent::Agent` with its own
+  transcript, todo ledger and the file/terminal toolset, one hop deeper than its parent,
+  ended at depth 2. The parent's `ToolGate` vetoes a child's calls — a device paired
+  without local tools cannot reach them through a child. PARITY.md carries the shape,
+  the limits and the three divergences from the Python tool; `dd_delegate_tests` proves
+  the caps, the prompt, the two-hop tree and the error paths.
 - `dd::limbo` — the in-process level that spawns or adopts an engine (`2b7017a`). `src/limbo/` and
   `include/dd/limbo/` are tracked, `--limbo [HOST:]PORT` is a flag of the TUI
   (`src/dd_tui.cpp:629`), the level is constructed only when that flag is given

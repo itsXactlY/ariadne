@@ -140,8 +140,21 @@ any one reports a race or a leak. The gateway's replay and kill marks are atomic
 mutex had come back there when replay was added, and this seam deleted it again.
 
 ### Sub-agents
-None in C++. `cap_delegate_calls(...,3)` (`src/agent/agent.cpp:105`, applied at `:363`) caps
-delegated calls the harness cannot execute: they are recorded, never run.
+Landed. `delegate_task` (`src/tools/delegate_tool.cpp`, port of `tools/delegate_tool.py`) is
+registered in the screen and in the headless run: one call spawns one focused child
+(`goal`) or up to **3** concurrently (`tasks`), each a fresh `agent::Agent` with its own
+transcript, its own todo ledger and the file/terminal toolset, run one hop deeper than its
+parent and ended at depth **2** (a child at the ceiling is built without `delegate_task`).
+The child's wire is a copy of the parent's `HttpLLM` config; the report is the Python
+shape minus `tool_trace`: `results[{task_index,status,summary,api_calls,duration_seconds,
+exit_reason,tokens}],total_duration_seconds`. The parent's `ToolGate` vetoes a child's
+calls too, so a device paired without local tools cannot reach them through a child.
+`tests/delegate_tool_test.cpp` (39 checks): depth and width caps, the focused prompt, the
+two-hop tree, batch order and cap, toolset filter, and the error paths. Three deliberate
+divergences from the Python tool: no `tool_trace` (the child's transcript is not returned
+by `Agent::run`); the depth rule keeps the tool out of a depth-2 child's registry instead
+of refusing the call after the fact; a blank child reply is the loop's own blank-retry
+epilogue, so `status:"failed"` is a guard, not a path a scripted child reaches.
 
 ### Calibration — closed: the thresholds are measured, and they moved
 `ariadne-skills replay FILE [--home DIR]` (`src/cli_main.cpp`) now sweeps the offer rule's own levers
