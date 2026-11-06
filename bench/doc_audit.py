@@ -205,7 +205,15 @@ def citations():
         bybase.setdefault(os.path.basename(f), []).append(f)
 
     out = []
+    skipped = []
     for d in docs:
+        if not (ROOT / d).exists():
+            # A listed doc that is not in the tree (the local, untracked plan
+            # files) is nothing to audit — a clean export must not crash on it.
+            # The skip is printed, never silent: a reader has to see what the
+            # count does not cover.
+            skipped.append(d)
+            continue
         body = (ROOT / d).read_text(errors="replace")
         lines = body.split("\n")
         for m in CIT.finditer(body):
@@ -248,6 +256,8 @@ def citations():
                             f"{where}:{lo}-{hi} holds `{snippet.strip()[:66]}` — shares no token with the citing line"))
                 continue
             out.append((d, docln, raw, "OK", f"{where}:{lo}-{hi}"))
+    if skipped:
+        print(f"docs skipped, not in the tree: {', '.join(skipped)}")
     return out
 
 
