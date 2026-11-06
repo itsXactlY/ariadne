@@ -7,3 +7,4 @@ state/
 bench/__pycache__/
 .claude/
 tests/__pycache__/
+BLOG.md
