@@ -246,6 +246,7 @@ def citations():
             if not shares(docline, snippet):
                 out.append((d, docln, raw, "ANCHOR DRIFT",
                             f"{where}:{lo}-{hi} holds `{snippet.strip()[:66]}` — shares no token with the citing line"))
+                continue
             out.append((d, docln, raw, "OK", f"{where}:{lo}-{hi}"))
     return out
 
