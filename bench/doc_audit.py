@@ -33,6 +33,10 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME = {"config.yaml", "brief.md", "report.md", "SKILL.md"}
+GENERATED = {"src/core/default_config.cpp"}   # built from examples/, git-ignored: in a working
+                                              # tree it is audited like any other file; in a
+                                              # clean export it is absent, and the absence is
+                                              # a skip, not a broken citation
 SUFFIX = re.compile(r"^_?test\.cpp$|^.*_test\.cpp$")
 
 CIT = re.compile(r"`([A-Za-z0-9_./-]+\.(?:cpp|hpp|md|yaml|py))(?::(\d+)(?:-(\d+))?)?`")
@@ -240,6 +244,9 @@ def citations():
                     out.append((d, docln, raw, "AMBIGUOUS", "matches " + ", ".join(alt)))
                     continue
                 else:
+                    if raw in GENERATED or base in {os.path.basename(g) for g in GENERATED}:
+                        skipped.append(f"{raw} (generated, not in this tree)")
+                        continue
                     out.append((d, docln, raw, "NO SUCH FILE",
                                 "not in the tree; Python provenance must be written `py:`"))
                     continue
