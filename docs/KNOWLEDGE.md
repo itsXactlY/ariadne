@@ -487,7 +487,7 @@ goes.
 **Never** `~/.daedalus` implicitly. One definition: `core/home.cpp` uses it too. `DAEDALUS_HOME` is the Python
 Daedalus's variable and is not read: `DD_HOME` is the one environment override. The five hard-coded sites go.
 
-**A missing `config.yaml` refuses the start, and `DD_BASE_URL` does not exempt it** (`src/dd_tui.cpp:626`). An
+**A missing `config.yaml` refuses the start, and `DD_BASE_URL` does not exempt it** (`src/dd_tui.cpp:692`). An
 endpoint names a socket, not a setting: it carries no model id, no tool set and no context budget, so the old
 exemption let a start run a half-configured agent — empty model, the 8 built-in tools instead of the configured
 set — and open `learn/` and `logs/` in a home nothing had ever configured, the exact state the refusal keeps out.

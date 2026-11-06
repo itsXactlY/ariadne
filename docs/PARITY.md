@@ -97,8 +97,8 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
-typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1741`) and `Agent::steer_hook`
-(`src/dd_tui.cpp:1811`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1769`) and `Agent::steer_hook`
+(`src/dd_tui.cpp:1835`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 prompt typed earlier enters earlier however the slots wrapped. Overflow is held in a list the key handler
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:419`) — after the tool results are

@@ -114,9 +114,9 @@ fold must keep the per-call flag, or Esc stops one command and cancels the next 
 `dd::tools::interrupt` (`include/dd/tools/interrupt.hpp:19-27`): an atomic pointer to the flag the
 running call watches — `bind`, `current`, `signal`, `clear`, `is_interrupted` — because a global bool
 would fire a turn that has not started yet. The flag itself is `Agent::interrupt_requested`, bound once
-beside the agent (`src/dd_tui.cpp:1355`); a signal reaches it from the handler at
-`src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:435`), a
-turn starts from `interrupt::clear()` (`src/dd_tui.cpp:431`), and every call in flight hands the module's
+beside the agent (`src/dd_tui.cpp:1383`); a signal reaches it from the handler at
+`src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:466`), a
+turn starts from `interrupt::clear()` (`src/dd_tui.cpp:463`), and every call in flight hands the module's
 pointer to the shell as `opt.cancel` (`src/dd_tui.cpp:231`, `src/dd_tui.cpp:247`). What the fold made
 visible: a plain signal had been setting a flag nothing read. The per-call pointer is still what the
 running command holds, which was the constraint.
