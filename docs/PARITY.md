@@ -17,7 +17,7 @@ out of a README.
 | One prompt voice | A single `PromptComposer`, the pod's protocol text is not pasted | `src/dd_tui.cpp:1376-1385` |
 | Verbosity | off / normal / full: card caps lift, arguments unclipped, reasoning card forced open, and a cut result states the tool's dropped count instead of the card's cap. `full` is the instrument, not a bigger card: every call leaves a `Kind::Wire` line — the status that answered and the one that started a re-send, the sends and the wall clock the pauses cost, the prompt and the share of it served from cache, the session totals, the epoch and the tape, the watermarks, the ledger's revision and whether it is anchored, the last rebase decision — plus a second line with the response headers that are not transport plumbing; the status row adds `in`, `cache N (M%)`, `sent N · <waited>`, `http`, `rev`, `rebases`; the engine panel adds `in`/`sends`/`http`/`hdrs` and the tape panel `marks`/`rebase`/`ledger` | `Verbosity` and `Kind::Wire` in `include/dd/ui.hpp:267`, `wire_line` at `src/ui.cpp:1800`, pushed at `src/ui.cpp:1760`, the engine's `in` row at `src/ui.cpp:2581`, the tape's `marks` row at `src/ui.cpp:2658`, `/verbose` + `display.verbose` + env `DD_VERBOSE` |
 | Workflow contract | One `PromptComposer::workflow_contract()` section in the composed prompt: plan before multi-step work, facts from running, done means run-and-looked, skills are guidance | `src/know/prompt.cpp:46-57`, wired at `src/dd_tui.cpp:1378-1379`, `agent.contract` toggles it |
-| Plan ledger | `todo` registered in both binaries; every state is also written to the maze as an append-only revision (`ariadne:plan:<session>:<rev>`, newest wins), adopted back by a fresh start, `/resume` and `/clear`, and carried into the turn's deep recall query; the ledger is handed over as the agent's ephemeral prompt and the tape engine commits it as numbered revisions on the tape — an anchor carrying the list, deltas after it, the list restated whenever no anchor survives a rebase, never in the request's tail — and an emptied ledger retires itself | `src/dd_tui.cpp:1238`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:1501`, `src/ui.cpp:2458`, `src/dd_tui.cpp:1831`, `src/context/engine.cpp:607` |
+| Plan ledger | `todo` registered in both binaries; every state is also written to the maze as an append-only revision (`ariadne:plan:<session>:<rev>`, newest wins), adopted back by a fresh start, `/resume` and `/clear`, and carried into the turn's deep recall query; the ledger is handed over as the agent's ephemeral prompt and the tape engine commits it as numbered revisions on the tape — an anchor carrying the list, deltas after it, the list restated whenever no anchor survives a rebase, never in the request's tail — and an emptied ledger retires itself | `src/dd_tui.cpp:1248`, `src/dd_agent_main.cpp:135`, `src/dd_tui.cpp:904`, `src/ui.cpp:2458`, `src/dd_tui.cpp:1567`, `src/context/engine.cpp:381` |
 | Code colouring, from data | A fence names a language and a file answers it: `GrammarSet::load` walks every skill root for `highlight.yaml`, `code_color` orders the skin's own `colors.code_*` line over the language file over the palette default, a tag no file defines claims no keyword, and only a language the file declares `diff: true` colours a `-` as a deletion | `GrammarSet::load` and `code_color` in `src/ui_grammar.cpp:273-325`, `highlight_row` in `src/ui.cpp:1419-1515`, where patch colouring outside a fence is scoped to a hunk header's claim (`hunk_contract` at `src/ui.cpp:1344-1375`: `@@ -a,b +c,d @@` promises at most b + c rows and an inflated claim is capped), roots at `src/dd_tui.cpp:1201-1218`, defaults shipped as `skills/highlight.yaml` and copied by `installer/ariadne_install.cpp:179-186` |
 | Palette contrast | Every foreground that carries glyphs is measured against the skin's ground by WCAG luminance and lifted toward the pole the ground is not, so a hue keeps its hue and only luminance gives way; a stripe whose ground is the ground it sits on drops the fill before the colour, an achromatic claim falls back to the palette's hue for that kind, and what moved is counted on the status row | `lift` and `Theme::readable` at `src/ui.cpp:746-762`, the load pass at `src/ui.cpp:856-897`, `GrammarSet::reconcile` at `src/ui_grammar.cpp:296-315`, the readout at `src/ui.cpp:2652`, asserted in `tests/ui_test.cpp:1160-1230` |
 
@@ -97,13 +97,13 @@ Asserted in `tests/ui_test.cpp` through `Scene::row_text`; seen live with
 
 ### Mid-turn steering — closed
 Input typed while a turn runs is folded into that turn instead of waiting for it to end. What was
-typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1627`) and `Agent::steer_hook`
-(`src/dd_tui.cpp:1673`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
+typed mid-turn lands in a `core::SlotRing<16>` (`src/dd_tui.cpp:1741`) and `Agent::steer_hook`
+(`src/dd_tui.cpp:1811`) claims it with `claim_all()` — the payloads it pinned, oldest stamp first, so a
 prompt typed earlier enters earlier however the slots wrapped. Overflow is held in a list the key handler
 owns alone, and once anything is held everything typed after it waits too. The
 loop calls at the tool-round boundary (`src/agent/agent.cpp:419`) — after the tool results are
 appended, before the next request — and the prompts it returns ride as user messages.
-`TapeEngine::on_steering` (`src/context/engine.cpp:807`) stamps each one with `steered`, so the
+`TapeEngine::on_steering` (`src/context/engine.cpp:835`) stamps each one with `steered`, so the
 fold is a fact of the tape rather than a widget's guess: the prompt card carries
 `·◈ steered · 1 prompt entered this turn` whether or not the sidebar has room for it; the
 sidebar's history row counts it too, but the tape panel is a vertical budget — cards can eat the
@@ -140,7 +140,7 @@ any one reports a race or a leak. The gateway's replay and kill marks are atomic
 mutex had come back there when replay was added, and this seam deleted it again.
 
 ### Sub-agents
-Landed. `delegate_task` (`src/tools/delegate_tool.cpp`, port of `tools/delegate_tool.py`) is
+Landed. `delegate_task` (`src/tools/delegate_tool.cpp`, port of `py:tools/delegate_tool.py`) is
 registered in the screen and in the headless run: one call spawns one focused child
 (`goal`) or up to **3** concurrently (`tasks`), each a fresh `agent::Agent` with its own
 transcript, its own todo ledger and the file/terminal toolset, run one hop deeper than its
@@ -193,7 +193,7 @@ that second half — a saved call leaves no trace in the log.
 
 The three seams the ledger above claims, as shipped objects. The highlight seam is what the Rust grammar table
 becomes: roots are read once at startup and the pointers travel through the paint chain, so a render pass parses
-nothing (`src/dd_tui.cpp:1219`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:252`). The hand-off seam is the same
+nothing (`src/dd_tui.cpp:1211`, `include/dd/ui.hpp:217`, `include/dd/ui.hpp:252`). The hand-off seam is the same
 object at both ends — a lock-free ring whose capacity is its ceiling (`include/dd/core/slot_ring.hpp:75-108`).
 
 ```mermaid
@@ -267,7 +267,7 @@ classDiagram
 Anchors: `include/dd/ui.hpp:73` (Canvas), `:101` (Frame), `:206-220` (GrammarSet::load), `:234-243` (CodeCtx),
 `:381` (Scene), `:485` (`SlotRing<kEventSlots, Event> q_`), `:502` (LiveBuf), `:521-522` (the paint cache),
 `include/dd/agent/agent.hpp:99` (`steer_hook`), `include/dd/context/engine.hpp:86` (`on_steering`),
-`include/dd/learn/sink.hpp:43`, `include/dd/know/router.hpp:120`, `src/context/maze.cpp:246`
+`include/dd/learn/sink.hpp:43`, `include/dd/know/router.hpp:74`, `src/context/maze.cpp:246`
 (`SlotRing<256, Job>`).
 
 ## Plan
@@ -292,7 +292,7 @@ each step built, tested, then looked at:
    still on the wire rather than whether some revision is: when no anchor
    survives the cut, the list is restated as the epoch's own anchor and the
    deltas that rode with the dropped one go with it
-   (`src/context/engine.cpp:132`, `src/context/engine.cpp:607`). An emptied
+   (`src/context/engine.cpp:132`, `src/context/engine.cpp:630`). An emptied
    ledger retires itself with a revision that says so. Sidebar panel, `/plan`,
    and a count on the status row in verbose.
    *Corrected 2026-10-28:* the premise was wrong on Strata's hybrid models. The
@@ -358,7 +358,7 @@ stream was interrupted and could not be recovered. Please retry the request.` �
 nothing handed out, every time; and a 200 whose body is a JSON error rather than a stream was read as a
 successful call with no words at all. Both are `Transient` now, capped at one more send, because a
 verdict on the request comes back identically the second time (`src/agent/retry.cpp:66`,
-`src/agent/http_llm.cpp:369`, the cap at `src/agent/http_llm.cpp:437`). And the same gate run against a
+`src/agent/http_llm.cpp:511`, the cap at `src/agent/http_llm.cpp:411`). And the same gate run against a
  keep-alive endpoint — no `Content-Length`, no `Connection: close`, socket held 4s past the last byte — which is how
  llama-server, vLLM and OpenAI actually answer: the turn has to end at `data: [DONE]`, not at EOF, so a whole answer
  arrives in under a second on exactly one send, a reader that stops mid-stream counts as `completed`

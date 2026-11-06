@@ -114,10 +114,10 @@ fold must keep the per-call flag, or Esc stops one command and cancels the next 
 `dd::tools::interrupt` (`include/dd/tools/interrupt.hpp:19-27`): an atomic pointer to the flag the
 running call watches — `bind`, `current`, `signal`, `clear`, `is_interrupted` — because a global bool
 would fire a turn that has not started yet. The flag itself is `Agent::interrupt_requested`, bound once
-beside the agent (`src/dd_tui.cpp:1325`); a signal reaches it from the handler at
+beside the agent (`src/dd_tui.cpp:1355`); a signal reaches it from the handler at
 `src/dd_tui.cpp:204-213`, the UI's own `interrupt()` override does the same (`src/dd_tui.cpp:435`), a
 turn starts from `interrupt::clear()` (`src/dd_tui.cpp:431`), and every call in flight hands the module's
-pointer to the shell as `opt.cancel` (`src/dd_tui.cpp:228`, `src/dd_tui.cpp:244`). What the fold made
+pointer to the shell as `opt.cancel` (`src/dd_tui.cpp:231`, `src/dd_tui.cpp:247`). What the fold made
 visible: a plain signal had been setting a flag nothing read. The per-call pointer is still what the
 running command holds, which was the constraint.
 
@@ -192,7 +192,7 @@ The double level is where a run is read rather than watched. At `Verbose`:
 where it enters the prompt, its schema is not touched. `src/dd_tui.cpp:1109`
 masks the tool `description` through
 `dd::agent::mask_secret_tokens(desc->str, SecretPolicy::ServerProse)`;
-`src/dd_tui.cpp:1155` masks the server's `instructions` the same way. The
+`src/dd_tui.cpp:1162` masks the server's `instructions` the same way. The
 `inputSchema` node is deep-copied untouched (`:1105`), so names, enums and
 `required` stay byte-identical — a masked schema would make the model call things
 the server never offered. `SecretPolicy::ServerProse` deliberately drops the
@@ -242,8 +242,8 @@ token cost.
 **Closed.** Steering is a seam, not a widget. `Agent::steer_hook` (`src/agent/agent.cpp:419`)
 runs at the round boundary — after the tool results are appended, before the next request,
 never while a tool call is executing — and what it returns rides as user messages, which
-`TapeEngine::on_steering` (`src/context/engine.cpp:807`) stamps `steered` so the fold is a fact
-of the tape. The count is the turn's (`begin_turn` resets it at `:370`). `/interrupt` keeps its
+`TapeEngine::on_steering` (`src/context/engine.cpp:835`) stamps `steered` so the fold is a fact
+of the tape. The count is the turn's (`begin_turn` resets it at `:406`). `/interrupt` keeps its
 meaning and stays the only mid-call action.
 
 | step | change | proof |
@@ -284,11 +284,11 @@ moves code cannot leave a doc pointing somewhere else.
 
 | what | where | proof |
 |---|---|---|
-| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 98 TUs, `ariadne-agent` 23, `ariadne-skills` 59; closure reaches **211 files** (99 TUs, 112 headers); **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers reached by none, 16 of 34 header-only ports unreached |
-| the README defers the unwired list to the tool | `README.md:457` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :443 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 132** `src/*.cpp` linked into no product binary, **47 of 159** headers unreached, 16 of 34 header-only ports unreached |
+| reachability is derived from the recipes, not remembered | `bench/doc_audit.py` | `ariadne` 100 TUs, `ariadne-agent` 29, `ariadne-skills` 59; closure reaches **216 files** (101 TUs, 115 headers); **33 of 134** `src/*.cpp` linked into no product binary, **47 of 162** headers reached by none, 16 of 35 header-only ports unreached |
+| the README defers the unwired list to the tool | `README.md:750` | rebased 2026-10-29: `README.md` no longer carries a hand-written "Ported but not wired" list — :750 points at `make doc-audit`, which prints the measured list and rejects any name the README claims that the closure reaches. Measured today: **33 of 134** `src/*.cpp` linked into no product binary, **47 of 162** headers unreached, 16 of 35 header-only ports unreached |
 | a citation must point at the thing it describes | `citations()` | every backticked path-and-line is resolved and compared with the paragraph that cites it; an anchor whose lines share no token with the paragraph is `ANCHOR DRIFT`. Python provenance is written `py:` (10 rows in `docs/KNOWLEDGE.md`) so it is never mistaken for a repo path; runtime artifacts beside the binary (`config.yaml`, `brief.md`, `report.md`, `SKILL.md`) are excluded |
 | anchors that waves moved | `docs/PARITY.md` | rules 807-815 → 934-944; prompt voice 783-797 → 908-925; contract wiring 824-833 → 911-917; plan ledger 490, 716-742, 928-944, 1220-1249 → 527, 790-810, 1019-1032, 1177, 1338-1344; steering 1159 → 1195; the README's steering line 95 → 107; `tests/ui_test.cpp:170-173`; thresholds cite the checked-in `examples/ariadne/config.yaml:85-87`, not the generated `default_config.cpp` |
-| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:428`, `src/context/engine.cpp:489`, `src/context/engine.cpp:841`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
+| findings the waves falsified are marked, not left standing | `docs/KNOWLEDGE.md` F1, F4, F8, F10 | F1: retrieval fires at the turn boundary, on a rebase, and now on a steering fold (`src/context/engine.cpp:437`, `src/context/engine.cpp:498`, `src/context/engine.cpp:855`); F4: catalogues are refreshed (`src/dd_tui.cpp:1281-1292`); F8: `build_skills` keys are read (`wiring.cpp:22-29`); F10: home is beside the binary (`home.cpp:106`, `dd_agent_main.cpp:145-150`) |
 
 `make doc-audit`: clean — 187 citations, 0 unresolved or drifting, 0 wiring claims.
 
@@ -302,7 +302,7 @@ so it is engineer-decidable like every other wave:
 | what | where | why it is in scope |
 |---|---|---|
 | 3 mutexes, 8 `lock_guard` sites | `src/agent/retry.cpp` (jitter counter), `src/agent/prompt_cache_boundary.cpp` (x3), `include/dd/gateway/pairing.hpp` + `src/gateway/pairing.cpp` (x4) | the only locks left anywhere, and 10d deleted them. Each was reached only by its own test binary (`tests/agent_retry_test.cpp`, `tests/agent_boundary_test.cpp`, `tests/gateway_pairing_test.cpp`) — single-threaded, so the lock guarded state no second thread reaches |
-| 5 queues | `src/context/maze.cpp:246` (`Job`), `src/context/maze.cpp:247` (`LedgerEntry`), `include/dd/know/router.hpp:120` (`opened_q_`), `include/dd/learn/sink.hpp:43` (`q_`), `include/dd/ui.hpp:504` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:1037`) posted an event per streamed delta, so a long answer was thousands of nodes and thousands of string copies on the hot path. These five lines are where each hand-off lives today: all five are `SlotRing`s |
+| 5 queues | `src/context/maze.cpp:246` (`Job`), `src/context/maze.cpp:247` (`LedgerEntry`), `include/dd/know/router.hpp:135` (`opened_q_`), `include/dd/learn/sink.hpp:43` (`q_`), `include/dd/ui.hpp:504` (`Scene q_`) | Vyukov MPSC allocates one node per push and grows without bound. `Scene::llm_content` (`src/ui.cpp:1037`) posted an event per streamed delta, so a long answer was thousands of nodes and thousands of string copies on the hot path. These five lines are where each hand-off lives today: all five are `SlotRing`s |
 | 6 deques | `src/core/json.cpp:201`, `include/dd/know/working_set.hpp:80`, `include/dd/learn/episode.hpp:53`, `include/dd/ui.hpp:520`, `include/dd/ui.hpp:522`, `include/dd/ui.hpp:528` | not hand-offs — each has exactly one owning thread. They stay; each must name it |
 | `core::park` / `unpark`, 12 sites | `src/know/catalogue.cpp`, `src/know/router.cpp`, `src/learn/sink.cpp`, `src/limbo/spawn.cpp` | a futex wait on an atomic word: no lock, nothing polls. Stays |
 | `fsx::FileLock` x3 + `Ledger::FileLock` | `src/context/maze.cpp:265`, `src/context/maze.cpp:288`, `src/context/maze.cpp:307`, `src/learn/ledger.cpp:47` | cross-process durability on the spool and the ledger, held by the kernel, not by us. Out of scope |
@@ -390,7 +390,7 @@ Done means the invariant is greppable: no lock, no queue, and every deque left s
   the caps, the prompt, the two-hop tree and the error paths.
 - `dd::limbo` — the in-process level that spawns or adopts an engine (`2b7017a`). `src/limbo/` and
   `include/dd/limbo/` are tracked, `--limbo [HOST:]PORT` is a flag of the TUI
-  (`src/dd_tui.cpp:629`), the level is constructed only when that flag is given
+  (`src/dd_tui.cpp:632`), the level is constructed only when that flag is given
   (`src/dd_tui.cpp:762`), and its three suites plus a TSan binary are in `TEST_BINS`/`TSAN_BINS`.
   What stays outside this repository is the engine itself — the llama adaptive base and the strata
   expert-streaming machinery, planned in the limbo repo's own plan. So the scope ruling is narrower

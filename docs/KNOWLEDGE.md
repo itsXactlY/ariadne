@@ -26,7 +26,7 @@ model; we have 498 skills and a 54.6k rebase mark.
 
 | # | Finding | Evidence |
 |---|---|---|
-| F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:428`, `src/context/engine.cpp:489`, `src/context/engine.cpp:841` |
+| F1 | Retrieval fires at the turn boundary (`router_->on(t)`) and on a rebase (`Rebased`); nothing looked anything up after the first tool call until W7 added the steering follow-up (`router_->on(f)`). | `src/context/engine.cpp:437`, `src/context/engine.cpp:498`, `src/context/engine.cpp:855` |
 | F2 | Closed. The system prompt once had three voices that contradicted each other: the preamble ("memory recall is only for past decisions"), the pod's ~860-token `instructions` pasted verbatim ("RECALL FIRST ... NO EXCEPTIONS", "SAVE PER TURN", `session_search`, a tool this harness does not have), and the harness paragraph ("already done ... only for what the block lacks"). Server prose is now masked, never pasted as authority: tool descriptions and the instructions text go through `SecretPolicy::ServerProse`. | `include/dd/know/prompt.hpp:6`, `src/dd_tui.cpp:1109`, `src/dd_tui.cpp:1155`, `src/tools/mcp_client.cpp:296` |
 | F3 | Skill matching is blind and noisy.
 | F4 | Closed: the catalogue is not read once. `ariadne` builds a merged `SkillCatalogue` through `know::make_skill_catalogue` and refreshes it — `Refresher` on a timer, `poke` after a skill is opened — so a pod that was down at launch fills in while the session runs. | `src/dd_tui.cpp:910-915,834-836,856`, `src/know/wiring.cpp` |
