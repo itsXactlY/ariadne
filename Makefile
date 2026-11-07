@@ -48,6 +48,7 @@ INTERRUPT := src/tools/interrupt.cpp
 PROVENANCE := src/tools/skill_provenance.cpp
 DEBUG := src/tools/debug_helpers.cpp
 BUDGET := src/tools/budget_config.cpp
+DELEGATE := src/tools/delegate_tool.cpp   # child harness: the schema + factory the tui/agent link against
 TOOLLIMITS := src/tools/tool_output_limits.cpp
 ENVPT := src/tools/env_passthrough.cpp
 ENV := src/core/env.cpp
