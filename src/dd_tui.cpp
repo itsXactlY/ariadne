@@ -50,6 +50,7 @@
 #include "dd/limbo/level.hpp"
 #include "dd/tools/fs_tools.hpp"
 #include "dd/tools/delegate_tool.hpp"
+#include "dd/tools/vision_tool.hpp"
 #include "dd/tools/interrupt.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/patch_apply.hpp"
@@ -1319,6 +1320,17 @@ int main(int argc, char** argv) {
             for (const auto& sp : d->arr)
                 if (sp && sp->type == Json::Str) deps.shell_policy.extra_deny.push_back(sp->str);
         e.handler = dd::tools::make_delegate_tool(deps);
+        add_tool(e);
+    }
+    {
+        // Native vision: view_image puts pixels on the wire as an image content
+        // part (message_to_json speaks the OpenAI multimodal shape; the server
+        // re-encodes for its own dialect). A text-only model never calls it —
+        // the tool stays registered, the model just does not reach for it.
+        ToolEntry e;
+        e.name = "view_image";
+        e.schema = dd::tools::vision_tool_schema();
+        e.handler = dd::tools::make_vision_tool();
         add_tool(e);
     }
 

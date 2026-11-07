@@ -382,6 +382,28 @@ Json HttpLLM::body(const std::vector<core::Message>& messages, const Json& tools
     // test; every emitter already writes the mid-conversation side channel as a hidden user item,
     // so this costs one scan over an already-valid list.
     std::vector<core::Message> wire = messages;
+
+    // The wire's image window: only the last kImageWindow image-bearing
+    // messages ship their payloads. Older ones keep their text and the image
+    // NAMES (the digest sits in the tool result's text, written there by the
+    // handler) — so an old picture reads as "there was an image here" rather
+    // than silently vanishing, and a long transcript never ships one b64 blob
+    // after another. The file on disk plus its digest is the recovery path:
+    // the agent can re-view_image and get the same digest back.
+    {
+        constexpr int kImageWindow = 4;
+        int kept = 0;
+        for (auto it = wire.rbegin(); it != wire.rend(); ++it) {
+            if (it->images.empty()) continue;
+            if (kept >= kImageWindow) {
+                it->images.clear();
+                it->content += "\n(image payload dropped: outside the wire's last-4-image window)";
+            } else {
+                ++kept;
+            }
+        }
+    }
+
     core::collapse_system_messages(wire);
     Json msgs = core::json_arr();
     for (const auto& m : wire) core::arr_push(msgs, wire_message(m));

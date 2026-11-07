@@ -19,6 +19,7 @@
 #include "dd/core/message.hpp"
 #include "dd/tools/todo_tool.hpp"
 #include "dd/tools/delegate_tool.hpp"
+#include "dd/tools/vision_tool.hpp"
 #include "dd/tools/fs_tools.hpp"
 #include "dd/tools/tool_output_limits.hpp"
 #include "dd/tools/registry.hpp"
@@ -191,6 +192,14 @@ int main(int argc, char** argv) {
             for (const auto& sp : d->arr)
                 if (sp && sp->type == Json::Str) deps.shell_policy.extra_deny.push_back(sp->str);
         e.handler = dd::tools::make_delegate_tool(deps);
+        reg.register_tool(e);
+    }
+    {
+        // Native vision, same shape as the screen's registration.
+        ToolEntry e;
+        e.name = "view_image";
+        e.schema = dd::tools::vision_tool_schema();
+        e.handler = dd::tools::make_vision_tool();
         reg.register_tool(e);
     }
 

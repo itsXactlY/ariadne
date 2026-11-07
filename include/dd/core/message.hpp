@@ -15,6 +15,17 @@
 namespace dd {
 namespace core {
 
+// One image riding a message on the wire. The payload is base64 with the
+// container it came from named; the digest is the sha256 of the RAW bytes,
+// so the transcript can name an image it no longer carries and a re-read of
+// the same file is the same digest (the text side of the tool result keeps
+// that name even when the wire pruned the payload).
+struct ImageRef {
+    std::string digest;  // sha256 hex of the raw bytes
+    std::string mime;    // image/jpeg, image/png, image/gif, image/webp
+    std::string b64;     // base64 of the raw bytes (the payload the wire ships)
+};
+
 struct ToolCall {
     std::string id;          // call id (deterministic when provider omits it)
     std::string name;        // function.name
@@ -25,6 +36,7 @@ struct Message {
     std::string role;                 // system|user|assistant|tool
     std::string content;              // may be empty
     std::vector<ToolCall> tool_calls; // assistant only
+    std::vector<ImageRef> images;     // images that ride this message on the wire
     std::string tool_call_id;         // tool-result only: answers this call
     std::string name;                 // optional
     std::string finish_reason;        // assistant: "tool_calls"|"stop"|...
@@ -51,6 +63,13 @@ Message message_from_json(const Json& j);
 // becomes the head. Returns how many messages were merged away (0 = the list was already valid,
 // which is the normal case and costs one scan).
 std::size_t collapse_system_messages(std::vector<Message>& msgs);
+
+// Lift the [[IMAGE <sha256> <mime> <base64>]] payloads a tool result embeds
+// onto the message (where message_to_json ships them as image parts) and cut
+// them out of the text, so token accounting, the tape and compression stay
+// text-honest: the transcript keeps only the handler's sentence — path, size,
+// digest — and the digest is the recovery path back to the file.
+void extract_tool_images(Message& m);
 
 }  // namespace core
 }  // namespace dd

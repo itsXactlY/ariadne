@@ -135,6 +135,7 @@ std::string get_budget_warning(int api_call_count, int max_iterations,
     return "";
 }
 
+
 // ---- execute_tool_calls (run_agent.py:8880) ----
 // Every call of the assistant message gets exactly one result: run, refused by the gate, or cancelled by an interrupt
 // (the calls not yet started when the flag is set). A call that has started finishes.
@@ -207,6 +208,7 @@ void Agent::execute_tool_calls(const core::Message& assistant, std::vector<core:
         tm.role = "tool";
         tm.content = results[i];
         tm.tool_call_id = calls[i].id;
+        core::extract_tool_images(tm);
         messages.push_back(tm);
         if (step_hook) step_hook(tm);
     }
@@ -442,3 +444,4 @@ std::string Agent::run_loop(const std::string& user_message, bool& interrupted) 
 
 }  // namespace agent
 }  // namespace dd
+
